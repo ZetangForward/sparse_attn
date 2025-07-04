@@ -190,3 +190,214 @@ def find_blocks_chunked(
 
     return mask
 
+
+# coding=utf-8
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 ByteDance and/or its affiliates.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in this library. It has been modified from its
+# original forms to accommodate minor architectural differences compared
+# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import math
+from typing import List, Optional, Tuple, Union
+
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint
+from torch.nn import CrossEntropyLoss
+from transformers.cache_utils import Cache
+from transformers.modeling_outputs import (
+    CausalLMOutputWithPast,
+)
+from transformers.models.llama.modeling_llama import (
+    _CONFIG_FOR_DOC,
+    LLAMA_INPUTS_DOCSTRING,
+)
+from transformers.utils import (
+    add_start_docstrings_to_model_forward,
+    replace_return_docstrings,
+)
+
+
+@add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
+@replace_return_docstrings(
+    output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+)
+def llama_causal_model_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+) -> Union[Tuple, CausalLMOutputWithPast]:
+    r"""
+    Args:
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+            config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+    Returns:
+
+    Example:
+
+    ```python
+    >>> from transformers import AutoTokenizer, LlamaForCausalLM
+
+    >>> model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
+    >>> tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
+
+    >>> prompt = "Hey, are you conscious? Can you talk to me?"
+    >>> inputs = tokenizer(prompt, return_tensors="pt")
+
+    >>> # Generate
+    >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+    >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+    ```"""
+    output_attentions = (
+        output_attentions
+        if output_attentions is not None
+        else self.config.output_attentions
+    )
+    output_hidden_states = (
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
+    )
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+        cache_position=cache_position,
+    )
+
+    hidden_states = outputs[0]
+    if self.config.pretraining_tp > 1:
+        lm_head_slices = self.lm_head.weight.split(
+            self.vocab_size // self.config.pretraining_tp, dim=0
+        )
+        logits = [
+            F.linear(hidden_states, lm_head_slices[i])
+            for i in range(self.config.pretraining_tp)
+        ]
+        logits = torch.cat(logits, dim=-1)
+    else:
+        logits = self.lm_head(hidden_states[:, -1:, :])
+    logits = logits.float()
+
+    loss = None
+    if labels is not None:
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        # Flatten the tokens
+        loss_fct = CrossEntropyLoss()
+        shift_logits = shift_logits.view(-1, self.config.vocab_size)
+        shift_labels = shift_labels.view(-1)
+        # Enable model parallelism
+        shift_labels = shift_labels.to(shift_logits.device)
+        loss = loss_fct(shift_logits, shift_labels)
+
+    if not return_dict:
+        output = (logits,) + outputs[1:]
+        return (loss,) + output if loss is not None else output
+
+    return CausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+    )
+
+
+
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 ByteDance and/or its affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import torch
+import torch.nn.functional as F
+
+
+def llama_mlp_forward(self, x):
+    if self.config.pretraining_tp > 1:
+        slice = self.intermediate_size // self.config.pretraining_tp
+        gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
+        up_proj_slices = self.up_proj.weight.split(slice, dim=0)
+        down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+
+        gate_proj = torch.cat(
+            [
+                F.linear(x, gate_proj_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ],
+            dim=-1,
+        )
+        up_proj = torch.cat(
+            [F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)],
+            dim=-1,
+        )
+
+        intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
+        down_proj = [
+            F.linear(intermediate_states[i], down_proj_slices[i])
+            for i in range(self.config.pretraining_tp)
+        ]
+        down_proj = sum(down_proj)
+    else:
+
+        def inner_mlp_forward(xx):
+            return self.down_proj(self.act_fn(self.gate_proj(xx)) * self.up_proj(xx))
+
+        batch_size, seq_len, hidden_dim = x.shape
+        chunk_size = 32768
+        down_proj = torch.empty_like(x)
+        for b in range(batch_size):
+            for i in range(0, seq_len, chunk_size):
+                down_proj[b : b + 1, i : i + chunk_size] = inner_mlp_forward(
+                    x[b : b + 1, i : i + chunk_size]
+                )
+    return down_proj

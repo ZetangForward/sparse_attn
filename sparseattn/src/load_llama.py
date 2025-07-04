@@ -289,7 +289,7 @@ def load_model(fastprefillconfig=FastPrefillConfig(),name_or_path=""):
     if "llama" in name_or_path.lower():
         import types
         import functools
-        from sparseattn.src.causal_model_forward import (
+        from utils.causal_model_forward import (
             llama_causal_model_forward,
         )
         # multiple gpus inference using Accelerate
@@ -299,7 +299,7 @@ def load_model(fastprefillconfig=FastPrefillConfig(),name_or_path=""):
             )
         else:
             model.forward = types.MethodType(llama_causal_model_forward, model)
-        from sparseattn.src.llama_mlp_forward import llama_mlp_forward
+        from utils.llama_mlp_forward import llama_mlp_forward
         from transformers.models.llama.modeling_llama import (
     LlamaMLP,
 )
