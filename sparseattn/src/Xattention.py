@@ -209,14 +209,14 @@ def flat_group_gemm_fuse_reshape_kernel(Q, K, Out,
               HEAD_DIM: tl.constexpr,  
               BLOCK_M: tl.constexpr,  
               BLOCK_N: tl.constexpr,
-              is_caual: tl.constexpr,
+              is_causal: tl.constexpr,
               ):
     block_m = tl.program_id(0).to(tl.int64)
     block_n = tl.program_id(1).to(tl.int64)
     batch_id = tl.program_id(2).to(tl.int64) // H
     head_id = tl.program_id(2).to(tl.int64) % H
 
-    if is_caual:
+    if is_causal:
         if chunk_start + (block_m + 1) * BLOCK_M <= block_n * BLOCK_N:
             return
 
@@ -335,8 +335,11 @@ def flat_group_gemm_fuse_reshape(query_states, key_states, stride, chunk_start, 
     assert (key_states.shape[3] == head_dim)
 
     output = torch.empty((batch_size, num_heads, q_len // stride, kv_len // stride), dtype=query_states.dtype, device=query_states.device)
-    BLOCK_M = 128
-    BLOCK_N = 128
+    # BLOCK_M = 128
+    # BLOCK_N = 128
+    # H20
+    BLOCK_M = 64
+    BLOCK_N = 64
     assert (q_len % (stride * BLOCK_M) == 0)
     assert (kv_len % (stride * BLOCK_N) == 0)
 
@@ -707,8 +710,8 @@ def Xattention_prefill(
         approx_simple_mask = approx_simple_mask.to(query_states.device)
 
     ####################
-    assert block_size == 128
-    assert batch_size == 1
+    # assert block_size == 128
+    # assert batch_size == 1
     query_states = query_states.transpose(1, 2).view(q_len, num_heads, head_dim)
     key_states = key_states.transpose(1, 2).view(k_len, num_heads, head_dim)
     value_states = value_states.transpose(1, 2).view(k_len, num_heads, head_dim)

@@ -57,6 +57,31 @@ SparseAttn is a high-performance sparse attention library designed specifically 
 - **📈 Scalability**: Support for various scales from small to ultra-large models
 - **🔒 Numerical Stability**: Carefully designed numerical computation for training stability
 
+## 📁 Project Structure
+
+```
+SparseAttn/
+├── sparseattn/              # Main package
+│   ├── __init__.py          # Package initialization
+│   └── src/                 # Core source code
+│       ├── __init__.py      # Source package initialization
+│       ├── Xattention.py    # Xattention implementation
+│       ├── Flexprefill.py   # FlexPrefill implementation
+│       ├── Minference.py    # Minference implementation
+│       ├── Fullprefill.py   # FullPrefill implementation
+│       ├── load_llama.py    # LLaMA model loading utilities
+│       └── utils.py         # Utility functions
+├── config/                  # Configuration files
+│   └── xattn_config.json    # Default configuration
+├── examples/                # Example usage scripts
+├── tests/                   # Unit tests
+├── docs/                    # Documentation
+├── third_party/             # Third-party dependencies
+├── requirements.txt         # Python dependencies
+├── pyproject.toml           # Package configuration
+└── README.md                # This file
+```
+
 ## 🚀 Quick Start
 
 ### 📋 Requirements
@@ -74,6 +99,10 @@ git clone https://github.com/qqtang-code/SparseAttn.git
 cd SparseAttn
 
 # Install dependencies
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 -f https://mirrors.aliyun.com/pytorch-wheels/cu124
+pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.5/
+git clone https://gitee.com/codingQQT/Block-Sparse-Attention.git
+cd Block-Sparse-Attention && CUDA_HOME=/usr/local/cuda-12.4/ python setup.py install
 pip install -r requirements.txt
 
 # Install SparseAttn
@@ -151,90 +180,103 @@ Create configuration file `config/xattn_config.json`:
 
 ## 📚 API Documentation
 
-### Core Functions
+### Xattention
 
-#### `Xattention_prefill()`
-Core implementation of adaptive sparse attention
+Xattention provides adaptive sparse attention computation based on thresholding.
 
-**Parameters:**
-- `query_states` (torch.Tensor): Query tensor [batch, heads, seq_len, head_dim]
-- `key_states` (torch.Tensor): Key tensor
-- `value_states` (torch.Tensor): Value tensor
-- `threshold` (float): Sparsification threshold (0.0-1.0)
-- `causal` (bool): Whether to use causal mask
+```python
+def Xattention_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    threshold: float = 0.95,
+    causal: bool = True
+) -> torch.Tensor
+```
 
-**Returns:**
-- `torch.Tensor`: Attention output tensor
+Parameters:
+- `query_states`: Query tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: Key tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: Value tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `threshold`: Sparsification threshold (default: 0.95)
+- `causal`: Whether to apply causal mask (default: True)
 
-#### `Flexprefill_prefill()`
-Flexible prefill with block-wise sparse attention
+Returns:
+- Output tensor of the same shape as input tensors
 
-**Parameters:**
-- `query_states` (torch.Tensor): Query tensor
-- `key_states` (torch.Tensor): Key tensor
-- `value_states` (torch.Tensor): Value tensor
-- `block_size` (int): Size of each attention block
-- `sparsity_ratio` (float): Ratio of blocks to keep
+### FlexPrefill
 
-**Returns:**
-- `torch.Tensor`: Attention output tensor
+FlexPrefill implements block-level sparse attention with adaptive block selection.
 
-#### `Minference_prefill()`
-Lightweight inference with vertical and diagonal sparsity
+```python
+def Flexprefill_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    block_size: int = 64,
+    sparsity_ratio: float = 0.2
+) -> torch.Tensor
+```
 
-**Parameters:**
-- `query_states` (torch.Tensor): Query tensor
-- `key_states` (torch.Tensor): Key tensor
-- `value_states` (torch.Tensor): Value tensor
-- `vertical_size` (int): Size of vertical attention window
-- `slash_size` (int): Size of diagonal attention window
-- `adaptive_budget` (float): Adaptive budget ratio
+Parameters:
+- `query_states`: Query tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: Key tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: Value tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `block_size`: Size of each block (default: 64)
+- `sparsity_ratio`: Ratio of blocks to select (default: 0.2)
 
-**Returns:**
-- `torch.Tensor`: Attention output tensor
+Returns:
+- Output tensor of the same shape as input tensors
 
-#### `Full_prefill()`
-Complete prefill using FlashInfer backend
+### Minference
 
-**Parameters:**
-- `query_states` (torch.Tensor): Query tensor
-- `key_states` (torch.Tensor): Key tensor
-- `value_states` (torch.Tensor): Value tensor
-- `causal` (bool): Whether to use causal attention
-- `attention_mask` (torch.Tensor): Custom attention mask
+Minference provides lightweight inference with vertical and diagonal sparsity patterns.
 
-**Returns:**
-- `torch.Tensor`: Attention output tensor
+```python
+def Minference_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    vertical_size: int = 1000,
+    slash_size: int = 6096,
+    adaptive_budget: float = None
+) -> torch.Tensor
+```
 
-### Utility Functions
+Parameters:
+- `query_states`: Query tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: Key tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: Value tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `vertical_size`: Size of vertical sparse pattern (default: 1000)
+- `slash_size`: Size of diagonal sparse pattern (default: 6096)
+- `adaptive_budget`: Adaptive budget ratio (default: None)
 
-#### `create_causal_mask()`
-Create causal attention mask for transformer models
+Returns:
+- Output tensor of the same shape as input tensors
 
-**Parameters:**
-- `batch_size` (int): Number of sequences in batch
-- `head_num` (int): Number of attention heads
-- `block_size` (int): Size of each block
-- `block_num` (int): Total number of blocks
-- `divide_block_num` (int): Block index for causality application
+### FullPrefill
 
-**Returns:**
-- `torch.Tensor`: Causal mask tensor
+FullPrefill provides a complete prefill implementation based on FlashInfer.
 
-#### `find_blocks_chunked()`
-Find and select relevant attention blocks based on threshold
+```python
+def Full_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    causal: bool = True,
+    attention_mask = None
+) -> torch.Tensor
+```
 
-**Parameters:**
-- `input_tensor` (torch.Tensor): Input attention tensor
-- `current_index` (int): Current position index
-- `threshold` (float): Selection threshold
-- `num_to_choose` (int): Number of blocks to select
-- `decoding` (bool): Whether in decoding mode
-- `mode` (str): Selection mode ("both", "left", "right")
-- `causal` (bool): Whether to apply causal constraints
+Parameters:
+- `query_states`: Query tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: Key tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: Value tensor of shape [batch_size, num_heads, seq_len, head_dim]
+- `causal`: Whether to apply causal mask (default: True)
+- `attention_mask`: Custom attention mask (default: None)
 
-**Returns:**
-- Selected block indices and attention patterns
+Returns:
+- Output tensor of the same shape as input tensors
 
 ## 📊 Benchmarks
 
@@ -292,18 +334,25 @@ The library provides seamless integration with popular language models:
 
 ```
 SparseAttn/
-├── sparseattn/                 # Main source code
-│   ├── src/
-│   │   ├── Xattention.py      # Adaptive sparse attention
-│   │   ├── Flexprefill.py     # Flexible prefill strategy
-│   │   ├── Minference.py      # Lightweight inference
-│   │   ├── Fullprefill.py     # Complete prefill
-│   │   ├── load_llama.py      # LLaMA model integration
-│   │   └── utils.py           # Utility functions
-├── config/                     # Configuration files
-attention modules
-├── requirements.txt           # Dependencies
-└── pyproject.toml            # Project configuration
+├── sparseattn/              # Main package
+│   ├── __init__.py          # Package initialization
+│   └── src/                 # Core source code
+│       ├── __init__.py      # Source package initialization
+│       ├── Xattention.py    # Xattention implementation
+│       ├── Flexprefill.py   # FlexPrefill implementation
+│       ├── Minference.py    # Minference implementation
+│       ├── Fullprefill.py   # FullPrefill implementation
+│       ├── load_llama.py    # LLaMA model loading utilities
+│       └── utils.py         # Utility functions
+├── config/                  # Configuration files
+│   └── xattn_config.json    # Default configuration
+├── examples/                # Example usage scripts
+├── tests/                   # Unit tests
+├── docs/                    # Documentation
+├── third_party/             # Third-party dependencies
+├── requirements.txt         # Python dependencies
+├── pyproject.toml           # Package configuration
+└── README.md                # This file
 ```
 
 ### Adding New Sparsification Strategies

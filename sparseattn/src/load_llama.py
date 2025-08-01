@@ -6,7 +6,7 @@ from transformers.models.llama.modeling_llama import (
     logging,
 )
 
-from sparseattn.threshold.llama_threshold import llama_fuse_16,llama_fuse_8,llama_fuse_4
+from sparseattn.threshold.llama_thrshold import llama_fuse_16,llama_fuse_8,llama_fuse_4
 import flashinfer
 import time
 try:
@@ -14,15 +14,15 @@ try:
 except:
     print("Xattention Import Fail")
 try:
-    from xattn.src.Minference import Minference_prefill
+    from sparseattn.src.Minference import Minference_prefill
 except:
     print("Minference Prefill Import Fail")
 try:
-    from xattn.src.Fullprefill import Full_prefill
+    from sparseattn.src.Fullprefill import Full_prefill
 except:
     print("Full Prefill Import Fail")
 try:
-    from xattn.src.Flexprefill import Flexprefill_prefill
+    from sparseattn.src.Flexprefill import Flexprefill_prefill
 except:
     print("Flex Prefill Import Fail")
 from sparseattn.src.utils import *
