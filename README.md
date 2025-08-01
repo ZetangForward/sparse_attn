@@ -409,14 +409,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 If you use SparseAttn in your research, please consider citing:
 
-```bibtex
-@misc{sparseattn2025,
-  title={SparseAttn: High-Performance Sparse Attention for Large Language Models},
-  author={SparseAttn Team},
-  year={2025},
-  howpublished={\url{https://github.com/qqtang-code/SparseAttn}}
-}
-```
+
 
 ## 📞 Contact
 
