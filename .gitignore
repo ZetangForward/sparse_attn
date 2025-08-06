@@ -1,7 +1,9 @@
 slurm_log/
 models/
 slurm_scripts/
-third_party/
+third_party/Block-Sparse-Attention/*
+third_party/MInference/*
+third_party/*.whl
 checkpoints/
 
 eval/RULER/docker

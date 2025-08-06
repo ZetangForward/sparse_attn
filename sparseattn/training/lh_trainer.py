@@ -29,6 +29,7 @@ from datasets import Dataset
 import transformers
 from transformers import Trainer as HFTrainer
 from transformers.trainer import _get_fsdp_ckpt_kwargs
+import inspect
 # Integrations must be imported before ML frameworks:
 
 import numpy as np
@@ -342,41 +343,40 @@ class Trainer(HFTrainer):
         return inputs
 
     def compute_loss(
-        self, 
-        model, 
-        inputs, 
-        return_outputs=False, 
-        num_items_in_batch=None, 
-        return_output_and_metrics=False
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+        return_output_and_metrics=False,
     ):
         """
         How the loss is computed by Trainer. By default, all models return the loss in the first element.
 
         Subclass and override for custom behavior.
         """
-
         inputs = self.get_sequence_parallel_inputs(inputs)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step)
 
         try:
             outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
         except Exception as e:
-            error_str = "-"*30
+            error_str = "-" * 30
             for k, v in inputs.items():
                 if isinstance(v, torch.Tensor):
                     error_str += f"\n{k}:\n{v.cpu().tolist()}\n    ({v.dtype}, {v.shape})\n"
-            error_str += "-"*30
+            error_str += "-" * 30
             print(error_str[:256], flush=True)
             raise e
 
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-        
+
         if getattr(self.args, "token_scaled_loss", False):
-            seq_parallel_world_size = (dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1)
-            if seq_parallel_world_size > 1: # Sequence parallelism
-                device_num_valid_tokens = (inputs["shifted_labels"] != -100).sum().float() # Should be on the device already
+            seq_parallel_world_size = dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1
+            if seq_parallel_world_size > 1:  # Sequence parallelism
+                device_num_valid_tokens = (inputs["shifted_labels"] != -100).sum().float()
             else:
-                device_num_valid_tokens = (inputs["labels"] != -100).sum().float() # Should be on the device already
+                device_num_valid_tokens = (inputs["labels"] != -100).sum().float()
 
             avg_device_num_valid_tokens = torch.mean(self.accelerator.gather(device_num_valid_tokens)).item()
             if not hasattr(self.state, "count_step_for_num_valid_tokens"):
@@ -384,16 +384,22 @@ class Trainer(HFTrainer):
                 self.state.avg_num_valid_tokens_per_device = avg_device_num_valid_tokens
             else:
                 self.state.count_step_for_num_valid_tokens += 1
-                steps = self.state.count_step_for_num_valid_tokens 
-                self.state.avg_num_valid_tokens_per_device = self.state.avg_num_valid_tokens_per_device * ((steps - 1) / steps) + avg_device_num_valid_tokens / steps # moving avg
+                steps = self.state.count_step_for_num_valid_tokens
+                self.state.avg_num_valid_tokens_per_device = (
+                    self.state.avg_num_valid_tokens_per_device * ((steps - 1) / steps) + avg_device_num_valid_tokens / steps
+                )  # moving avg
             lm_loss = lm_loss / self.state.avg_num_valid_tokens_per_device
-        
+
         reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-1]
         loss = lm_loss + reg_loss
 
         if self.log_loss and self.accelerator.is_main_process:
             model_sparsity = outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
-            logger.info(f"@ {self.state.global_step} | Loss: {loss:.4f} | LM Loss: {lm_loss:.4f} | Reg Loss: {reg_loss:.4f} | Target Sparsity: {target_sparsity:.4f} | Model Sparsity: {model_sparsity:.4f}")
+            logger.info(
+                f"@ {self.state.global_step} | Loss: {loss:.4f} | LM Loss: {lm_loss:.4f} | "
+                f"Reg Loss: {reg_loss:.4f} | Target Sparsity: {target_sparsity:.4f} | "
+                f"Model Sparsity: {model_sparsity:.4f}"
+            )
 
         if return_output_and_metrics:
             # shifted_labels = inputs["labels"][:,1:].contiguous()
@@ -401,17 +407,21 @@ class Trainer(HFTrainer):
             # correct = (outputs.logits[:,:-1].argmax(-1) == shifted_labels).float()
             # correct[~valid_mask] = 0.0
             # acc = correct.sum(dim=-1) / valid_mask.float().sum(dim=-1)
-
-            model_sparsity = outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
+            model_sparsity_val = outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
+            
             metrics = {
-                "lm_loss": lm_loss.detach() if isinstance(lm_loss, torch.Tensor) else lm_loss,
-                "reg_loss": reg_loss.detach() if isinstance(reg_loss, torch.Tensor) else reg_loss,
-                "loss": loss.detach() if isinstance(loss, torch.Tensor) else loss,
-                "target_sparsity": target_sparsity,
-                "model_sparsity": model_sparsity,
+                "lm_loss": lm_loss.detach().item() if isinstance(lm_loss, torch.Tensor) else float(lm_loss),
+                "reg_loss": reg_loss.detach().item() if isinstance(reg_loss, torch.Tensor) else float(reg_loss),
+                "loss": loss.detach().item() if isinstance(loss, torch.Tensor) else float(loss),
+                "target_sparsity": float(target_sparsity),
+                "model_sparsity": float(model_sparsity_val),
+                "step": self.state.global_step, 
             }
 
+            self.log(metrics)
+
             return (loss, outputs, metrics)
+
         if return_outputs:
             return (loss, outputs)
         else:
@@ -978,9 +988,12 @@ class Trainer(HFTrainer):
 
     def _save_checkpoint(self, model, trial, metrics=None):
         # A wrapper around the original _save_checkpoint function to save streaming dataset state
-
         # Save model checkpoint
-        super()._save_checkpoint(model, trial, metrics=metrics)
+        sig = inspect.signature(super()._save_checkpoint)
+        if 'metrics' in sig.parameters:
+            super()._save_checkpoint(model, trial, metrics=metrics)
+        else:
+            super()._save_checkpoint(model, trial)
 
         # Get the path
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
