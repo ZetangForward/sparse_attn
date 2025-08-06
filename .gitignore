@@ -2,6 +2,7 @@ slurm_log/
 models/
 slurm_scripts/
 third_party/
+checkpoints/
 
 eval/RULER/docker
 eval/RULER/scripts/benchmark_root
