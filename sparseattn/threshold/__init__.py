@@ -1,5 +1,10 @@
 """
-Sparse Attention Library - Core Implementation Modules
+Sparse Attention Library - Threshold-based Sparse Attention Modules
+===================================================================
+
+Threshold-based sparse attention implementations for LLaMA models:
+
+- llama_thrshold: Threshold-based fusion methods for different precision levels (16, 8, 4)
 """
 
 from .llama_thrshold import (    

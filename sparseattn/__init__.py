@@ -9,6 +9,7 @@ Modules:
 - FlexPrefill: Block-level sparse attention with adaptive selection
 - Minference: Lightweight inference with vertical and diagonal sparsity
 - FullPrefill: Complete prefill implementation based on FlashInfer
+- Training: Sparse fine-tuning support for language models
 """
 
 from .src import (
@@ -23,7 +24,11 @@ from .threshold import (
     llama_fuse_8,
     llama_fuse_4,
 )
-    
+
+# Training modules
+from .training import (
+    DistributedAttention
+)
 
 __all__ = [
     "Xattention_prefill",
@@ -32,7 +37,8 @@ __all__ = [
     "Full_prefill",
     "llama_fuse_16",
     "llama_fuse_8",
-    "llama_fuse_4"
+    "llama_fuse_4",
+    "DistributedAttention"
 ]
 
 __version__ = "0.1.0"

@@ -37,34 +37,69 @@ SparseAttn 是一个专为大规模语言模型设计的高性能稀疏注意力
 #### 2. **FlexPrefill** - 灵活预填充策略
 - 块级稀疏注意力
 - 自适应块选择算法
-- 支持长序列高效处理
+- 长序列的高效处理
 
 #### 3. **Minference** - 轻量级推理
-- 垂直和斜线稀疏模式
+- 垂直和对角稀疏模式
 - 自适应预算分配
-- 针对推理阶段优化
+- 专为推理阶段优化
 
 #### 4. **FullPrefill** - 完整预填充
 - 基于 FlashInfer 的高效实现
 - 支持自定义掩码
-- 内存和计算双重优化
+- 内存和计算的双重优化
+
+### 🏋️ 训练支持
+- **分布式训练**: 支持多GPU和多节点训练，具备序列并行能力
+- **稀疏微调**: 支持在语言模型上训练稀疏注意力模式的方法
+- **灵活稀疏控制**: 可配置的稀疏比例和模式
+- **掩码学习**: 专门训练注意力掩码，支持独立学习率
+- **正则化技术**: 支持多种稀疏性控制的正则化方法
 
 ### 🔧 技术特性
 
 - **🎯 智能稀疏化**: 基于注意力分数的自适应稀疏模式
 - **⚡ GPU 加速**: 完全基于 CUDA 的高性能实现
 - **🧩 模块化设计**: 可插拔的注意力组件
-- **📈 可扩展性**: 支持从小模型到超大模型的各种规模
-- **🔒 数值稳定**: 精心设计的数值计算确保训练稳定性
+- **📈 可扩展性**: 支持从小型到超大型模型的各种规模
+- **🔒 数值稳定性**: 精心设计的数值计算，确保训练稳定性
+
+## 📁 项目结构
+
+```
+SparseAttn/
+├── sparseattn/              # 主包
+│   ├── __init__.py          # 包初始化
+│   ├── training/            # 稀疏注意力训练模块
+│   ├── threshold/           # 基于阈值的稀疏注意力模块
+│   ├── run_scripts/         # 训练和评估脚本
+│   └── src/                 # 核心源代码
+│       ├── __init__.py      # 源包初始化
+│       ├── Xattention.py    # Xattention 实现
+│       ├── Flexprefill.py   # FlexPrefill 实现
+│       ├── Minference.py    # Minference 实现
+│       ├── Fullprefill.py   # FullPrefill 实现
+│       ├── load_llama.py    # LLaMA 模型加载工具
+│       └── utils.py         # 工具函数
+├── config/                  # 配置文件
+│   └── xattn_config.json    # 默认配置
+├── examples/                # 示例使用脚本
+├── tests/                   # 单元测试
+├── docs/                    # 文档
+├── third_party/             # 第三方依赖
+├── requirements.txt         # Python 依赖
+├── pyproject.toml           # 包配置
+└── README.md                # 说明文件
+```
 
 ## 🚀 快速开始
 
 ### 📋 环境要求
 
-- Python 3.8+
-- PyTorch 2.0+
-- CUDA 11.8+
-- GPU 内存 8GB+
+- Python 3.10+
+- PyTorch 2.4+
+- CUDA 12.4+
+- GPU 内存 24GB+
 
 ### ⚙️ 安装
 
@@ -74,13 +109,17 @@ git clone https://github.com/qqtang-code/SparseAttn.git
 cd SparseAttn
 
 # 安装依赖
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 -f https://mirrors.aliyun.com/pytorch-wheels/cu124
+pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.5/
+git clone https://gitee.com/codingQQT/Block-Sparse-Attention.git
+cd Block-Sparse-Attention && CUDA_HOME=/usr/local/cuda-12.4/ python setup.py install
 pip install -r requirements.txt
 
 # 安装 SparseAttn
 pip install -e .
 ```
 
-### 🎬 基础使用
+### 🎬 基本使用
 
 #### 1. Xattention 稀疏注意力
 
@@ -115,7 +154,7 @@ output = Flexprefill_prefill(
     key_states=key,
     value_states=value,
     block_size=64,      # 块大小
-    sparsity_ratio=0.2  # 稀疏度
+    sparsity_ratio=0.2  # 稀疏比例
 )
 ```
 
@@ -130,14 +169,40 @@ output = Minference_prefill(
     key_states=key,
     value_states=value,
     vertical_size=1000,    # 垂直稀疏大小
-    slash_size=6096,       # 斜线稀疏大小
+    slash_size=6096,       # 对角稀疏大小
     adaptive_budget=0.1    # 自适应预算
 )
 ```
 
+### 🏋️ 训练使用
+
+#### 1. 稀疏微调
+
+```bash
+# 使用学习的掩码和权重进行微调
+cd sparseattn/run_scripts
+bash prulong_masksandweights.sh
+
+# 使用固定掩码进行微调（仅训练权重）
+bash prulong_masksonly.sh
+
+# 标准SFT基线
+bash sft.sh
+```
+
+#### 2. 训练配置
+
+关键训练参数：
+- `start_head_sparsity`: 注意力头的初始稀疏比例
+- `end_head_sparsity`: 注意力头的最终稀疏比例
+- `mask_learning_rate`: 掩码参数的学习率
+- `reg_learning_rate`: 正则化参数的学习率
+- `sparsity_warmup_ratio`: 稀疏预热的训练步数比例
+- `seq_parallel_size`: 分布式训练的序列并行度
+
 ### 🔧 配置文件
 
-创建配置文件 `config/xattn_config.json`：
+创建配置文件 `config/xattn_config.json`:
 
 ```json
 {
@@ -151,126 +216,100 @@ output = Minference_prefill(
 
 ## 📚 API 文档
 
-### 核心函数
+### Xattention
 
-#### `Xattention_prefill()`
-自适应稀疏注意力的核心实现
+Xattention 提供基于阈值的自适应稀疏注意力计算。
 
-**参数:**
-- `query_states` (torch.Tensor): 查询张量 [batch, heads, seq_len, head_dim]
-- `key_states` (torch.Tensor): 键张量
-- `value_states` (torch.Tensor): 值张量
-- `threshold` (float): 稀疏化阈值 (0.0-1.0)
-- `causal` (bool): 是否使用因果掩码
-
-**返回:**
-- `torch.Tensor`: 注意力输出张量
-
-### 工具函数
-
-#### `create_causal_mask()`
-创建因果注意力掩码
-
-#### `find_blocks_chunked()`
-基于阈值选择相关注意力块
-
-## 📊 性能基准
-
-### 内存使用对比
-
-| 模型大小 | 序列长度 | 标准注意力 | SparseAttn | 内存节省 |
-|---------|----------|-----------|-----------|---------|
-| 7B      | 4K       | 24GB      | 6GB       | 75%     |
-| 13B     | 8K       | 48GB      | 12GB      | 75%     |
-| 70B     | 16K      | 192GB     | 38GB      | 80%     |
-
-### 速度性能
-
-| 操作类型 | 标准实现 | SparseAttn | 加速比 |
-|---------|---------|-----------|-------|
-| 预填充   | 100ms   | 35ms      | 2.8x  |
-| 解码     | 50ms    | 18ms      | 2.7x  |
-
-## 🔬 技术原理
-
-### 稀疏化策略
-
-1. **阈值基稀疏化**: 保留注意力分数高于阈值的连接
-2. **块级稀疏化**: 以块为单位进行稀疏操作
-3. **自适应预算**: 根据序列长度动态调整稀疏度
-
-### 优化技术
-
-- **Triton 内核**: 定制化 GPU 计算内核
-- **内存合并**: 优化内存访问模式
-- **数值稳定**: 改进的 softmax 和归一化计算
-
-## 🛠️ 开发指南
-
-### 项目结构
-
-```
-SparseAttn/
-├── sparseattn/                 # 主要源码
-│   ├── src/
-│   │   ├── Xattention.py      # 自适应稀疏注意力
-│   │   ├── Flexprefill.py     # 灵活预填充
-│   │   ├── Minference.py      # 轻量级推理
-│   │   ├── Fullprefill.py     # 完整预填充
-│   │   ├── load_llama.py      # LLaMA 模型集成
-│   │   └── utils.py           # 工具函数
-├── config/                     # 配置文件
-├── Block-Sparse-Attention/     # 块稀疏注意力
-├── requirements.txt           # 依赖列表
-└── pyproject.toml            # 项目配置
+```python
+def Xattention_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    threshold: float = 0.95,
+    causal: bool = True
+) -> torch.Tensor
 ```
 
-### 添加新的稀疏化策略
+参数:
+- `query_states`: 查询张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: 键张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: 值张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `threshold`: 稀疏化阈值（默认: 0.95）
+- `causal`: 是否应用因果掩码（默认: True）
 
-1. 在 `sparseattn/src/` 下创建新的 Python 文件
-2. 实现稀疏化算法和相应的 Triton 内核
-3. 在 `utils.py` 中添加辅助函数
-4. 编写测试用例
+返回:
+- 与输入张量形状相同的输出张量
 
-## 🤝 贡献指南
+### FlexPrefill
 
-我们欢迎社区贡献！请遵循以下步骤：
+FlexPrefill 实现具有自适应块选择的块级稀疏注意力。
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+```python
+def Flexprefill_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    block_size: int = 64,
+    sparsity_ratio: float = 0.2
+) -> torch.Tensor
+```
 
-### 代码规范
+参数:
+- `query_states`: 查询张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: 键张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: 值张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `block_size`: 每个块的大小（默认: 64）
+- `sparsity_ratio`: 选择的块比例（默认: 0.2）
 
-- 遵循 PEP 8 代码风格
-- 添加适当的文档字符串
-- 编写单元测试
-- 确保向后兼容性
+返回:
+- 与输入张量形状相同的输出张量
 
-## 📄 许可证
+### Minference
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+Minference 提供具有垂直和对角稀疏模式的轻量级推理。
 
-## 🙏 致谢
+```python
+def Minference_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    vertical_size: int = 1000,
+    slash_size: int = 6096,
+    adaptive_budget: float = None
+) -> torch.Tensor
+```
 
-- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - 高效注意力实现的启发
-- [Triton](https://github.com/openai/triton) - GPU 内核开发框架
-- [Transformers](https://github.com/huggingface/transformers) - 模型实现基础
+参数:
+- `query_states`: 查询张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: 键张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: 值张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `vertical_size`: 垂直稀疏模式的大小（默认: 1000）
+- `slash_size`: 对角稀疏模式的大小（默认: 6096）
+- `adaptive_budget`: 自适应预算比例（默认: None）
 
-## 📞 联系我们
+返回:
+- 与输入张量形状相同的输出张量
 
-- 🐛 问题反馈: [GitHub Issues](https://github.com/qqtang-code/SparseAttn/issues)
-- 💬 讨论交流: [GitHub Discussions](https://github.com/qqtang-code/SparseAttn/discussions)
-- 📧 邮箱联系: your-email@example.com
+### FullPrefill
 
----
+FullPrefill 提供基于 FlashInfer 的完整预填充实现。
 
-<div align="center">
+```python
+def Full_prefill(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    causal: bool = True,
+    attention_mask = None
+) -> torch.Tensor
+```
 
-**⭐ 如果这个项目对您有帮助，请给我们一个星标！**
+参数:
+- `query_states`: 查询张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `key_states`: 键张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `value_states`: 值张量，形状为 [batch_size, num_heads, seq_len, head_dim]
+- `causal`: 是否应用因果掩码（默认: True）
+- `attention_mask`: 自定义注意力掩码（默认: None）
 
-Made with ❤️ by the SparseAttn Team
-
-</div>
+返回:
+- 与输入张量形状相同的输出张量

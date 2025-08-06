@@ -7,9 +7,10 @@ Welcome to the SparseAttn documentation!
 1. [Introduction](#introduction)
 2. [Installation](#installation)
 3. [API Reference](#api-reference)
-4. [Examples](#examples)
-5. [Benchmarks](#benchmarks)
-6. [Contributing](#contributing)
+4. [Training Support](#training-support)
+5. [Examples](#examples)
+6. [Benchmarks](#benchmarks)
+7. [Contributing](#contributing)
 
 ## Introduction
 
@@ -53,14 +54,46 @@ Minference provides lightweight inference with vertical and diagonal sparsity pa
 
 FullPrefill provides a complete prefill implementation based on FlashInfer.
 
+## Training Support
+
+SparseAttn includes comprehensive training support for sparse attention mechanisms:
+
+### Distributed Training
+
+The library supports multi-GPU and multi-node training with sequence parallelism through the [DistributedAttention](file:///data/anaconda3/lib/python3.8/site-packages/torch/nn/parallel/distributed.py#L156-L156) module.
+
+### Sparse Fine-tuning
+
+Methods for training sparse attention patterns on language models:
+- Training with learned masks and weights
+- Training with fixed masks (only train weights)
+- Standard SFT baseline
+
+### Flexible Sparsity Control
+
+Configurable sparsity parameters:
+- `start_head_sparsity`: Initial sparsity ratio for attention heads
+- `end_head_sparsity`: Final sparsity ratio for attention heads
+- `mask_learning_rate`: Learning rate for mask parameters
+- `reg_learning_rate`: Learning rate for regularization parameters
+- `sparsity_warmup_ratio`: Ratio of training steps for sparsity warmup
+- `seq_parallel_size`: Sequence parallelism degree for distributed training
+
+### Key Training Modules
+
+1. [lh_trainer.py](file:///data/qqt/project/SparseAttn/sparseattn/training/lh_trainer.py) - Custom trainer with sparse attention support
+2. [distributed_attention.py](file:///data/qqt/project/SparseAttn/sparseattn/training/distributed_attention.py) - Distributed attention implementation
+3. [modeling_flash_llama.py](file:///data/qqt/project/SparseAttn/sparseattn/training/modeling_flash_llama.py) - LLaMA model with flash attention support
+4. [run_scripts/](file:///data/qqt/project/SparseAttn/sparseattn/run_scripts/) - Training and evaluation scripts
+
 ## Examples
 
-See the [examples](../examples/) directory for usage examples.
+Example usage scripts can be found in the [examples/](file:///data/qqt/project/SparseAttn/examples/) directory.
 
 ## Benchmarks
 
-// TODO: Add benchmark results
+Performance benchmarks are available in the main README.
 
 ## Contributing
 
-// TODO: Add contributing guidelines
+Please see the contributing guidelines in the main README.

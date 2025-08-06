@@ -108,7 +108,6 @@ pip install -r requirements.txt
 # Install SparseAttn
 pip install -e .
 ```
-
 ### 🎬 Basic Usage
 
 #### 1. Xattention Sparse Attention
@@ -163,6 +162,32 @@ output = Minference_prefill(
     adaptive_budget=0.1    # Adaptive budget
 )
 ```
+
+### 🏋️ Training Usage
+
+#### 1. Sparse Fine-tuning
+
+```bash
+# Fine-tune with learned masks and weights
+cd sparseattn/run_scripts
+bash prulong_masksandweights.sh
+
+# Fine-tune with fixed masks (only train weights)
+bash prulong_masksonly.sh
+
+# Standard SFT baseline
+bash sft.sh
+```
+
+#### 2. Training Configuration
+
+Key training parameters:
+- `start_head_sparsity`: Initial sparsity ratio for attention heads
+- `end_head_sparsity`: Final sparsity ratio for attention heads
+- `mask_learning_rate`: Learning rate for mask parameters
+- `reg_learning_rate`: Learning rate for regularization parameters
+- `sparsity_warmup_ratio`: Ratio of training steps for sparsity warmup
+- `seq_parallel_size`: Sequence parallelism degree for distributed training
 
 ### 🔧 Configuration File
 
@@ -336,6 +361,9 @@ The library provides seamless integration with popular language models:
 SparseAttn/
 ├── sparseattn/              # Main package
 │   ├── __init__.py          # Package initialization
+│   ├── training/            # Training modules for sparse attention
+│   ├── threshold/           # Threshold-based sparse attention modules
+│   ├── run_scripts/         # Training and evaluation scripts
 │   └── src/                 # Core source code
 │       ├── __init__.py      # Source package initialization
 │       ├── Xattention.py    # Xattention implementation
