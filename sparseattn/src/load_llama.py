@@ -88,7 +88,7 @@ def forward_eval(
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
             Performs a forward pass of the attention layer with optimized prefill mechanisms.
 
@@ -109,10 +109,9 @@ def forward_eval(
             - **kwargs: Additional arguments for flexibility.
 
             Returns:
-            - Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]: 
-            The attention output tensor, attention weights (if enabled), and updated past key-value states.
+            - Tuple[torch.Tensor, Optional[torch.Tensor]]: 
+            The attention output tensor and attention weights (if enabled).
         """
-
         if self.fastprefillconfig.print_detail:
             start_time = time.time()
         bsz, q_len, _ = hidden_states.size()
@@ -121,9 +120,9 @@ def forward_eval(
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim).transpose(1, 2)
         if self.fastprefillconfig.print_detail:
             torch.cuda.synchronize()
             reshape_time = time.time() - start_time
@@ -156,8 +155,8 @@ def forward_eval(
         _, _, q_len, _ = query_states.shape
         decoding = (q_len != k_len and q_len == 1)
         if not decoding:
-            key_states = repeat_kv(key_states, self.num_key_value_groups).to("cuda")
-            value_states = repeat_kv(value_states, self.num_key_value_groups).to("cuda")
+            key_states = repeat_kv(key_states, self.num_key_value_groups if hasattr(self, 'num_key_value_groups') else self.config.num_attention_heads // self.config.num_key_value_heads).to("cuda")
+            value_states = repeat_kv(value_states, self.num_key_value_groups if hasattr(self, 'num_key_value_groups') else self.config.num_attention_heads // self.config.num_key_value_heads).to("cuda")
         if self.fastprefillconfig.print_detail:
             torch.cuda.synchronize()
             past_kv_time = time.time() - start_time
@@ -203,9 +202,9 @@ def forward_eval(
 
         if self.fastprefillconfig.print_detail:
             start_time = time.time()
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+        if attn_output.size() != (bsz, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, q_len, self.head_dim):
             raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f"`attn_output` should be of size {(bsz, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, q_len, self.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -217,8 +216,7 @@ def forward_eval(
             post_attn_time = time.time() - start_time
             print(f"     Post-attention processing took: {post_attn_time:.6f} seconds")
 
-        return attn_output, None, past_key_value
-
+        return attn_output, None
 
 
 class FastPrefillConfig(dict):
@@ -289,9 +287,7 @@ def load_model(fastprefillconfig=FastPrefillConfig(),name_or_path=""):
     if "llama" in name_or_path.lower():
         import types
         import functools
-        from utils.causal_model_forward import (
-            llama_causal_model_forward,
-        )
+        from sparseattn.src.utils import llama_causal_model_forward
         # multiple gpus inference using Accelerate
         if isinstance(model.forward, functools.partial):
             model.forward.__wrapped__ = types.MethodType(
@@ -299,7 +295,7 @@ def load_model(fastprefillconfig=FastPrefillConfig(),name_or_path=""):
             )
         else:
             model.forward = types.MethodType(llama_causal_model_forward, model)
-        from utils.llama_mlp_forward import llama_mlp_forward
+        from sparseattn.src.utils import llama_mlp_forward
         from transformers.models.llama.modeling_llama import (
     LlamaMLP,
 )
@@ -325,7 +321,7 @@ def forward_to_save(
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
             Performs a forward pass of the attention layer with optimized prefill mechanisms.
 
@@ -346,8 +342,8 @@ def forward_to_save(
             - **kwargs: Additional arguments for flexibility.
 
             Returns:
-            - Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]: 
-            The attention output tensor, attention weights (if enabled), and updated past key-value states.
+            - Tuple[torch.Tensor, Optional[torch.Tensor]]: 
+            The attention output tensor and attention weights (if enabled).
         """
 
         if self.fastprefillconfig.print_detail:
@@ -358,9 +354,9 @@ def forward_to_save(
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim).transpose(1, 2)
         if self.fastprefillconfig.print_detail:
             torch.cuda.synchronize()
             reshape_time = time.time() - start_time
@@ -393,8 +389,8 @@ def forward_to_save(
         _, _, q_len, _ = query_states.shape
         decoding = (q_len != k_len and q_len == 1)
         if not decoding:
-            key_states = repeat_kv(key_states, self.num_key_value_groups).to("cuda")
-            value_states = repeat_kv(value_states, self.num_key_value_groups).to("cuda")
+            key_states = repeat_kv(key_states, self.num_key_value_groups if hasattr(self, 'num_key_value_groups') else self.config.num_attention_heads // self.config.num_key_value_heads).to("cuda")
+            value_states = repeat_kv(value_states, self.num_key_value_groups if hasattr(self, 'num_key_value_groups') else self.config.num_attention_heads // self.config.num_key_value_heads).to("cuda")
         if self.fastprefillconfig.print_detail:
             torch.cuda.synchronize()
             past_kv_time = time.time() - start_time
@@ -456,9 +452,9 @@ def forward_to_save(
 
         if self.fastprefillconfig.print_detail:
             start_time = time.time()
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+        if attn_output.size() != (bsz, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, q_len, self.head_dim):
             raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f"`attn_output` should be of size {(bsz, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, q_len, self.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -470,7 +466,7 @@ def forward_to_save(
             post_attn_time = time.time() - start_time
             print(f"     Post-attention processing took: {post_attn_time:.6f} seconds")
 
-        return attn_output, None, past_key_value
+        return attn_output, None
 
 def load_fake_model(layer_to_save,target_len,name_or_path=""):
     model = LlamaForCausalLM.from_pretrained(
