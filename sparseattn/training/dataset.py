@@ -9,7 +9,7 @@ from itertools import islice
 from typing import Dict, Any, List, Tuple
 from collections.abc import Iterator
 
-from training.script_arguments import TrainingArguments
+from .script_arguments import TrainingArguments
 
 from dataclasses import dataclass, field
 from typing import Optional, List

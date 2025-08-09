@@ -13,11 +13,11 @@ from transformers import (
     set_seed,
 )
 
-from training.modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
-from training.lh_trainer import Trainer
-from training.dataset import build_dataset, DataCollator, DataArguments
-from training.dataset import logger as dataset_logger
-from training.script_arguments import ScriptArguments, TrainingArguments
+from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
+from .lh_trainer import Trainer
+from .dataset import build_dataset, DataCollator, DataArguments
+from .dataset import logger as dataset_logger
+from .script_arguments import ScriptArguments, TrainingArguments
 
 
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy

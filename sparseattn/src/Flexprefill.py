@@ -1073,7 +1073,7 @@ def Flexprefill_prefill(
     k: torch.Tensor,
     v: torch.Tensor,
     gamma: float = 0.9,
-    tau: float = 0,
+    tau: float = 0.1,
     min_budget: int = None,
     max_budget: int = None,
     gqa_interleave: bool = False,

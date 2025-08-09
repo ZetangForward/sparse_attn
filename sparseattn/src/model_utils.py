@@ -864,12 +864,16 @@ class HFModel(LLM):
                 "recent_size": kwargs["duoattn_sliding"],
             }
         elif "fastprefill_metric" in kwargs and kwargs["fastprefill_metric"] is not None:
+            logger.warning(f"Using XAttention or FlexPrefill patch for evaluation!")
             fastprefillconfig=FastPrefillConfig(
                 threshold=kwargs.get("fastprefill_threshold", 0.95),
                 print_detail=kwargs.get("fastprefill_print_detail", False),
                 stride=kwargs.get("fastprefill_stride", 16),
                 metric=kwargs.get("fastprefill_metric", "xattn"),
             )
+            method = kwargs["fastprefill_metric"]
+            # fastprefillconfig info
+            logger.warning(f"{method} is running!!!")
             if "llama" in model_name.lower():
                 import types
                 import functools
@@ -891,10 +895,11 @@ class HFModel(LLM):
             for layer in self.model.model.layers:
                 layer.self_attn.fastprefillconfig = fastprefillconfig
                 layer.self_attn.forward = forward_eval.__get__(layer.self_attn)
+            self.chunk_prefilling = kwargs["duoattn_chunk_prefilling"] if kwargs["duoattn_chunk_prefilling"] is not None else None
         elif "minference" in kwargs and kwargs["minference"] is not None:
             from minference import MInference
             from minference.modules.kvcompression import method_to_cache_obj
-            print(f"**** USING {kwargs['minference']} for evaluation! ****")
+            logger.warning(f"**** USING {kwargs['minference']} for evaluation! ****")
             if kwargs["minference"] == "minference":
                 logger.warning("Using MInference for evaluation!")
                 minference = MInference(attn_type="minference", model_name=kwargs["minference_model_name"])
@@ -960,6 +965,7 @@ class HFModel(LLM):
             
             self.chunk_prefilling = kwargs.get("minference_chunk_prefilling", None)
         else:
+            logger.warning("Using vanilla HF model for evaluation!")
             self.chunk_prefilling = None
 
         if kwargs.get("torch_compile", True):
@@ -1249,6 +1255,13 @@ def load_LLM(args):
             kwargs["duoattn_flipping"] = args.duoattn_flipping
             kwargs["attn_implementation"] = "eager"
         
+        if hasattr(args, 'fastprefill_metric') and args.fastprefill_metric is not None:
+            kwargs["fastprefill_metric"] = args.fastprefill_metric
+            kwargs["fastprefill_threshold"] = args.fastprefill_threshold
+            kwargs["fastprefill_print_detail"] = args.fastprefill_print_detail
+            kwargs["fastprefill_stride"] = args.fastprefill_stride
+            kwargs["duoattn_chunk_prefilling"] = args.duoattn_chunk_prefilling
+
         if args.minference is not None:
             kwargs["minference"] = args.minference  
             kwargs["minference_model_name"] = args.minference_model_name

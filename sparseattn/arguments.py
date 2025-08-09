@@ -16,7 +16,7 @@ def parse_arguments():
     parser.add_argument("--tag", type=str, default="eval", help="tag to add to the output file")
 
     # model setting
-    parser.add_argument("--model_name_or_path", type=str, default=None)
+    parser.add_argument("--model_name_or_path", type=str, default=None, help="path to the model or model name")
     parser.add_argument("--tokenizer_name", type=str, default=None)
     parser.add_argument("--use_vllm", action="store_true", help="whether to use vllm engine")
 
