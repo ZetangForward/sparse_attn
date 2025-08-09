@@ -12,10 +12,14 @@ eval/RULER/scripts/data/synthetic/json/*json
 .ipynb_checkpoints/
 eval/RULER/__pycache__/
 *.jsonl
+*.json
 eval/RULER/.vscode/
 *.out
+*.html
 
-data/*
+sparseattn/eval/outputs/
+output/*
+sparseattn/eval/data/
 
 sparseattn/scripts/
 output/*
