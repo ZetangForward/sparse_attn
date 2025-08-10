@@ -6,7 +6,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-GPUS=(4)
+GPUS=(6)
 NUM_GPUS=${#GPUS[@]}
 
 export OUTLINES_CACHE_DIR="/data/qqt/project/PruLong-main/tmp/outlines"
@@ -23,7 +23,14 @@ PREFILL=32768
 
 # 所有任务列表
 TASKS=(
+    "longproc_addon/configs/html_to_tsv.yaml"
+    "longproc_addon/configs/travel_planning.yaml"
+    "configs/recall.yaml"
     "configs/rerank.yaml"
+    "configs/rag.yaml"
+    "configs/icl.yaml"
+    "configs/longqa.yaml"
+    "configs/summ.yaml"
 )
 
 OUTPUT_LOGS_DIR="joblog-flex"
@@ -90,7 +97,13 @@ worker() {
         exit 1
     }' SIGINT SIGTERM
 
+    echo "🔍 [GPU $gpu_id] Starting worker with ${#tasks[@]} tasks"
     for TASK_PATH in "${tasks[@]}"; do
+        echo "🔍 [GPU $gpu_id] Checking task: $TASK_PATH"
+        echo "🔍 [GPU $gpu_id] Current working directory: $(pwd)"
+        echo "🔍 [GPU $gpu_id] Does file exist? $(test -f "$TASK_PATH" && echo 'Yes' || echo 'No')"
+        echo "🔍 [GPU $gpu_id] Full path would be: $(pwd)/$TASK_PATH"
+        
         if [ ! -f "$TASK_PATH" ]; then
             echo "❌ [GPU $gpu_id] Task config not found: $TASK_PATH"
             continue
@@ -172,7 +185,7 @@ done
 echo "⏳ Waiting for all workers to complete... (Press Ctrl+C to interrupt)"
 
 while [ ${#WORKER_PIDS[@]} -gt 0 ]; do
-    NEW_PIDS=()
+    declare -a NEW_PIDS=()
     for pid in "${WORKER_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             NEW_PIDS+=("$pid")  # 仍在运行

@@ -112,7 +112,7 @@ def load_qa(dataset, path, demo_path, max_test_samples=None, popularity_threshol
         if len(sample['ctxs']) > 0:
             passage_text = "\n\n".join([passage_template.format(**c) for c in sample['ctxs']])
         return {"demos": demo_text, "context": passage_text, "answer": sample["answers"]}
-    data = data.map(update)
+    data = data.map(update, num_proc=16)
 
     return {
         "data": data,
@@ -140,7 +140,7 @@ def load_json_kv(path, shots, max_test_samples=None, seed=42):
     data = data.map(lambda x: {
         "demos": "\n\n".join([demo_template.format(key=key, value=" "+value) for key, value in x["demos"][:shots]]) + ("\n\n" if shots > 0 else ""),
         "k": x["num_kvs"],
-    })
+    }, num_proc=16)
 
     if max_test_samples is not None:
         data = data.shuffle(seed=seed).select(range(min(max_test_samples, len(data))))
@@ -196,7 +196,7 @@ def load_narrativeqa(dataset, shots=0, max_samples=None, seed=42):
     
     # filter for a specific length
     tokenizer = AutoTokenizer.from_pretrained("/data/hf_models/Llama-2-7b-hf")
-    data = data.map(lambda x: {'input_length': len(tokenizer(x['document']['text'])['input_ids'])})
+    data = data.map(lambda x: {'input_length': len(tokenizer(x['document']['text'])['input_ids'])}, num_proc=16)
     data = data.filter(lambda x: x['input_length'] > 131072) # this should yield 1330 samples
     data = data.remove_columns("input_length")
     
@@ -205,7 +205,7 @@ def load_narrativeqa(dataset, shots=0, max_samples=None, seed=42):
         "question": example["question"]["text"],
         "answer": [ex["text"] for ex in example["answers"]],
         "demo": "" if shots == 0 else "For example:\n\n" + "\n\n".join([f"Question: {ex['question']['text']}\nAnswer: {ex['answers'][0]['text']}" for ex in all_data["train"].shuffle().select(range(shots))]) + "\n\nNow, use the following story to answer the question:\n\n"
-    }, remove_columns=["document", "answers"])
+    }, remove_columns=["document", "answers"], num_proc=16)
 
     data = filter_length(data, 131072, "context")
     data = truncate_llama2(dataset, data)
@@ -259,7 +259,7 @@ def load_qasper(dataset, path=None, shots=0, max_samples=None, seed=42):
             "answer": example["outputs"],
             # "demo": "" if shots == 0 else "\n\n".join(["[Text omitted]\n\nQuestion: {}\nAnswer: {}".format(ex['input'][:ex['input'].index('\n\n')].strip(), ex['outputs'][0]) for ex in train_data.shuffle().select(range(shots))]) + "\n\n"
             "demo": "" if shots == 0 else "For example:\n\n" + "\n\n".join(["Question: {}\nAnswer: {}".format(ex['input'][:ex['input'].index('\n\n')].strip(), ex['outputs'][0]) for ex in train_data.shuffle().select(range(shots))]) + "\n\nNow, use the following article to answer the question:\n\n"
-        }, remove_columns=["outputs"])
+        }, remove_columns=["outputs"], num_proc=16)
         data = truncate_llama2(dataset, data)
 
     return {"data": data, "prompt_template": prompt_template, "user_template": user_template, "system_template": system_template}
@@ -279,7 +279,7 @@ def load_multi_lexsum(dataset, path=None, shots=0, max_samples=None, seed=42):
         "demo": "" if shots == 0 else "Example summaries:\n\n" + "\n\n".join(["Summary: {}".format(ex["summary/short"]) for ex in train_data.shuffle().select(range(shots))]) + "\n\nNow, write a summary of the following legal documents.\n",
         "answer": x["summary/short"],
         "question": "",
-    })
+    },num_proc=16)
 
     test_data = all_data["validation"]
     test_data = filter_length(test_data, 65536, "context")
@@ -372,7 +372,7 @@ def load_msmarco_rerank(path, demo_path=None, max_test_samples=None, shots=0, se
         qrel = [[c['id'], str(c['label'])] for c in sample["ctxs"]]
         return {"context": passage_text, "question": sample["query"], "demos": demo_text, "answer": gold_ranking, "qrel": qrel}
 
-    data = data.map(lambda x: update(x, demos), remove_columns=["query", "ctxs"])
+    data = data.map(lambda x: update(x, demos), remove_columns=["query", "ctxs"], num_proc=16)
 
     def post_process(output, example):
         parsed_pred = parse_rankings(output["output"])
@@ -603,7 +603,7 @@ def load_ruler(dataset, path, max_test_samples=None, seed=42):
             "example": example["example"] + "\n\n" if "example" in example and example["example"] != "" else "",
             "answer": example["answer"] if "answer" in example else example['outputs'],
         }
-    data = data.map(process_example)
+    data = data.map(process_example, num_proc=16)
 
     def post_process(output, example):
         # we don't do any parsing since we are only checking for substring exact match
@@ -651,7 +651,7 @@ def load_alce(dataset, path, demo_path, shots=0):
         if shots > 0:
             demo_text += "\n\n\n"
         return {"context": context, "demo_text": demo_text, "instruction": instruction}
-    data = data.map(preprocess_example)
+    data = data.map(preprocess_example, num_proc=16)
 
     return {
         "data": data,
@@ -718,7 +718,7 @@ def load_infbench(dataset, shots=0, max_test_samples=None, seed=42):
         return update
 
     data = truncate_llama2(dataset, data)
-    all_data = data.map(process_example)
+    all_data = data.map(process_example, num_proc=16)
 
     data = all_data
     if max_test_samples is not None:
@@ -736,7 +736,7 @@ def load_infbench(dataset, shots=0, max_test_samples=None, seed=42):
             demo = "\n\n".join([f"[story text]\nSummary: {x['answer'][0].strip()}" for x in demos])
         return {"demo": f"For example:\n\n{demo}\n\nNow, read the following story:\n\n"}
     if shots > 0:
-        data = data.map(add_demos)
+        data = data.map(add_demos, num_proc=16)
 
     # all samples are already longer than 65536 tokens, but this is just a sanity step
     data = filter_length(data, 65536, "context") 

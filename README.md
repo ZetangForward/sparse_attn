@@ -63,14 +63,34 @@ SparseAttn is a high-performance sparse attention library designed specifically 
 SparseAttn/
 ├── sparseattn/              # Main package
 │   ├── __init__.py          # Package initialization
-│   └── src/                 # Core source code
-│       ├── __init__.py      # Source package initialization
-│       ├── Xattention.py    # Xattention implementation
-│       ├── Flexprefill.py   # FlexPrefill implementation
-│       ├── Minference.py    # Minference implementation
-│       ├── Fullprefill.py   # FullPrefill implementation
-│       ├── load_llama.py    # LLaMA model loading utilities
-│       └── utils.py         # Utility functions
+│   ├── arguments.py         # Global arguments and configurations
+│   ├── src/                 # Core source code
+│   │   ├── __init__.py      # Source package initialization
+│   │   ├── Xattention.py    # Xattention implementation
+│   │   ├── Flexprefill.py   # FlexPrefill implementation
+│   │   ├── Minference.py    # Minference implementation
+│   │   ├── Fullprefill.py   # FullPrefill implementation
+│   │   ├── duoattention.py  # DuoAttention implementation
+│   │   ├── model_utils.py   # Model utilities
+│   │   └── utils.py         # Utility functions
+│   ├── threshold/           # Threshold-based modules
+│   │   ├── __init__.py      # Threshold package initialization
+│   │   └── llama_thrshold.py # Llama threshold implementations
+│   ├── training/            # Training modules for sparse attention
+│   │   ├── __init__.py      # Training package initialization
+│   │   ├── attention_mask.py # Attention mask utilities
+│   │   ├── dataset.py       # Dataset handling for training
+│   │   ├── distributed_attention.py # Distributed attention implementation
+│   │   ├── lh_train_language_model.py # Language model training
+│   │   ├── lh_trainer.py    # Main trainer implementation
+│   │   ├── modeling_flash_llama.py # Llama model with flash attention
+│   │   └── script_arguments.py # Training script arguments
+│   ├── run_scripts/         # Training and evaluation scripts
+│   │   ├── prulong_masksandweights.sh # Pruning script for masks and weights
+│   │   ├── prulong_masksonly.sh # Pruning script for masks only
+│   │   └── sft.sh           # Supervised fine-tuning script
+│   ├── eval/                # Evaluation modules and scripts
+│   └── __init__.py          # Package initialization
 ├── config/                  # Configuration files
 │   └── xattn_config.json    # Default configuration
 ├── examples/                # Example usage scripts

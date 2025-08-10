@@ -69,27 +69,44 @@ SparseAttn 是一个专为大规模语言模型设计的高性能稀疏注意力
 ```
 SparseAttn/
 ├── sparseattn/              # 主包
-│   ├── __init__.py          # 包初始化
+│   ├── __init__.py          # 包初始化文件
+│   ├── arguments.py         # 全局参数和配置
+│   ├── src/                 # 核心源代码
+│   │   ├── __init__.py      # 源代码包初始化文件
+│   │   ├── Xattention.py    # Xattention 实现
+│   │   ├── Flexprefill.py   # FlexPrefill 实现
+│   │   ├── Minference.py    # Minference 实现
+│   │   ├── Fullprefill.py   # FullPrefill 实现
+│   │   ├── duoattention.py  # DuoAttention 实现
+│   │   ├── model_utils.py   # 模型工具函数
+│   │   └── utils.py         # 工具函数
+│   ├── threshold/           # 基于阈值的模块
+│   │   ├── __init__.py      # 阈值包初始化文件
+│   │   └── llama_thrshold.py # Llama 阈值实现
 │   ├── training/            # 稀疏注意力训练模块
-│   ├── threshold/           # 基于阈值的稀疏注意力模块
+│   │   ├── __init__.py      # 训练包初始化文件
+│   │   ├── attention_mask.py # 注意力掩码工具
+│   │   ├── dataset.py       # 训练数据集处理
+│   │   ├── distributed_attention.py # 分布式注意力实现
+│   │   ├── lh_train_language_model.py # 语言模型训练
+│   │   ├── lh_trainer.py    # 主训练器实现
+│   │   ├── modeling_flash_llama.py # 带有flash attention的Llama模型
+│   │   └── script_arguments.py # 训练脚本参数
 │   ├── run_scripts/         # 训练和评估脚本
-│   └── src/                 # 核心源代码
-│       ├── __init__.py      # 源包初始化
-│       ├── Xattention.py    # Xattention 实现
-│       ├── Flexprefill.py   # FlexPrefill 实现
-│       ├── Minference.py    # Minference 实现
-│       ├── Fullprefill.py   # FullPrefill 实现
-│       ├── load_llama.py    # LLaMA 模型加载工具
-│       └── utils.py         # 工具函数
+│   │   ├── prulong_masksandweights.sh # 用于掩码和权重剪枝的脚本
+│   │   ├── prulong_masksonly.sh # 仅用于掩码剪枝的脚本
+│   │   └── sft.sh           # 监督微调脚本
+│   ├── eval/                # 评估模块和脚本
+│   └── __init__.py          # 包初始化文件
 ├── config/                  # 配置文件
 │   └── xattn_config.json    # 默认配置
-├── examples/                # 示例使用脚本
+├── examples/                # 示例脚本
 ├── tests/                   # 单元测试
 ├── docs/                    # 文档
 ├── third_party/             # 第三方依赖
 ├── requirements.txt         # Python 依赖
 ├── pyproject.toml           # 包配置
-└── README.md                # 说明文件
+└── README_ZH.md             # 本文档
 ```
 
 ## 🚀 快速开始
@@ -103,7 +120,7 @@ SparseAttn/
 
 ### ⚙️ 安装
 
-```bash
+```
 # 克隆仓库
 git clone https://github.com/qqtang-code/SparseAttn.git
 cd SparseAttn
@@ -123,7 +140,7 @@ pip install -e .
 
 #### 1. Xattention 稀疏注意力
 
-```python
+```
 from sparseattn.src.Xattention import Xattention_prefill
 import torch
 
@@ -145,7 +162,7 @@ output = Xattention_prefill(
 
 #### 2. FlexPrefill 块稀疏注意力
 
-```python
+```
 from sparseattn.src.Flexprefill import Flexprefill_prefill
 
 # 块稀疏注意力计算
@@ -160,7 +177,7 @@ output = Flexprefill_prefill(
 
 #### 3. Minference 轻量级推理
 
-```python
+```
 from sparseattn.src.Minference import Minference_prefill
 
 # 轻量级推理模式
@@ -178,7 +195,7 @@ output = Minference_prefill(
 
 #### 1. 稀疏微调
 
-```bash
+```
 # 使用学习的掩码和权重进行微调
 cd sparseattn/run_scripts
 bash prulong_masksandweights.sh
@@ -204,7 +221,7 @@ bash sft.sh
 
 创建配置文件 `config/xattn_config.json`:
 
-```json
+```
 {
     "stride": 16,
     "threshold": 0.95,
@@ -220,7 +237,7 @@ bash sft.sh
 
 Xattention 提供基于阈值的自适应稀疏注意力计算。
 
-```python
+```
 def Xattention_prefill(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -244,7 +261,7 @@ def Xattention_prefill(
 
 FlexPrefill 实现具有自适应块选择的块级稀疏注意力。
 
-```python
+```
 def Flexprefill_prefill(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -268,7 +285,7 @@ def Flexprefill_prefill(
 
 Minference 提供具有垂直和对角稀疏模式的轻量级推理。
 
-```python
+```
 def Minference_prefill(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -294,7 +311,7 @@ def Minference_prefill(
 
 FullPrefill 提供基于 FlashInfer 的完整预填充实现。
 
-```python
+```
 def Full_prefill(
     query_states: torch.Tensor,
     key_states: torch.Tensor,

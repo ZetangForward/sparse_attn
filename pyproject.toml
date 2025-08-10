@@ -16,7 +16,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     "torch>=2.4.0",
@@ -40,6 +42,7 @@ docs = [
 Homepage = "https://github.com/qqtang-code/SparseAttn"
 Repository = "https://github.com/qqtang-code/SparseAttn"
 Documentation = "https://github.com/qqtang-code/SparseAttn/blob/main/README.md"
+"Bug Tracker" = "https://github.com/qqtang-code/SparseAttn/issues"
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
@@ -47,3 +50,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["sparseattn", "sparseattn.*"]
+
+[tool.setuptools.package-data]
+sparseattn = ["py.typed", "*.so", "*.dll", "*.dylib"]

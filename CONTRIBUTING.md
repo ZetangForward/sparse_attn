@@ -19,7 +19,7 @@ Thank you for your interest in contributing to SparseAttn! This document provide
 3. Create a new branch for your feature or bug fix
 
 ```bash
-git clone https://github.com/your-username/SparseAttn.git
+git clone https://github.com/qqtang-code/SparseAttn.git
 cd SparseAttn
 git checkout -b feature/your-feature-name
 ```

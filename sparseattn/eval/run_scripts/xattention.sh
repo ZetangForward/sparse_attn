@@ -6,7 +6,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-GPUS=(2 3 4)
+GPUS=(0 1 2 3 4 5 6 7)
 NUM_GPUS=${#GPUS[@]}
 
 export OUTLINES_CACHE_DIR="/data/qqt/project/PruLong-main/tmp/outlines"
@@ -31,7 +31,6 @@ TASKS=(
     "configs/icl.yaml"
     "configs/longqa.yaml"
     "configs/summ.yaml"
-    "configs/niah.yaml"
 )
 
 OUTPUT_LOGS_DIR="joblog-xattn"
@@ -118,7 +117,7 @@ worker() {
         fi
 
         MASKS="$MODEL/masks_sp${SPARSITY}.tsv"
-        EXTRA="--no_torch_compile --duoattn_chunk_prefilling $PREFILL --fastprefill_metric $METRIC"
+        EXTRA="--no_torch_compile --fastprefill_metric $METRIC"
         CMD="python eval.py --config $TASK_PATH --model_name_or_path $MODEL --tokenizer_name $MODEL --output_dir $OUT_DIR $EXTRA"
 
         echo "🚀 [GPU $gpu_id] Running: $TASK_NAME"

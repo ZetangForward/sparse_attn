@@ -23,7 +23,14 @@ PREFILL=32768
 
 # 所有任务列表
 TASKS=(
-    "configs/sub_icl.yaml"
+    "longproc_addon/configs/html_to_tsv.yaml"
+    "longproc_addon/configs/travel_planning.yaml"
+    "configs/recall.yaml"
+    "configs/rerank.yaml"
+    "configs/rag.yaml"
+    "configs/icl.yaml"
+    "configs/longqa.yaml"
+    "configs/summ.yaml"
 )
 
 # 输出和日志目录
