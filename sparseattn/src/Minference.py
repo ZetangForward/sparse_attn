@@ -6,7 +6,6 @@ from minference.ops.pit_sparse_flash_attention_v2 import (
 )
 
 
-
 last_q = 64
 arange = torch.arange(last_q, device="cuda")
 LAST_Q_MASK = arange[None, None, :, None] >= arange[None, None, None, :]
@@ -23,7 +22,6 @@ def sum_all_diagonal_matrix(mat: torch.tensor):
     )  # Change the strides
     sum_diags = torch.sum(mat_strided, 2)  # Sums the resulting matrix's columns
     return sum_diags[:, :, 1:]
-
 
 
 def Minference_prefill(
@@ -48,8 +46,9 @@ def Minference_prefill(
         v = value_states[:, head, :, :].unsqueeze(1).to(query_states.device)
 
         q_len = q.shape[2]
-        vertical_size, slash_size = min(q_len, max(vertical_size, 30)), min(
-            q_len, max(slash_size, 50)
+        vertical_size, slash_size = (
+            min(q_len, max(vertical_size, 30)),
+            min(q_len, max(slash_size, 50)),
         )
         last_q = min(64, q_len)
         qk = torch.einsum(f"bhmk, bhnk -> bhmn", q[:, :, -last_q:, :], k) / math.sqrt(
@@ -70,6 +69,8 @@ def Minference_prefill(
         slash_topk = slash
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
 
-        output[:, head : head + 1, :, :] = vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        output[:, head : head + 1, :, :] = vertical_slash_sparse_attention(
+            q, k, v, vertical_topk, slash
+        )
 
     return output

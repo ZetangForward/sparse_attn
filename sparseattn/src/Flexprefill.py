@@ -1,4 +1,3 @@
-      
 import math
 from typing import List, Optional, Tuple, Union
 
@@ -9,6 +8,7 @@ from einops import rearrange
 from flash_attn import flash_attn_func
 import pdb
 
+
 def torch_block_wise_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -17,7 +17,6 @@ def torch_block_wise_attention(
     block_size: int,
     grid_offset: int = 0,
 ):
-
     b, n, h, d = q.shape
     assert k.shape == q.shape
     assert v.shape == k.shape
@@ -978,7 +977,7 @@ def get_active_blocks(
             last_q.view(last_q.shape[0], last_q.shape[1], gqa_groups, -1, head_dim),
             k.view(k.shape[0], k.shape[1], 1, -1, head_dim),
         )
-    
+
     causal_mask = torch.arange(0, block_size, device=qk.device)
     causal_mask = causal_mask[:, None] >= causal_mask[None, :]
     causal_mask = causal_mask[None, None, None, ...]
@@ -1080,7 +1079,6 @@ def Flexprefill_prefill(
     softmax_scale: Optional[float] = None,
     block_size: int = 128,
 ):
-
     batch_size, seq_len, num_heads, head_dim = q.shape
     assert q.shape[1] == k.shape[1]
     assert head_dim in {16, 32, 64, 128}
@@ -1133,4 +1131,3 @@ if __name__ == "__main__":
     print(f"Attention computation time: {time.time() - start_time:.6f} seconds")
 
     pdb.set_trace()
-    

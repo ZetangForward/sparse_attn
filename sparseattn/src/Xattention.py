@@ -6,6 +6,7 @@ from block_sparse_attn import block_sparse_attn_func
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def softmax_fuse_block_sum_kernel_causal(
     In,
@@ -18,7 +19,7 @@ def softmax_fuse_block_sum_kernel_causal(
     output_stride_1,
     output_stride_2,
     real_q_len,
-    k_len, # we assume k_len is divisible by chunk size
+    k_len,  # we assume k_len is divisible by chunk size
     chunk_start,
     chunk_end,
     segment_size: tl.constexpr,
@@ -32,15 +33,31 @@ def softmax_fuse_block_sum_kernel_causal(
     offs_k = tl.arange(0, segment_size)
 
     num_iters = k_len // segment_size
-    num_iters_before_causal = (chunk_start + (block_id + 1) * block_size - 1) // segment_size
+    num_iters_before_causal = (
+        chunk_start + (block_id + 1) * block_size - 1
+    ) // segment_size
 
     m_i = tl.zeros([block_size], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([block_size], dtype=tl.float32) + 1.0
 
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     for iter in range(0, num_iters_before_causal):
@@ -80,7 +97,9 @@ def softmax_fuse_block_sum_kernel_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
     for iter in range(num_iters_before_causal, num_iters_before_causal + 1):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
@@ -91,11 +110,15 @@ def softmax_fuse_block_sum_kernel_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
     for iter in range(num_iters_before_causal + 1, num_iters):
         X = tl.zeros([segment_size // block_size], dtype=tl.float32)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
 
 @triton.jit
@@ -110,7 +133,7 @@ def softmax_fuse_block_sum_kernel_non_causal(
     output_stride_1,
     output_stride_2,
     real_q_len,
-    k_len, # we assume k_len is divisible by chunk size
+    k_len,  # we assume k_len is divisible by chunk size
     chunk_start,
     chunk_end,
     segment_size: tl.constexpr,
@@ -128,10 +151,24 @@ def softmax_fuse_block_sum_kernel_non_causal(
     m_i = tl.zeros([block_size], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([block_size], dtype=tl.float32) + 1.0
 
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     for iter in range(0, num_iters):
@@ -157,20 +194,33 @@ def softmax_fuse_block_sum_kernel_non_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
+
 
 @triton.jit
-def flat_group_gemm_kernel(Q, K, Out, 
-              stride_qz, stride_qh, stride_qn,
-              stride_kz, stride_kh, stride_kn,  
-              stride_oz, stride_oh, stride_on,
-              chunk_start, chunk_end,
-              H: tl.constexpr,
-              HEAD_DIM: tl.constexpr,  
-              BLOCK_M: tl.constexpr,  
-              BLOCK_N: tl.constexpr,
-              BLOCK_K: tl.constexpr,
-              ):
+def flat_group_gemm_kernel(
+    Q,
+    K,
+    Out,
+    stride_qz,
+    stride_qh,
+    stride_qn,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_oz,
+    stride_oh,
+    stride_on,
+    chunk_start,
+    chunk_end,
+    H: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
     block_m = tl.program_id(0).to(tl.int64)
     block_n = tl.program_id(1).to(tl.int64)
     batch_id = tl.program_id(2).to(tl.int64) // H
@@ -179,11 +229,23 @@ def flat_group_gemm_kernel(Q, K, Out,
     if chunk_start + (block_m + 1) * BLOCK_M <= block_n * BLOCK_N:
         return
 
-    Q_ptrs = Q + batch_id * stride_qz + head_id * stride_qh + block_m * BLOCK_M * stride_qn
-    K_ptrs = K + batch_id * stride_kz + head_id * stride_kh + block_n * BLOCK_N * stride_kn
+    Q_ptrs = (
+        Q + batch_id * stride_qz + head_id * stride_qh + block_m * BLOCK_M * stride_qn
+    )
+    K_ptrs = (
+        K + batch_id * stride_kz + head_id * stride_kh + block_n * BLOCK_N * stride_kn
+    )
 
-    Q_ptrs = Q_ptrs + tl.arange(0, BLOCK_M)[:, None] * stride_qn + tl.arange(0, BLOCK_K)[None, :]
-    K_ptrs = K_ptrs + tl.arange(0, BLOCK_N)[None, :] * stride_kn + tl.arange(0, BLOCK_K)[:, None]
+    Q_ptrs = (
+        Q_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * stride_qn
+        + tl.arange(0, BLOCK_K)[None, :]
+    )
+    K_ptrs = (
+        K_ptrs
+        + tl.arange(0, BLOCK_N)[None, :] * stride_kn
+        + tl.arange(0, BLOCK_K)[:, None]
+    )
 
     num_iters = HEAD_DIM // BLOCK_K
     o = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -193,24 +255,45 @@ def flat_group_gemm_kernel(Q, K, Out,
         k = tl.load(K_ptrs + iter * BLOCK_K)
         o += tl.dot(q, k)
 
-    O_ptrs = Out + batch_id * stride_oz + head_id * stride_oh + block_m * BLOCK_M * stride_on + block_n * BLOCK_N
-    O_ptrs = O_ptrs + tl.arange(0, BLOCK_M)[:, None] * stride_on + tl.arange(0, BLOCK_N)[None, :]
+    O_ptrs = (
+        Out
+        + batch_id * stride_oz
+        + head_id * stride_oh
+        + block_m * BLOCK_M * stride_on
+        + block_n * BLOCK_N
+    )
+    O_ptrs = (
+        O_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * stride_on
+        + tl.arange(0, BLOCK_N)[None, :]
+    )
 
     tl.store(O_ptrs, o.to(Out.type.element_ty))
 
+
 @triton.jit
-def flat_group_gemm_fuse_reshape_kernel(Q, K, Out, 
-              stride_qz, stride_qh, stride_qn,
-              stride_kz, stride_kh, stride_kn,  
-              stride_oz, stride_oh, stride_on,
-              chunk_start, chunk_end,
-              H: tl.constexpr,
-              STRIDE: tl.constexpr,
-              HEAD_DIM: tl.constexpr,  
-              BLOCK_M: tl.constexpr,  
-              BLOCK_N: tl.constexpr,
-              is_causal: tl.constexpr,
-              ):
+def flat_group_gemm_fuse_reshape_kernel(
+    Q,
+    K,
+    Out,
+    stride_qz,
+    stride_qh,
+    stride_qn,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_oz,
+    stride_oh,
+    stride_on,
+    chunk_start,
+    chunk_end,
+    H: tl.constexpr,
+    STRIDE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    is_causal: tl.constexpr,
+):
     block_m = tl.program_id(0).to(tl.int64)
     block_n = tl.program_id(1).to(tl.int64)
     batch_id = tl.program_id(2).to(tl.int64) // H
@@ -220,11 +303,30 @@ def flat_group_gemm_fuse_reshape_kernel(Q, K, Out,
         if chunk_start + (block_m + 1) * BLOCK_M <= block_n * BLOCK_N:
             return
 
-    Q_ptrs = Q + batch_id * stride_qz + head_id * stride_qh + block_m * BLOCK_M * STRIDE * stride_qn
-    K_ptrs = K + batch_id * stride_kz + head_id * stride_kh + block_n * BLOCK_N * STRIDE * stride_kn
+    Q_ptrs = (
+        Q
+        + batch_id * stride_qz
+        + head_id * stride_qh
+        + block_m * BLOCK_M * STRIDE * stride_qn
+    )
+    K_ptrs = (
+        K
+        + batch_id * stride_kz
+        + head_id * stride_kh
+        + block_n * BLOCK_N * STRIDE * stride_kn
+    )
 
-    Q_ptrs = Q_ptrs + tl.arange(0, BLOCK_M)[:, None] * (stride_qn * STRIDE) + tl.arange(0, HEAD_DIM)[None, :] + stride_qn * (STRIDE - 1)
-    K_ptrs = K_ptrs + tl.arange(0, BLOCK_N)[None, :] * (stride_kn * STRIDE) + tl.arange(0, HEAD_DIM)[:, None]
+    Q_ptrs = (
+        Q_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * (stride_qn * STRIDE)
+        + tl.arange(0, HEAD_DIM)[None, :]
+        + stride_qn * (STRIDE - 1)
+    )
+    K_ptrs = (
+        K_ptrs
+        + tl.arange(0, BLOCK_N)[None, :] * (stride_kn * STRIDE)
+        + tl.arange(0, HEAD_DIM)[:, None]
+    )
 
     o = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
 
@@ -233,13 +335,32 @@ def flat_group_gemm_fuse_reshape_kernel(Q, K, Out,
         k = tl.load(K_ptrs + iter * stride_kn)
         o += tl.dot(q, k)
 
-    O_ptrs = Out + batch_id * stride_oz + head_id * stride_oh + block_m * BLOCK_M * stride_on + block_n * BLOCK_N
-    O_ptrs = O_ptrs + tl.arange(0, BLOCK_M)[:, None] * stride_on + tl.arange(0, BLOCK_N)[None, :]
+    O_ptrs = (
+        Out
+        + batch_id * stride_oz
+        + head_id * stride_oh
+        + block_m * BLOCK_M * stride_on
+        + block_n * BLOCK_N
+    )
+    O_ptrs = (
+        O_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * stride_on
+        + tl.arange(0, BLOCK_N)[None, :]
+    )
 
     tl.store(O_ptrs, o.to(Out.type.element_ty))
 
 
-def softmax_fuse_block_sum(attn_weights_slice, reshaped_block_size, segment_size, chunk_start, chunk_end, real_q_len, scale, is_causal=True):
+def softmax_fuse_block_sum(
+    attn_weights_slice,
+    reshaped_block_size,
+    segment_size,
+    chunk_start,
+    chunk_end,
+    real_q_len,
+    scale,
+    is_causal=True,
+):
     batch_size, num_heads, q_len, k_len = attn_weights_slice.shape
     assert q_len % reshaped_block_size == 0
     try:
@@ -249,7 +370,16 @@ def softmax_fuse_block_sum(attn_weights_slice, reshaped_block_size, segment_size
     assert segment_size % reshaped_block_size == 0
     assert attn_weights_slice.stride(-1) == 1
 
-    output = torch.empty((batch_size, num_heads, q_len // reshaped_block_size, k_len // reshaped_block_size), dtype=attn_weights_slice.dtype, device=attn_weights_slice.device)
+    output = torch.empty(
+        (
+            batch_size,
+            num_heads,
+            q_len // reshaped_block_size,
+            k_len // reshaped_block_size,
+        ),
+        dtype=attn_weights_slice.dtype,
+        device=attn_weights_slice.device,
+    )
 
     grid = (q_len // reshaped_block_size, num_heads, batch_size)
 
@@ -292,11 +422,16 @@ def softmax_fuse_block_sum(attn_weights_slice, reshaped_block_size, segment_size
 
     return output
 
+
 def flat_group_gemm(query_states, key_states, chunk_start, chunk_end):
     batch_size, num_heads, q_len, head_dim = query_states.shape
     kv_len = key_states.shape[2]
 
-    output = torch.empty((batch_size, num_heads, q_len, kv_len), dtype=query_states.dtype, device=query_states.device)
+    output = torch.empty(
+        (batch_size, num_heads, q_len, kv_len),
+        dtype=query_states.dtype,
+        device=query_states.device,
+    )
     BLOCK_M = 128
     BLOCK_N = 128
     BLOCK_K = 64
@@ -326,24 +461,35 @@ def flat_group_gemm(query_states, key_states, chunk_start, chunk_end):
 
     return output
 
-def flat_group_gemm_fuse_reshape(query_states, key_states, stride, chunk_start, chunk_end, is_causal=True):
+
+def flat_group_gemm_fuse_reshape(
+    query_states, key_states, stride, chunk_start, chunk_end, is_causal=True
+):
     batch_size, num_heads, q_len, head_dim = query_states.shape
     kv_len = key_states.shape[2]
-    
-    assert (key_states.shape[0] == batch_size)
-    assert (key_states.shape[1] == num_heads)
-    assert (key_states.shape[3] == head_dim)
 
-    output = torch.empty((batch_size, num_heads, q_len // stride, kv_len // stride), dtype=query_states.dtype, device=query_states.device)
+    assert key_states.shape[0] == batch_size
+    assert key_states.shape[1] == num_heads
+    assert key_states.shape[3] == head_dim
+
+    output = torch.empty(
+        (batch_size, num_heads, q_len // stride, kv_len // stride),
+        dtype=query_states.dtype,
+        device=query_states.device,
+    )
     # BLOCK_M = 128
     # BLOCK_N = 128
     # H20
     BLOCK_M = 64
     BLOCK_N = 64
-    assert (q_len % (stride * BLOCK_M) == 0)
-    assert (kv_len % (stride * BLOCK_N) == 0)
+    assert q_len % (stride * BLOCK_M) == 0
+    assert kv_len % (stride * BLOCK_N) == 0
 
-    grid = (q_len // stride // BLOCK_M, kv_len // stride // BLOCK_N, batch_size * num_heads)
+    grid = (
+        q_len // stride // BLOCK_M,
+        kv_len // stride // BLOCK_N,
+        batch_size * num_heads,
+    )
     flat_group_gemm_fuse_reshape_kernel[grid](
         query_states,
         key_states,
@@ -368,6 +514,7 @@ def flat_group_gemm_fuse_reshape(query_states, key_states, stride, chunk_start, 
     )
 
     return output
+
 
 def xattn_estimate(
     query_states: torch.Tensor,
@@ -503,8 +650,9 @@ def xattn_estimate(
                 pad_query_states[
                     :,
                     :,
-                    (chunk_idx * reshaped_chunk_size)
-                    * stride : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
+                    (chunk_idx * reshaped_chunk_size) * stride : (
+                        chunk_idx * reshaped_chunk_size + reshaped_chunk_size
+                    )
                     * stride,
                     :,
                 ],
@@ -534,8 +682,9 @@ def xattn_estimate(
             chunked_query = reshaped_query[
                 :,
                 :,
-                (chunk_idx * reshaped_chunk_size)
-                // kdb : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
+                (chunk_idx * reshaped_chunk_size) // kdb : (
+                    chunk_idx * reshaped_chunk_size + reshaped_chunk_size
+                )
                 // kdb,
                 :,
             ]
@@ -611,7 +760,7 @@ def xattn_estimate(
                 .to("cuda")
             )
             del chunked_query
-        
+
         simple_mask = find_blocks_chunked(
             attn_sum,
             k_block_num - q_block_num + chunk_idx * num_blocks_per_chunk,
@@ -638,8 +787,10 @@ def xattn_estimate(
         mask_size = min(q_block_num, simple_masks.shape[-1])
         if mask_size > 0:
             causal_block_mask = ~torch.triu(
-            torch.ones(mask_size, mask_size, device=simple_masks.device, dtype=torch.bool), 
-            diagonal=1
+                torch.ones(
+                    mask_size, mask_size, device=simple_masks.device, dtype=torch.bool
+                ),
+                diagonal=1,
             )
             # Apply the mask to the relevant portion
             simple_masks[:, :, -mask_size:, -mask_size:] &= causal_block_mask
@@ -756,7 +907,7 @@ def Xattention_prefill(
 
     del query_states
     num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_heads
-    
+
     # print(f"approximated prefilling Computation: {approx_simple_mask.sum() / num_to_compute}")
     del approx_simple_mask, attn_sums
     return attn_output

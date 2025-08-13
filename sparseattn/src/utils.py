@@ -1,20 +1,21 @@
 import torch
 
+
 def create_causal_mask(batch_size, head_num, block_size, block_num, divide_block_num):
     """
-        Creates a causal attention mask used in transformer-based models.
+    Creates a causal attention mask used in transformer-based models.
 
-        Parameters:
-        - batch_size (int): The number of sequences in the batch.
-        - head_num (int): The number of attention heads.
-        - block_size (int): The size of each block in the sequence.
-        - block_num (int): The total number of blocks in the sequence.
-        - divide_block_num (int): The block index at which causality is applied.
+    Parameters:
+    - batch_size (int): The number of sequences in the batch.
+    - head_num (int): The number of attention heads.
+    - block_size (int): The size of each block in the sequence.
+    - block_num (int): The total number of blocks in the sequence.
+    - divide_block_num (int): The block index at which causality is applied.
 
-        Returns:
-        - torch.Tensor: A mask tensor of shape (batch_size, head_num, block_size, total_size)
-        where total_size = block_size * block_num. The mask enforces causal attention by 
-        setting certain positions to `-inf` to prevent information leakage from future tokens.
+    Returns:
+    - torch.Tensor: A mask tensor of shape (batch_size, head_num, block_size, total_size)
+    where total_size = block_size * block_num. The mask enforces causal attention by
+    setting certain positions to `-inf` to prevent information leakage from future tokens.
     """
     divide_block_num += 1
     if divide_block_num < 1 or divide_block_num > block_num:
@@ -41,25 +42,32 @@ def create_causal_mask(batch_size, head_num, block_size, block_num, divide_block
     mask = mask.expand(batch_size, head_num, block_size, total_size)
     return mask
 
+
 def find_blocks_chunked(
-    input_tensor, current_index, threshold, num_to_choose, decoding: bool, mode: str = "both", causal=True
+    input_tensor,
+    current_index,
+    threshold,
+    num_to_choose,
+    decoding: bool,
+    mode: str = "both",
+    causal=True,
 ):
     """
-        Finds and selects relevant blocks of attention for transformer-based models based on a 
-        threshold or a predefined number of blocks.
+    Finds and selects relevant blocks of attention for transformer-based models based on a
+    threshold or a predefined number of blocks.
 
-        Parameters:
-        - input_tensor (torch.Tensor): The input tensor of shape (batch_size, head_num, chunk_num, block_num).
-        - current_index (int): The current index in the sequence processing.
-        - threshold (float or None): A threshold value used to determine the minimum attention weight sum.
-        - num_to_choose (int or None): The number of blocks to be selected, ensuring sufficient information retrieval.
-        - decoding (bool): If True, operates in decoding mode; otherwise, it's in encoding mode.
-        - mode (str): Defines the processing mode, either 'both', 'prefill', or 'decode'.
-        - causal (bool): If True, applies causal masking to prevent future information leakage.
+    Parameters:
+    - input_tensor (torch.Tensor): The input tensor of shape (batch_size, head_num, chunk_num, block_num).
+    - current_index (int): The current index in the sequence processing.
+    - threshold (float or None): A threshold value used to determine the minimum attention weight sum.
+    - num_to_choose (int or None): The number of blocks to be selected, ensuring sufficient information retrieval.
+    - decoding (bool): If True, operates in decoding mode; otherwise, it's in encoding mode.
+    - mode (str): Defines the processing mode, either 'both', 'prefill', or 'decode'.
+    - causal (bool): If True, applies causal masking to prevent future information leakage.
 
-        Returns:
-        - torch.Tensor: A boolean mask of shape (batch_size, head_num, chunk_num, block_num),
-        indicating which blocks should be attended to.
+    Returns:
+    - torch.Tensor: A boolean mask of shape (batch_size, head_num, chunk_num, block_num),
+    indicating which blocks should be attended to.
     """
     assert threshold is None or num_to_choose is None
     batch_size, head_num, chunk_num, block_num = input_tensor.shape
@@ -72,20 +80,26 @@ def find_blocks_chunked(
         mask = torch.ones_like(input_tensor, dtype=torch.bool)
         if causal:
             mask[:, :, :, current_index : current_index + chunk_num] = torch.tril(
-                torch.ones(1, head_num, chunk_num, chunk_num, device=input_tensor.device)
+                torch.ones(
+                    1, head_num, chunk_num, chunk_num, device=input_tensor.device
+                )
             )
             mask[:, :, current_index + chunk_num :, :] = 0
             return torch.cat(
                 [
-                    torch.ones_like(input_tensor, dtype=torch.bool)[:, :, 0 : current_index + 1],
-                    torch.zeros_like(input_tensor, dtype=torch.bool)[:, :, current_index + 1 :],
+                    torch.ones_like(input_tensor, dtype=torch.bool)[
+                        :, :, 0 : current_index + 1
+                    ],
+                    torch.zeros_like(input_tensor, dtype=torch.bool)[
+                        :, :, current_index + 1 :
+                    ],
                 ],
                 dim=-1,
             )
         else:
             return mask
     input_tensor = input_tensor.to(float)
-    
+
     if threshold is not None:
         total_sum = input_tensor.sum(dim=-1, keepdim=True)
         if isinstance(threshold, torch.Tensor):
@@ -104,12 +118,8 @@ def find_blocks_chunked(
                 .unsqueeze(0)
                 .expand(1, head_num, chunk_num, chunk_num)
             )
-            other_values = input_tensor.masked_fill(
-                mask, 0
-            )
-            sorted_values, _ = torch.sort(
-                other_values, dim=-1, descending=True
-            )
+            other_values = input_tensor.masked_fill(mask, 0)
+            sorted_values, _ = torch.sort(other_values, dim=-1, descending=True)
             sorted_values = sorted_values.to(input_tensor.device)
 
             sorted_values = torch.cat(
@@ -139,17 +149,19 @@ def find_blocks_chunked(
             ).cumsum(dim=-1)
 
             index_mask = cumulative_sum_without_self < required_sum
-            index = torch.where(index_mask,index,0)
-            mask = mask.view(batch_size,head_num*chunk_num,block_num)
-            index = index.view(batch_size,head_num*chunk_num,block_num)
-            mask[:,torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),index] = True
-            mask = mask.view(batch_size,head_num,chunk_num,block_num)
+            index = torch.where(index_mask, index, 0)
+            mask = mask.view(batch_size, head_num * chunk_num, block_num)
+            index = index.view(batch_size, head_num * chunk_num, block_num)
+            mask[
+                :,
+                torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),
+                index,
+            ] = True
+            mask = mask.view(batch_size, head_num, chunk_num, block_num)
             # assert(bool((torch.where(mask,input_tensor,0).sum(dim=-1,keepdim=True) >= required_sum*0.99).all()))
         else:
             mask = torch.zeros_like(input_tensor, dtype=torch.bool)
-            sorted_values, index = torch.sort(
-                input_tensor, dim=-1, descending=True
-            )
+            sorted_values, index = torch.sort(input_tensor, dim=-1, descending=True)
             sorted_values = sorted_values.to(input_tensor.device)
             cumulative_sum_without_self = torch.cat(
                 [
@@ -172,7 +184,7 @@ def find_blocks_chunked(
             mask = mask.view(batch_size, head_num, chunk_num, block_num)
     else:
         raise NotImplementedError("block num chunk prefill not impleted")
-    
+
     try:
         if causal:
             assert (~mask[:, :, :, current_index + chunk_num :]).all()
@@ -183,12 +195,20 @@ def find_blocks_chunked(
         if decoding:
             assert mask[:, :, :, 0].all() and mask[:, :, :, -1].all()
         else:
-            lambda_mask = torch.zeros_like(input_tensor,dtype=bool,device=input_tensor.device)
-            lambda_mask[:,:,:,0] = 1
-            lambda_mask[:,:,:,current_index:current_index+chunk_num] = torch.eye(chunk_num, device=lambda_mask.device).unsqueeze(0).unsqueeze(0).expand(1,head_num,chunk_num,chunk_num)
-            assert(torch.where(lambda_mask,mask,True).all())
+            lambda_mask = torch.zeros_like(
+                input_tensor, dtype=bool, device=input_tensor.device
+            )
+            lambda_mask[:, :, :, 0] = 1
+            lambda_mask[:, :, :, current_index : current_index + chunk_num] = (
+                torch.eye(chunk_num, device=lambda_mask.device)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .expand(1, head_num, chunk_num, chunk_num)
+            )
+            assert torch.where(lambda_mask, mask, True).all()
 
     return mask
+
 
 from typing import List, Optional, Tuple, Union
 
@@ -320,7 +340,6 @@ def llama_causal_model_forward(
     )
 
 
-
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 # Copyright 2024 ByteDance and/or its affiliates.
 #
@@ -377,6 +396,7 @@ def llama_mlp_forward(self, x):
                 )
     return down_proj
 
+
 # duoattention
 import transformers
 from accelerate import infer_auto_device_map, dispatch_model
@@ -385,6 +405,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import json
+
 
 def parse_device(device: str):
     if "," in device:
@@ -430,7 +451,6 @@ from tensor_parallel.pretrained_model import find_predefined_tensor_parallel_con
 from tensor_parallel.autoconfig import get_default_config
 from tensor_parallel.state_actions import Split
 import re
-
 
 
 def to_device(
@@ -618,6 +638,7 @@ def save_full_attention_heads(full_attention_heads, output_filename):
         delimiter="\t",
     )
 
+
 def enable_duo_attention_eval(
     model,
     full_attention_heads,
@@ -629,6 +650,7 @@ def enable_duo_attention_eval(
     )
     if "llama" in model.config.model_type:
         from .duoattention import enable_llama_duo_attention_eval
+
         enable_llama_duo_attention_eval(
             model,
             full_attention_heads,
@@ -642,6 +664,7 @@ def enable_duo_attention_eval(
 def get_full_attention_heads(model):
     if "llama" in model.config.model_type:
         from .duoattention import get_llama_full_attention_heads
+
         return get_llama_full_attention_heads(model)
     else:
         raise ValueError(f"Model type {model.config.model_type} not supported")
@@ -650,6 +673,7 @@ def get_full_attention_heads(model):
 def set_full_attention_heads(model, full_attention_heads):
     if "llama" in model.config.model_type:
         from .duoattention import set_llama_full_attention_heads
+
         model = set_llama_full_attention_heads(model, full_attention_heads)
     else:
         raise ValueError(f"Model type {model.config.model_type} not supported")
@@ -659,6 +683,7 @@ def set_full_attention_heads(model, full_attention_heads):
 def map_full_attention_heads(model, func):
     if "llama" in model.config.model_type:
         from .duoattention import map_llama_full_attention_heads
+
         return map_llama_full_attention_heads(model, func)
     else:
         raise ValueError(f"Model type {model.config.model_type} not supported")
@@ -708,6 +733,7 @@ def streaming_attn_xformers(
     )
 
     return streaming_attn_output
+
 
 from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
@@ -1269,6 +1295,7 @@ def enable_duo_attention_static_kv_cache_for_llama(model: LlamaForCausalLM):
         duo_attn_static_kv_cache_llama_for_causal_lm_forward, model
     )
 
+
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 import flashinfer
 from typing import Optional
@@ -1323,6 +1350,7 @@ def apply_rope_inplace(
     q = q.view(bsz, seq_len, num_heads, head_dim)
     k = k.view(bsz, seq_len, num_kv_heads, head_dim)
     return q, k
+
 
 @torch.no_grad()
 def reorder_linear_weights(
