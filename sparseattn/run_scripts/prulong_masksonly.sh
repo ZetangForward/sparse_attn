@@ -29,7 +29,6 @@ freeze_weights=${FREEZE_WEIGHTS:-true}
 freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
-
 # Streaming configuration
 toggle_type=${TOGGLE_TYPE:-"streaming"}
 sink_size=${SINK_SIZE:-128}
