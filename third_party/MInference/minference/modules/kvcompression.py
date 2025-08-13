@@ -172,9 +172,11 @@ class BaseKVCache(Cache):
         self.temp_key_cache = []
         self.temp_value_cache = []
 
-        self.is_prefill = True # The class is first instantiated inside the model forward(); the caller should set this to False after prefill
+        self.is_prefill = True  # The class is first instantiated inside the model forward(); the caller should set this to False after prefill
         self.capacity_override = None
-        self.compress_group_kvs = False # Might be overridden by the snapkv/pyramidkv classes
+        self.compress_group_kvs = (
+            False  # Might be overridden by the snapkv/pyramidkv classes
+        )
 
     def apply_special(self, is_prefill, capacity_override):
         self.is_prefill = is_prefill
@@ -238,19 +240,16 @@ class BaseKVCache(Cache):
                     [self.value_cache[layer_idx], value_compress], dim=-2
                 )
         else:
-            assert (
-                False
-            ), f"kv_cluster_granularity {self.kv_cluster_granularity} not supported"
+            assert False, (
+                f"kv_cluster_granularity {self.kv_cluster_granularity} not supported"
+            )
         return old_size
 
-    def drop_last_k_tokens(
-        self,
-        n_tokens_to_drop
-    ):
+    def drop_last_k_tokens(self, n_tokens_to_drop):
         for l in range(len(self.key_cache)):
             n_existing = self.key_cache[l].shape[-2]
             # Drop at most n_existing - 1
-            n_drop = max(0, min(n_existing-1, n_tokens_to_drop))
+            n_drop = max(0, min(n_existing - 1, n_tokens_to_drop))
 
             if n_drop > 0:
                 self.key_cache[l] = self.key_cache[l][:, :, :-n_drop, :]
@@ -282,7 +281,9 @@ class BaseKVCache(Cache):
         attention_mask = cache_kwargs["attention_mask"]
         num_key_value_groups = cache_kwargs["num_key_value_groups"]
 
-        if key_states.size(1) != query_states.size(1) and not self.compress_group_kvs:  # GQA
+        if (
+            key_states.size(1) != query_states.size(1) and not self.compress_group_kvs
+        ):  # GQA
             key_states = repeat_kv(key_states, num_key_value_groups)
             value_states = repeat_kv(value_states, num_key_value_groups)
 
@@ -290,8 +291,10 @@ class BaseKVCache(Cache):
             self._seen_tokens += key_states.shape[-2]
 
         q_len = query_states.shape[-2]
-        initializing_kv_cluster = (len(self.key_cache) == layer_idx)
-        if initializing_kv_cluster or self.is_prefill:  # initialize kv_cluster, ie, the first query/context
+        initializing_kv_cluster = len(self.key_cache) == layer_idx
+        if (
+            initializing_kv_cluster or self.is_prefill
+        ):  # initialize kv_cluster, ie, the first query/context
             old_size = self.compresssed_kv(
                 key_states,
                 query_states,
@@ -328,19 +331,21 @@ class BaseKVCache(Cache):
             # The returned kv's should be concat([old_kvs, all_new_kvs])
             key_states = torch.cat(
                 [
-                    self.key_cache[layer_idx][:, :, :old_size, :], # old kvs
-                    key_states, # new kvs
+                    self.key_cache[layer_idx][:, :, :old_size, :],  # old kvs
+                    key_states,  # new kvs
                 ],
                 dim=-2,
             )
             value_states = torch.cat(
                 [
-                    self.value_cache[layer_idx][:, :, :old_size, :], # old kvs
-                    value_states, # new kvs
+                    self.value_cache[layer_idx][:, :, :old_size, :],  # old kvs
+                    value_states,  # new kvs
                 ],
                 dim=-2,
             )
-        elif not initializing_kv_cluster:  # return the compressed KV cache if we are decoding
+        elif (
+            not initializing_kv_cluster
+        ):  # return the compressed KV cache if we are decoding
             if self.temp_key_cache:  # concat global past_kv and temp_kv_cache
                 key_states = torch.cat(
                     [self.key_cache[layer_idx], self.temp_key_cache[layer_idx]], dim=-2
@@ -501,10 +506,14 @@ class DynamicCacheWithRepeat(DynamicCache):
                 )
 
         if self.temp_key_cache:  # concat global past_kv and temp_kv_cache
-            key_states, value_states = torch.cat(
-                [self.key_cache[layer_idx], self.temp_key_cache[layer_idx]], dim=-2
-            ), torch.cat(
-                [self.value_cache[layer_idx], self.temp_value_cache[layer_idx]], dim=-2
+            key_states, value_states = (
+                torch.cat(
+                    [self.key_cache[layer_idx], self.temp_key_cache[layer_idx]], dim=-2
+                ),
+                torch.cat(
+                    [self.value_cache[layer_idx], self.temp_value_cache[layer_idx]],
+                    dim=-2,
+                ),
             )
         else:
             key_states, value_states = (
@@ -536,6 +545,7 @@ class DynamicCacheWithRepeat(DynamicCache):
         self.temp_key_cache = []
         self.temp_value_cache = []
 
+
 class L2KVCache(Cache):
     def __init__(self, config):
         super().__init__()
@@ -544,19 +554,19 @@ class L2KVCache(Cache):
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
 
-        self.is_prefill = True # The class is first instantiated inside the model forward(); the caller should set this to False after prefill
+        self.is_prefill = True  # The class is first instantiated inside the model forward(); the caller should set this to False after prefill
         self.capacity_override = None
-        
+
         self.max_capacity_total = config.get("max_capacity_total", 4096)
         self.num_skip_layers = config.get("num_skip_layers", 2)
         self.num_local_tokens = config.get("num_local_tokens", 64)
 
     def apply_special(self, is_prefill, capacity_override):
-        pass 
-        
+        pass
+
     def reset_special(self):
         pass
-        
+
     def prune_cache(self, layer_idx):
         if layer_idx < self.num_skip_layers:
             return
@@ -565,22 +575,34 @@ class L2KVCache(Cache):
             key_l2 = self.key_cache[layer_idx].norm(dim=-1)
             indices = torch.argsort(key_l2, dim=-1, descending=False)
             head_dim = self.key_cache[layer_idx].size(3)
-            indices = indices[:, :, :self.max_capacity_total].unsqueeze(-1).expand(-1, -1, -1, head_dim)
+            indices = (
+                indices[:, :, : self.max_capacity_total]
+                .unsqueeze(-1)
+                .expand(-1, -1, -1, head_dim)
+            )
 
-            self.key_cache[layer_idx] = self.key_cache[layer_idx].gather(dim=2, index=indices)
-            self.value_cache[layer_idx] = self.value_cache[layer_idx].gather(dim=2, index=indices)
+            self.key_cache[layer_idx] = self.key_cache[layer_idx].gather(
+                dim=2, index=indices
+            )
+            self.value_cache[layer_idx] = self.value_cache[layer_idx].gather(
+                dim=2, index=indices
+            )
         elif self.num_local_tokens >= self.key_cache[layer_idx].size(2):
             return
         else:
-            local_keys = self.key_cache[layer_idx][:, :, -self.num_local_tokens:, :]
-            local_values = self.value_cache[layer_idx][:, :, -self.num_local_tokens:, :]
+            local_keys = self.key_cache[layer_idx][:, :, -self.num_local_tokens :, :]
+            local_values = self.value_cache[layer_idx][
+                :, :, -self.num_local_tokens :, :
+            ]
 
-            prunable_keys = self.key_cache[layer_idx][:, :, :-self.num_local_tokens, :]
-            prunable_values = self.value_cache[layer_idx][:, :, :-self.num_local_tokens, :]
+            prunable_keys = self.key_cache[layer_idx][:, :, : -self.num_local_tokens, :]
+            prunable_values = self.value_cache[layer_idx][
+                :, :, : -self.num_local_tokens, :
+            ]
 
             key_l2 = prunable_keys.norm(dim=-1)
             indices = torch.argsort(key_l2, dim=-1, descending=False)
-            indices = indices[:, :, :self.max_capacity_total]
+            indices = indices[:, :, : self.max_capacity_total]
 
             head_dim = prunable_keys.size(3)
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
@@ -589,8 +611,10 @@ class L2KVCache(Cache):
             pruned_values = prunable_values.gather(dim=2, index=indices)
 
             self.key_cache[layer_idx] = torch.cat([local_keys, pruned_keys], dim=-2)
-            self.value_cache[layer_idx] = torch.cat([local_values, pruned_values], dim=-2)              
-        
+            self.value_cache[layer_idx] = torch.cat(
+                [local_values, pruned_values], dim=-2
+            )
+
     def update(
         self,
         key_states,
@@ -601,23 +625,21 @@ class L2KVCache(Cache):
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[-2]
 
-        initializing_kv_cluster = (len(self.key_cache) == layer_idx)
+        initializing_kv_cluster = len(self.key_cache) == layer_idx
         if initializing_kv_cluster:
             self.key_cache.append(key_states)
             self.value_cache.append(value_states)
         else:
-            key_states = torch.cat(
-                [self.key_cache[layer_idx], key_states], dim=-2
-            )
+            key_states = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
             value_states = torch.cat(
                 [self.value_cache[layer_idx], value_states], dim=-2
             )
             self.key_cache[layer_idx] = key_states
             self.value_cache[layer_idx] = value_states
-        
+
         # Prune what has been committed to the cache
         self.prune_cache(layer_idx)
-        
+
         # Return keys and values before current pruning
         return key_states, value_states
 
@@ -639,6 +661,7 @@ class L2KVCache(Cache):
             key_states, value_states = past_key_values[layer_idx]
             cache.update(key_states, value_states, layer_idx)
         return cache
+
 
 method_to_cache_obj = {
     "": DynamicCacheWithRepeat,

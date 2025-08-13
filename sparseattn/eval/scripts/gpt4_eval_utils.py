@@ -8,8 +8,11 @@ import glob
 
 from typing import Optional, Any, Dict, List
 import logging
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S')
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -23,7 +26,7 @@ import time
 
 def format_chat(
     message: str,
-    system_message: Optional[str]=None,
+    system_message: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     """
     Format the message into a list of dictionaries with role and content keys.
@@ -43,18 +46,19 @@ class LLM:
     """
     Base class for generative models.
     """
+
     def __init__(
         self,
         model_name: str,
-        temperature: float=0.9,
-        top_p: float=0.9,
-        max_length: int=32768,
-        generation_max_length: int=2048,
-        generation_min_length: int=0,
-        do_sample: bool=True,
-        stop_newline: bool=False,
-        use_chat_template: bool=False,
-        system_message: Optional[str]="You are a helpful assistant.",
+        temperature: float = 0.9,
+        top_p: float = 0.9,
+        max_length: int = 32768,
+        generation_max_length: int = 2048,
+        generation_min_length: int = 0,
+        do_sample: bool = True,
+        stop_newline: bool = False,
+        use_chat_template: bool = False,
+        system_message: Optional[str] = "You are a helpful assistant.",
     ):
         self.model_name = model_name
         self.temperature = temperature
@@ -79,6 +83,7 @@ class LLM:
 
     Returns the prepared input (type is model-specific)
     """
+
     def prepare_inputs(self, test_item: Dict[str, Any], data: Dict[str, Any]) -> Any:
         raise NotImplementedError("prepare_inputs not implemented for LLM")
 
@@ -98,7 +103,10 @@ class LLM:
     This function may also return None in case of errors (e.g., denied by the API provider).
 
     """
-    def generate(self, inputs: Optional[Any]=None, prompt: Optional[str]=None, **kwargs) -> Optional[Dict[str, Any]]:
+
+    def generate(
+        self, inputs: Optional[Any] = None, prompt: Optional[str] = None, **kwargs
+    ) -> Optional[Dict[str, Any]]:
         raise NotImplementedError("generate not implemented for LLM")
 
     """
@@ -107,7 +115,13 @@ class LLM:
 
     The children classes may override this function for optimization.
     """
-    def generate_batch(self, inputs: Optional[List[Any]]=None, prompt: Optional[List[str]]=None, **kwargs) -> List[Optional[Dict[str, Any]]]:
+
+    def generate_batch(
+        self,
+        inputs: Optional[List[Any]] = None,
+        prompt: Optional[List[str]] = None,
+        **kwargs,
+    ) -> List[Optional[Dict[str, Any]]]:
         outputs = []
         if inputs is None:
             for p in tqdm(prompt):
@@ -148,38 +162,51 @@ class OpenAIModel(LLM):
         )
         import openai
         import tiktoken
+
         if "azure" in model_name:
             # env var: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and OPENAI_API_VERSION
             self.model = openai.AzureOpenAI()
-            model_name = model_name[model_name.index("/")+1:]
+            model_name = model_name[model_name.index("/") + 1 :]
         else:
             # make sure to set the OPENAI_API_KEY environment variable
             self.model = openai.OpenAI()
         self.model_name = model_name
         self.tokenizer = tiktoken.encoding_for_model(model_name)
         self.seed = seed
-        self.API_MAX_LENGTH = 128000 # this is defined by the OPENAI API
-
+        self.API_MAX_LENGTH = 128000  # this is defined by the OPENAI API
 
     def prepare_inputs(self, test_item, data):
         buffer = 100
         # we don't include system message to stay consistent with other models, which defaults to None
-        prompt = format_chat(data["user_template"].format(**test_item), system_message=self.system_message)
-        inputs = "\n".join([f"Role: {x['role']}\nContent: {x['content']}" for x in prompt])
+        prompt = format_chat(
+            data["user_template"].format(**test_item),
+            system_message=self.system_message,
+        )
+        inputs = "\n".join(
+            [f"Role: {x['role']}\nContent: {x['content']}" for x in prompt]
+        )
         tokens = self.tokenizer.encode(inputs)
         input_len = len(tokens)
 
         if self.max_length > self.API_MAX_LENGTH:
-            logger.warning(f"max_length {self.max_length} is greater than {self.API_MAX_LENGTH}, setting to {self.API_MAX_LENGTH}")
+            logger.warning(
+                f"max_length {self.max_length} is greater than {self.API_MAX_LENGTH}, setting to {self.API_MAX_LENGTH}"
+            )
             self.max_length = self.API_MAX_LENGTH
 
         if input_len > self.max_length - self.generation_max_length - buffer:
-            truncate_length = input_len - (self.max_length - self.generation_max_length - buffer)
-            new_context = self.tokenizer.decode(self.tokenizer.encode(test_item["context"])[:-truncate_length])
+            truncate_length = input_len - (
+                self.max_length - self.generation_max_length - buffer
+            )
+            new_context = self.tokenizer.decode(
+                self.tokenizer.encode(test_item["context"])[:-truncate_length]
+            )
             test_item["context"] = new_context
-            prompt = format_chat(data["user_template"].format(**test_item), system_message=self.system_message)
+            prompt = format_chat(
+                data["user_template"].format(**test_item),
+                system_message=self.system_message,
+            )
         return prompt
-
 
     def generate(self, inputs=None, prompt=None, **kwargs):
         if inputs is None:
@@ -220,12 +247,12 @@ class OpenAIModel(LLM):
         https://platform.openai.com/docs/guides/batch
         """
         from openai import OpenAI
+
         client = OpenAI()
 
         # Upload the file to OpenAI for batch processing
         batch_input_file = client.files.create(
-            file=open(batch_file, "rb"),
-            purpose="batch"
+            file=open(batch_file, "rb"), purpose="batch"
         )
 
         # Submit the batch job
@@ -233,9 +260,7 @@ class OpenAIModel(LLM):
             input_file_id=batch_input_file.id,
             endpoint="/v1/chat/completions",
             completion_window="24h",
-            metadata={
-                "description": "batch job for evaluation"
-            }
+            metadata={"description": "batch job for evaluation"},
         )
 
         # You would need to poll for the batch job status and download results
@@ -261,19 +286,19 @@ class OpenAIModel(LLM):
 
 class TgiVllmModel(OpenAIModel):
     def __init__(
-        self, 
-        model_name, 
-        temperature=0.9, 
-        top_p=0.9, 
-        max_length=32768, 
-        generation_max_length=2048, 
-        generation_min_length=0, 
-        do_sample=True, 
-        stop_newline=False, 
-        use_chat_template=True, 
+        self,
+        model_name,
+        temperature=0.9,
+        top_p=0.9,
+        max_length=32768,
+        generation_max_length=2048,
+        generation_min_length=0,
+        do_sample=True,
+        stop_newline=False,
+        use_chat_template=True,
         system_message=None,
         seed=42,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(
             model_name,
@@ -287,9 +312,10 @@ class TgiVllmModel(OpenAIModel):
             use_chat_template=use_chat_template,
             system_message=system_message,
             seed=seed,
-            **kwargs
+            **kwargs,
         )
         import openai
+
         # for TGI/vLLM, we use the openai client but with a different base URL
         base_url = kwargs.get("base_url", "http://localhost:8000/v1")
         self.model = openai.OpenAI(base_url=base_url, api_key="dummy")
@@ -312,12 +338,12 @@ class TgiVllmModel(OpenAIModel):
 def parse_output(output, prefix="Answer:"):
     def lstrip_string(s, sub):
         if s.startswith(sub):
-            return s[len(sub):]
+            return s[len(sub) :]
         else:
             return s
 
     output = output.strip()
-    
+
     # if the output starts with a prefix, strip it
     output = lstrip_string(output, prefix).strip()
     output = lstrip_string(output, "Answer").strip()
@@ -336,18 +362,18 @@ def parse_json(text):
     """Extract JSON from text that might contain additional content."""
     # Remove leading/trailing whitespace
     text = text.strip()
-    
+
     # Try to find JSON content between braces
-    start_idx = text.find('{')
-    end_idx = text.rfind('}')
-    
+    start_idx = text.find("{")
+    end_idx = text.rfind("}")
+
     if start_idx != -1 and end_idx != -1 and start_idx <= end_idx:
-        json_str = text[start_idx:end_idx+1]
+        json_str = text[start_idx : end_idx + 1]
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
             pass
-    
+
     # If that fails, try parsing the entire text
     try:
         return json.loads(text)
@@ -359,39 +385,45 @@ def parse_json(text):
 def check_metrics(model, results_file, output_file):
     """Process evaluation results and compute metrics."""
     try:
-        with open(results_file, 'r') as f:
+        with open(results_file, "r") as f:
             results = [json.loads(line) for line in f]
     except FileNotFoundError:
         logger.error(f"Results file not found: {results_file}")
         return None
-    
+
     metrics = {}
     total_examples = len(results)
-    
+
     if total_examples == 0:
         logger.warning("No results found in file")
         return metrics
-    
+
     # Extract and compute basic metrics
-    successful_generations = [r for r in results if r.get('output') is not None]
+    successful_generations = [r for r in results if r.get("output") is not None]
     success_rate = len(successful_generations) / total_examples
-    
+
     # Compute average lengths if available
     if successful_generations:
-        avg_input_len = sum(r.get('input_len', 0) for r in successful_generations) / len(successful_generations)
-        avg_output_len = sum(r.get('output_len', 0) for r in successful_generations) / len(successful_generations)
-        
-        metrics.update({
-            'success_rate': success_rate,
-            'total_examples': total_examples,
-            'successful_generations': len(successful_generations),
-            'avg_input_length': avg_input_len,
-            'avg_output_length': avg_output_len,
-        })
-    
+        avg_input_len = sum(
+            r.get("input_len", 0) for r in successful_generations
+        ) / len(successful_generations)
+        avg_output_len = sum(
+            r.get("output_len", 0) for r in successful_generations
+        ) / len(successful_generations)
+
+        metrics.update(
+            {
+                "success_rate": success_rate,
+                "total_examples": total_examples,
+                "successful_generations": len(successful_generations),
+                "avg_input_length": avg_input_len,
+                "avg_output_length": avg_output_len,
+            }
+        )
+
     # Save metrics
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(metrics, f, indent=2)
-    
+
     logger.info(f"Computed metrics: {metrics}")
-    return metrics 
+    return metrics

@@ -1,5 +1,5 @@
 """
-This script is adapted from 
+This script is adapted from
 https://github.com/gkamradt/LLMTest_NeedleInAHaystack
 """
 
@@ -344,7 +344,7 @@ class LLMNeedleHaystackTester:
             print(f"Score: {score}")
             print(f"Response: {response}\n")
 
-        context_file_location = f'{self.model_version.replace(".", "_")}_len_{context_length}_depth_{int(depth_percent*100)}'
+        context_file_location = f"{self.model_version.replace('.', '_')}_len_{context_length}_depth_{int(depth_percent * 100)}"
 
         if self.save_contexts:
             results["file_name"] = context_file_location

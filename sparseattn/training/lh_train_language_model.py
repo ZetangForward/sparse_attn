@@ -31,24 +31,24 @@ from csv import reader
 logger = logging.getLogger(__name__)
 
 
-
 def load_masks_from_tsv_file(
     model,
     tsv_file,
     sparsity=None,
     threshold=None,
 ):
-    f = reader(open(tsv_file, 'r'), delimiter='\t')
+    f = reader(open(tsv_file, "r"), delimiter="\t")
     masks = [[float(x) for x in row] for row in f]
     if threshold is not None:
         masks = [[float(x > threshold) for x in row] for row in masks]
     # At this point, masks are in [0,1] -- relinearize to [-10, 10]
     masks = [[(2 * x - 1) * 10 for x in row] for row in masks]
-    
+
     model.load_masks(masks)
 
     if sparsity is not None:
         model.round_masks_for_sparsity(sparsity)
+
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -133,21 +133,27 @@ def main():
         model = PawLlamaForCausalLM(
             config,
         )
-        
+
     # Last time with the Edge Pruning classes, we needed to reset the log alphas if loading from an HF checkpoint
     model.reset_masks()
-        
+
     if training_args.stripe_init_width_1 is not None:
         # We should initialize with a striped pattern
-        assert training_args.stripe_init_width_2 is not None, "If stripe_init_width_1 is set, stripe_init_width_2 must be set as well"
-        logger.info(f"Initializing with a striped pattern: ({training_args.stripe_init_width_1}, {training_args.stripe_init_width_2})")
+        assert training_args.stripe_init_width_2 is not None, (
+            "If stripe_init_width_1 is set, stripe_init_width_2 must be set as well"
+        )
+        logger.info(
+            f"Initializing with a striped pattern: ({training_args.stripe_init_width_1}, {training_args.stripe_init_width_2})"
+        )
         if not training_args.freeze_mask_parameters:
-            logger.warning("Stripe initialization without freezing mask parameters is not recommended")
-        
+            logger.warning(
+                "Stripe initialization without freezing mask parameters is not recommended"
+            )
+
         model.reset_masks_with_stripe_pattern(
-            training_args.stripe_init_width_1, 
-            training_args.stripe_init_width_2, 
-            start_with_keep=training_args.stripe_init_start_with_keep
+            training_args.stripe_init_width_1,
+            training_args.stripe_init_width_2,
+            start_with_keep=training_args.stripe_init_start_with_keep,
         )
     elif training_args.load_masks_from is not None:
         logger.info(f"Loading masks from {training_args.load_masks_from}")
@@ -157,38 +163,47 @@ def main():
             sparsity=training_args.load_masks_sparsity,
         )
 
-    if script_args.tokenizer_name is not None and script_args.model_name_or_path != script_args.tokenizer_name:
+    if (
+        script_args.tokenizer_name is not None
+        and script_args.model_name_or_path != script_args.tokenizer_name
+    ):
         model.resize_token_embeddings(len(tokenizer))
 
     logger.info(f"Model: {model}")
 
     # Idk causes weird issues without this when doing multiple runs from different codebases
     import streaming
+
     streaming.base.util.clean_stale_shared_memory()
-    
+
     if script_args.token_scaled_loss:
         model.token_scaled_loss = True
         training_args.token_scaled_loss = True
 
     # load_datasets
     if training_args.do_train:
-        train_dataset = build_dataset(script_args.tokenized_mds_train, training_args, data_args, is_training=True)
+        train_dataset = build_dataset(
+            script_args.tokenized_mds_train, training_args, data_args, is_training=True
+        )
 
     if training_args.do_eval:
         eval_dataset = {
-            x.split("/")[-1]: build_dataset([x], training_args, data_args, is_training=False)
+            x.split("/")[-1]: build_dataset(
+                [x], training_args, data_args, is_training=False
+            )
             for x in script_args.tokenized_mds_validation
         }
 
     if training_args.do_predict:
         test_dataset = {
-            x.split("/")[-1]: build_dataset([x], training_args, data_args, is_training=False)
+            x.split("/")[-1]: build_dataset(
+                [x], training_args, data_args, is_training=False
+            )
             for x in script_args.tokenized_mds_test
         }
 
     data_collator = DataCollator(tokenizer, data_args)
     assert training_args.max_steps is not None, "max_steps must be set!"
-    
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -206,8 +221,9 @@ def main():
         def fsdp_policy_fn(module):
             return getattr(module, "_fsdp_wrap", False)
 
-        auto_wrap_policy = functools.partial(lambda_auto_wrap_policy,
-                                             lambda_fn=fsdp_policy_fn)
+        auto_wrap_policy = functools.partial(
+            lambda_auto_wrap_policy, lambda_fn=fsdp_policy_fn
+        )
         trainer.accelerator.state.fsdp_plugin.auto_wrap_policy = auto_wrap_policy
 
     # Training
@@ -238,10 +254,10 @@ def main():
         predictions = trainer.predict(test_dataset=test_dataset)
         predictions = predictions.predictions
         predictions = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        
+
         # Save predictions to output directory
-        output_file = os.path.join(training_args.output_dir, 'predictions.json')
-        with open(output_file, 'w') as f:
+        output_file = os.path.join(training_args.output_dir, "predictions.json")
+        with open(output_file, "w") as f:
             json.dump(predictions, f, indent=2)
 
 

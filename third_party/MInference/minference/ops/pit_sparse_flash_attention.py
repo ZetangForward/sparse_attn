@@ -11,31 +11,51 @@ from pycuda.compiler import SourceModule
 
 
 @triton.autotune(
-   configs=[
-       triton.Config({}, num_stages=1, num_warps=4),
-       triton.Config({}, num_stages=1, num_warps=8),
-       triton.Config({}, num_stages=2, num_warps=4),
-       triton.Config({}, num_stages=2, num_warps=8),
-       triton.Config({}, num_stages=3, num_warps=4),
-       triton.Config({}, num_stages=3, num_warps=8),
-       triton.Config({}, num_stages=4, num_warps=4),
-       triton.Config({}, num_stages=4, num_warps=8),
-       triton.Config({}, num_stages=5, num_warps=4),
-       triton.Config({}, num_stages=5, num_warps=8),
-   ],
-   key=['N_CTX'],
+    configs=[
+        triton.Config({}, num_stages=1, num_warps=4),
+        triton.Config({}, num_stages=1, num_warps=8),
+        triton.Config({}, num_stages=2, num_warps=4),
+        triton.Config({}, num_stages=2, num_warps=8),
+        triton.Config({}, num_stages=3, num_warps=4),
+        triton.Config({}, num_stages=3, num_warps=8),
+        triton.Config({}, num_stages=4, num_warps=4),
+        triton.Config({}, num_stages=4, num_warps=8),
+        triton.Config({}, num_stages=5, num_warps=4),
+        triton.Config({}, num_stages=5, num_warps=8),
+    ],
+    key=["N_CTX"],
 )
 @triton.jit
 def triton_sparse_fwd_kernel(
-    Q, K, V, seqlens, sm_scale,
-    col_count, col_index,
+    Q,
+    K,
+    V,
+    seqlens,
+    sm_scale,
+    col_count,
+    col_index,
     Out,
-    stride_qz, stride_qh, stride_qm, stride_qk,
-    stride_kz, stride_kh, stride_kn, stride_kk,
-    stride_vz, stride_vh, stride_vn, stride_vk,
-    stride_oz, stride_oh, stride_om, stride_ok,
-    Z, H, N_CTX,
-    NUM_ROWS, MAX_COLS_PRE_ROW,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_ok,
+    Z,
+    H,
+    N_CTX,
+    NUM_ROWS,
+    MAX_COLS_PRE_ROW,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -130,12 +150,12 @@ def triton_sparse_fwd_kernel(
 
 
 def triton_sparse_forward(
-    q,                 # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    k,                 # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    v,                 # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    seqlens,           # [BATCH, ]
-    col_count,         # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M)]
-    col_index,         # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), MAX_COLS_PRE_ROW]
+    q,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    k,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    v,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    seqlens,  # [BATCH, ]
+    col_count,  # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M)]
+    col_index,  # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), MAX_COLS_PRE_ROW]
     sm_scale,
     block_size_M=64,
     block_size_N=64,
@@ -149,16 +169,37 @@ def triton_sparse_forward(
     num_warps = 4 if (Lk <= 64 or block_size_M <= 64) else 8  # 4
     dtype = tl.bfloat16 if q.dtype == torch.bfloat16 else tl.float16
     triton_sparse_fwd_kernel[grid](
-        q, k, v, seqlens, sm_scale,
-        col_count, col_index,
+        q,
+        k,
+        v,
+        seqlens,
+        sm_scale,
+        col_count,
+        col_index,
         o,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        q.shape[0], q.shape[1], q.shape[2],
-        col_index.shape[-2], col_index.shape[-1],
-        BLOCK_M=block_size_M, BLOCK_N=block_size_N,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        col_index.shape[-2],
+        col_index.shape[-1],
+        BLOCK_M=block_size_M,
+        BLOCK_N=block_size_N,
         BLOCK_DMODEL=Lk,
         dtype=dtype,
         # num_warps=num_warps, num_stages=4,
@@ -174,7 +215,9 @@ def torch_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M=64)
     num_rows = triton.cdiv(max_cols_per_row, block_size_M)
     max_cols_per_row = max_cols_per_row
     col_count = torch.zeros((batch_size, num_heads, num_rows), dtype=torch.int32)
-    col_index = torch.zeros((batch_size, num_heads, num_rows, max_cols_per_row), dtype=torch.int32)
+    col_index = torch.zeros(
+        (batch_size, num_heads, num_rows, max_cols_per_row), dtype=torch.int32
+    )
     for b in range(batch_size):
         seqlen = seqlens[b]
         for h in range(num_heads):
@@ -202,7 +245,9 @@ def torch_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M=64)
                         else:
                             break
                     else:
-                        for idx in range(max(cursor, s_idx - s_range), min(s_idx, seqlen)):
+                        for idx in range(
+                            max(cursor, s_idx - s_range), min(s_idx, seqlen)
+                        ):
                             col_index[b, h, m, tmp_col_count] = idx
                             tmp_col_count += 1
                         cursor = s_idx
@@ -236,8 +281,7 @@ def torch_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M=64)
     return col_count.to(seqlens.device), col_index.to(seqlens.device)
 
 
-
-PYCUDA_BUILD_INDEX_KERNEL_CODE = '''\
+PYCUDA_BUILD_INDEX_KERNEL_CODE = """\
 __device__ int min(int x, int y) {
     return x < y ? x : y;
 }
@@ -373,11 +417,11 @@ __global__ void PYCUDA_BUILD_INDEX_KERNEL(
     }
     col_count[0] = tmp_col_count;
 }
-'''
+"""
 PYCUDA_BUILD_INDEX_KERNEL = SourceModule(
     PYCUDA_BUILD_INDEX_KERNEL_CODE,
-    options=['-std=c++14', '-O3'],
-).get_function(f'PYCUDA_BUILD_INDEX_KERNEL')
+    options=["-std=c++14", "-O3"],
+).get_function(f"PYCUDA_BUILD_INDEX_KERNEL")
 
 
 def pycuda_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M=64):
@@ -386,14 +430,27 @@ def pycuda_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M=64
     NNZ_V = vertical_indexes.shape[-1]
     num_rows = triton.cdiv(max_cols_per_row, block_size_M)
     max_cols_per_row = max_cols_per_row
-    col_count = torch.zeros((batch_size, num_heads, num_rows), dtype=torch.int32, device=seqlens.device)
-    col_index = torch.zeros((batch_size, num_heads, num_rows, max_cols_per_row), dtype=torch.int32, device=seqlens.device)
+    col_count = torch.zeros(
+        (batch_size, num_heads, num_rows), dtype=torch.int32, device=seqlens.device
+    )
+    col_index = torch.zeros(
+        (batch_size, num_heads, num_rows, max_cols_per_row),
+        dtype=torch.int32,
+        device=seqlens.device,
+    )
     num_threads = 64
     PYCUDA_BUILD_INDEX_KERNEL(
-        seqlens, vertical_indexes, slash_indexes,
-        col_count, col_index,
-        np.int32(num_heads), np.int32(max_cols_per_row), np.int32(block_size_M), np.int32(num_rows),
-        np.int32(NNZ_V), np.int32(NNZ_S),
+        seqlens,
+        vertical_indexes,
+        slash_indexes,
+        col_count,
+        col_index,
+        np.int32(num_heads),
+        np.int32(max_cols_per_row),
+        np.int32(block_size_M),
+        np.int32(num_rows),
+        np.int32(NNZ_V),
+        np.int32(NNZ_S),
         # grid=(triton.cdiv(num_rows, num_threads), N_HEADS, BATCH),
         grid=(num_heads, batch_size, triton.cdiv(num_rows, num_threads)),
         block=(num_threads, 1, 1),
@@ -416,21 +473,33 @@ def make_finegrained_mask(vertical_indexes, slash_indexes, causal_mask, device):
     batch_size, num_heads, _ = vertical_indexes.shape
     context_size = causal_mask.shape[-1]
     arange = torch.arange(context_size, dtype=torch.int32, device=device)
-    sparse_mask = torch.zeros((batch_size, num_heads, context_size, context_size), dtype=torch.bool, device=device)
+    sparse_mask = torch.zeros(
+        (batch_size, num_heads, context_size, context_size),
+        dtype=torch.bool,
+        device=device,
+    )
     for b in range(batch_size):
         for h in range(num_heads):
             for vertical_index in vertical_indexes[b, h]:
                 sparse_mask[b, h, :, vertical_index] = True
             for slash_index in slash_indexes[b, h]:
-                sparse_mask[b, h].logical_or_(arange[:, None] - arange[None, :] == slash_index)
+                sparse_mask[b, h].logical_or_(
+                    arange[:, None] - arange[None, :] == slash_index
+                )
     sparse_mask.logical_and_(causal_mask)
     return sparse_mask
 
 
-def make_block_mask(col_count, col_index, seqlens, causal_mask, device, block_size_M=64):
+def make_block_mask(
+    col_count, col_index, seqlens, causal_mask, device, block_size_M=64
+):
     batch_size, num_heads, _ = col_count.shape
     context_size = causal_mask.shape[-1]
-    block_mask = torch.zeros((batch_size, num_heads, context_size, context_size), dtype=torch.bool, device=device)
+    block_mask = torch.zeros(
+        (batch_size, num_heads, context_size, context_size),
+        dtype=torch.bool,
+        device=device,
+    )
     for b in range(batch_size):
         for h in range(num_heads):
             for m, start_m in enumerate(range(0, seqlens[b], block_size_M)):
@@ -444,6 +513,7 @@ def make_block_mask(col_count, col_index, seqlens, causal_mask, device, block_si
 def plot_mask(mask, name, batch=0, head=0):
     import matplotlib.pyplot as plt
     import seaborn as sns
+
     plt.figure(figsize=(16, 12))
     plt.clf()
     mask = mask[batch, head].cpu().numpy()
@@ -453,14 +523,33 @@ def plot_mask(mask, name, batch=0, head=0):
 
 @triton.jit
 def triton_dense_fwd_kernel(
-    Q, K, V, seqlens, sm_scale,
+    Q,
+    K,
+    V,
+    seqlens,
+    sm_scale,
     Out,
-    stride_qz, stride_qh, stride_qm, stride_qk,
-    stride_kz, stride_kh, stride_kn, stride_kk,
-    stride_vz, stride_vh, stride_vn, stride_vk,
-    stride_oz, stride_oh, stride_om, stride_ok,
-    Z, H, N_CTX,
-    BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_ok,
+    Z,
+    H,
+    N_CTX,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     dtype: tl.constexpr,
 ):
@@ -479,7 +568,7 @@ def triton_dense_fwd_kernel(
         strides=(stride_qm, stride_qk),
         offsets=(start_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0)
+        order=(1, 0),
     )
     K_block_ptr = tl.make_block_ptr(
         base=K + kv_offset,
@@ -487,7 +576,7 @@ def triton_dense_fwd_kernel(
         strides=(stride_kk, stride_kn),
         offsets=(0, 0),
         block_shape=(BLOCK_DMODEL, BLOCK_N),
-        order=(0, 1)
+        order=(0, 1),
     )
     V_block_ptr = tl.make_block_ptr(
         base=V + kv_offset,
@@ -495,7 +584,7 @@ def triton_dense_fwd_kernel(
         strides=(stride_vn, stride_vk),
         offsets=(0, 0),
         block_shape=(BLOCK_N, BLOCK_DMODEL),
-        order=(1, 0)
+        order=(1, 0),
     )
     # initialize offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -547,12 +636,14 @@ def triton_dense_fwd_kernel(
         strides=(stride_om, stride_ok),
         offsets=(start_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0)
+        order=(1, 0),
     )
     tl.store(O_block_ptr, acc.to(dtype), mask=m_mask)
 
 
-def triton_dense_forward(q, k, v, seqlens, sm_scale, block_size_M=128, block_size_N=64) -> torch.Tensor:
+def triton_dense_forward(
+    q, k, v, seqlens, sm_scale, block_size_M=128, block_size_N=64
+) -> torch.Tensor:
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
@@ -562,17 +653,37 @@ def triton_dense_forward(q, k, v, seqlens, sm_scale, block_size_M=128, block_siz
     num_warps = 4 if Lk <= 64 else 8  # 4
     dtype = tl.bfloat16 if q.dtype == torch.bfloat16 else tl.float16
     triton_dense_fwd_kernel[grid](
-        q, k, v, seqlens, sm_scale,
+        q,
+        k,
+        v,
+        seqlens,
+        sm_scale,
         o,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        q.shape[0], q.shape[1], q.shape[2],
-        BLOCK_M=block_size_M, BLOCK_N=block_size_N,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        BLOCK_M=block_size_M,
+        BLOCK_N=block_size_N,
         BLOCK_DMODEL=Lk,
         dtype=dtype,
-        num_warps=num_warps, num_stages=4,
+        num_warps=num_warps,
+        num_stages=4,
     )
 
     return o
@@ -600,20 +711,20 @@ def torch_forward(
     mask: torch.Tensor,
     sm_scale: float,
 ) -> torch.Tensor:
-    p = torch.einsum(f'bhmk, bhnk -> bhmn', query, key) * sm_scale
+    p = torch.einsum(f"bhmk, bhnk -> bhmn", query, key) * sm_scale
     p = p.where(mask, -torch.inf)
     p_max = p.max(-1, keepdim=True).values
     p_max = torch.where(p_max < 0, 0.0, p_max)
     p_exp = torch.exp(p - p_max)
     s = p_exp / (p_exp.sum(-1, keepdim=True) + 1e-6)
-    out = torch.einsum(f'bhmn, bhnk -> bhmk', s, value)
+    out = torch.einsum(f"bhmn, bhnk -> bhmk", s, value)
     return out
 
 
 def profile(fn, total_flops, tag, warmup=25, rep=100):
     ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     gflops = total_flops / ms * 1e-9
-    print(f'{tag}: {ms:.3f} ms | {gflops:.3f} GFLOP/s')
+    print(f"{tag}: {ms:.3f} ms | {gflops:.3f} GFLOP/s")
 
 
 def test_flash_attention(
@@ -631,17 +742,31 @@ def test_flash_attention(
     block_size_M=64,
     block_size_N=64,
 ):
-    print('========================================')
-    print(f'BATCH={batch_size}, N_CTX={context_size}, N_HEADS={num_heads}, D_HEAD={head_dim}')
-    q = torch.randn((batch_size, num_heads, context_size, head_dim), dtype=dtype, device=device)
-    k = torch.randn((batch_size, num_heads, context_size, head_dim), dtype=dtype, device=device)
-    v = torch.randn((batch_size, num_heads, context_size, head_dim), dtype=dtype, device=device)
+    print("========================================")
+    print(
+        f"BATCH={batch_size}, N_CTX={context_size}, N_HEADS={num_heads}, D_HEAD={head_dim}"
+    )
+    q = torch.randn(
+        (batch_size, num_heads, context_size, head_dim), dtype=dtype, device=device
+    )
+    k = torch.randn(
+        (batch_size, num_heads, context_size, head_dim), dtype=dtype, device=device
+    )
+    v = torch.randn(
+        (batch_size, num_heads, context_size, head_dim), dtype=dtype, device=device
+    )
     if seqlens is None:
-        seqlens = torch.randint(context_size // 2, context_size, (batch_size, ), dtype=torch.int32, device=device)
+        seqlens = torch.randint(
+            context_size // 2,
+            context_size,
+            (batch_size,),
+            dtype=torch.int32,
+            device=device,
+        )
     else:
         seqlens = torch.tensor(seqlens, dtype=torch.int32, device=device)
     dense_mask_nnz = seqlens.to(torch.float32).square().sum().item() * num_heads / 2
-    sm_scale = head_dim ** -0.5
+    sm_scale = head_dim**-0.5
 
     causal_mask = make_causal_mask(seqlens, device, context_size)
     if torch_test:
@@ -649,37 +774,65 @@ def test_flash_attention(
 
     if vertical_indexes is None or slash_indexes is None:
         nnz = int((1 - sparsity) * context_size)
-        vertical_indexes = torch.stack([
-            torch.stack([
-                torch.randperm(seqlen, dtype=torch.int32, device=device)[:nnz].sort(descending=False)[0]
-                for _ in range(num_heads)
-            ])
-            for seqlen in seqlens
-        ])
-        slash_indexes = torch.concatenate([
-            torch.stack([
-                torch.stack([
-                    torch.randperm(seqlen - 1, dtype=torch.int32, device=device)[:nnz].sort(descending=True)[0] + 1
-                    for _ in range(num_heads)
-                ])
+        vertical_indexes = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.randperm(seqlen, dtype=torch.int32, device=device)[
+                            :nnz
+                        ].sort(descending=False)[0]
+                        for _ in range(num_heads)
+                    ]
+                )
                 for seqlen in seqlens
-            ]),
-            torch.zeros((batch_size, num_heads, 1), dtype=torch.int32, device=device)
-        ], dim=-1)
-    col_count, col_index = pycuda_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M)
+            ]
+        )
+        slash_indexes = torch.concatenate(
+            [
+                torch.stack(
+                    [
+                        torch.stack(
+                            [
+                                torch.randperm(
+                                    seqlen - 1, dtype=torch.int32, device=device
+                                )[:nnz].sort(descending=True)[0]
+                                + 1
+                                for _ in range(num_heads)
+                            ]
+                        )
+                        for seqlen in seqlens
+                    ]
+                ),
+                torch.zeros(
+                    (batch_size, num_heads, 1), dtype=torch.int32, device=device
+                ),
+            ],
+            dim=-1,
+        )
+    col_count, col_index = pycuda_build_index(
+        seqlens, vertical_indexes, slash_indexes, block_size_M
+    )
     if torch_test:
-        col_count_ref, col_index_ref = torch_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M)
+        col_count_ref, col_index_ref = torch_build_index(
+            seqlens, vertical_indexes, slash_indexes, block_size_M
+        )
         # import ipdb; ipdb.set_trace()
         torch.testing.assert_close(col_count_ref, col_count)
         torch.testing.assert_close(col_index_ref, col_index)
     sparse_mask_nnz = col_count.to(torch.float32).sum().item() * block_size_M
-    print(f'block mask sparsity: {1 - sparse_mask_nnz / dense_mask_nnz}')
-    pycuda_build_index_fn = lambda: pycuda_build_index(seqlens, vertical_indexes, slash_indexes, block_size_M)
-    profile(pycuda_build_index_fn, 0., 'pycuda-index')
+    print(f"block mask sparsity: {1 - sparse_mask_nnz / dense_mask_nnz}")
+    pycuda_build_index_fn = lambda: pycuda_build_index(
+        seqlens, vertical_indexes, slash_indexes, block_size_M
+    )
+    profile(pycuda_build_index_fn, 0.0, "pycuda-index")
 
     if torch_test:
-        finegrained_mask = make_finegrained_mask(vertical_indexes, slash_indexes, causal_mask, device)
-        block_mask = make_block_mask(col_count, col_index, seqlens, causal_mask, device, block_size_M)
+        finegrained_mask = make_finegrained_mask(
+            vertical_indexes, slash_indexes, causal_mask, device
+        )
+        block_mask = make_block_mask(
+            col_count, col_index, seqlens, causal_mask, device, block_size_M
+        )
         # plot_mask(finegrained_mask, 'mask.png', 2, 26)
         # plot_mask(block_mask, 'mask-1.png', 2, 26)
         ref_o_sparse = torch_forward(q, k, v, block_mask, sm_scale)
@@ -688,13 +841,15 @@ def test_flash_attention(
     output = triton_dense_fn()
     if torch_test:
         torch.testing.assert_close(output, ref_o_dense, atol=1e-2, rtol=0)
-    profile(triton_dense_fn, 2. * head_dim * dense_mask_nnz, 'triton-dense')
+    profile(triton_dense_fn, 2.0 * head_dim * dense_mask_nnz, "triton-dense")
 
-    triton_sparse_fn = lambda: triton_sparse_forward(q, k, v, seqlens, col_count, col_index, sm_scale, block_size_M, block_size_N)
+    triton_sparse_fn = lambda: triton_sparse_forward(
+        q, k, v, seqlens, col_count, col_index, sm_scale, block_size_M, block_size_N
+    )
     output = triton_sparse_fn()
     if torch_test:
         torch.testing.assert_close(output, ref_o_sparse, atol=1e-2, rtol=0)
-    profile(triton_sparse_fn, 2. * head_dim * sparse_mask_nnz, 'triton-sparse')
+    profile(triton_sparse_fn, 2.0 * head_dim * sparse_mask_nnz, "triton-sparse")
 
     q = q.swapaxes(1, 2).contiguous()
     k = k.swapaxes(1, 2).contiguous()
@@ -702,26 +857,34 @@ def test_flash_attention(
     q = torch.concatenate([q[i, :seqlen, :, :] for i, seqlen in enumerate(seqlens)])
     k = torch.concatenate([k[i, :seqlen, :, :] for i, seqlen in enumerate(seqlens)])
     v = torch.concatenate([v[i, :seqlen, :, :] for i, seqlen in enumerate(seqlens)])
-    seqlens = torch.nn.functional.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+    seqlens = torch.nn.functional.pad(
+        torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
+    )
 
     flash_fn = lambda: flash_attn_forward(q, k, v, seqlens, sm_scale, context_size)
     output = flash_fn()
-    output = torch.stack([
-        torch.nn.functional.pad(
-            output[seqlens[i]:seqlens[i + 1], :, :],
-            (0, 0, 0, 0, 0, context_size + seqlens[i] - seqlens[i + 1])
+    output = (
+        torch.stack(
+            [
+                torch.nn.functional.pad(
+                    output[seqlens[i] : seqlens[i + 1], :, :],
+                    (0, 0, 0, 0, 0, context_size + seqlens[i] - seqlens[i + 1]),
+                )
+                for i in range(batch_size)
+            ]
         )
-        for i in range(batch_size)
-    ]).swapaxes(1, 2).contiguous()
+        .swapaxes(1, 2)
+        .contiguous()
+    )
     if torch_test:
         torch.testing.assert_close(output, ref_o_dense, atol=1e-2, rtol=0)
-    profile(flash_fn, 2. * head_dim * dense_mask_nnz, 'flash-dense')
-    print('========================================\n')
+    profile(flash_fn, 2.0 * head_dim * dense_mask_nnz, "flash-dense")
+    print("========================================\n")
 
 
 def pit_sparse_flash_attention_forward(
     query: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    key: torch.Tensor,    # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    key: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     value: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     v_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
     s_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
@@ -734,10 +897,28 @@ def pit_sparse_flash_attention_forward(
     key = torch.nn.functional.pad(key, [0, 0, 0, pad, 0, 0, 0, 0])
     value = torch.nn.functional.pad(value, [0, 0, 0, pad, 0, 0, 0, 0])
     batch_size, num_heads, context_size, head_dim = query.shape
-    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
-    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    v_idx = (
+        v_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=False)[0]
+    )
+    s_idx = (
+        s_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=True)[0]
+    )
     seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
-    sm_scale = head_dim ** -0.5
+    sm_scale = head_dim**-0.5
     col_count, col_index = pycuda_build_index(seqlens, v_idx, s_idx, block_size_M)
-    out = triton_sparse_forward(query, key, value, seqlens, col_count, col_index, sm_scale, block_size_M, block_size_N)[...,:q_len,:]
+    out = triton_sparse_forward(
+        query,
+        key,
+        value,
+        seqlens,
+        col_count,
+        col_index,
+        sm_scale,
+        block_size_M,
+        block_size_N,
+    )[..., :q_len, :]
     return out

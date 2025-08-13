@@ -228,9 +228,9 @@ class VectorDB_KV_Cache:
                     head_num=key_states.shape[1], dim=key_states.shape[3]
                 )
             except:
-                assert (
-                    False
-                ), "Please install papyfaiss. Refer to https://github.com/microsoft/RetrievalAttention"
+                assert False, (
+                    "Please install papyfaiss. Refer to https://github.com/microsoft/RetrievalAttention"
+                )
             # index = papyfaiss.FlatIndexSQ(head_num=key_states.shape[1], dim=key_states.shape[3])
             # IVF index
             # index = papyfaiss.IVFIndexSQ(head_num=key_states.shape[1], dim=key_states.shape[3], n_centroids=512, quant="SQ8", use_gpu=True)

@@ -119,9 +119,7 @@ def get_pred(
             prompt = build_chat(tokenizer, prompt, model_name)
 
         input = tokenizer(prompt, truncation=False, return_tensors="pt").to("cuda")
-        pbar.set_description(
-            f"Generating for {idx}, len = {input.input_ids.shape[-1]}"
-        )
+        pbar.set_description(f"Generating for {idx}, len = {input.input_ids.shape[-1]}")
         simulation_start_idx = input.input_ids.shape[-1] - decoding_simulation_length
         with torch.no_grad():
             output = model(

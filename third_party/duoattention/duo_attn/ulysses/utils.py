@@ -26,9 +26,9 @@ def all_to_all_4D(
     Returns:
         torch.tensor: resharded tensor (bs, seqlen/P, hc, hs)
     """
-    assert (
-        input.dim() == 4
-    ), f"input must be 4D tensor, got {input.dim()} and shape {input.shape}"
+    assert input.dim() == 4, (
+        f"input must be 4D tensor, got {input.dim()} and shape {input.shape}"
+    )
 
     seq_world_size = dist.get_world_size(group)
 
@@ -135,9 +135,9 @@ def all_to_all_5D(
     Returns:
         torch.tensor: resharded tensor (bs, seqlen/P, 3, hc, hs)
     """
-    assert (
-        input.dim() == 5
-    ), f"input must be 5D tensor, got {input.dim()} and shape {input.shape}"
+    assert input.dim() == 5, (
+        f"input must be 5D tensor, got {input.dim()} and shape {input.shape}"
+    )
 
     seq_world_size = dist.get_world_size(group)
 
@@ -211,7 +211,6 @@ class SeqAllToAll5D(torch.autograd.Function):
         scatter_idx: int = 3,
         gather_idx: int = 1,
     ) -> Tensor:
-
         ctx.group = group
         ctx.scatter_idx = scatter_idx
         ctx.gather_idx = gather_idx

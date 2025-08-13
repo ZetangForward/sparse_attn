@@ -1036,7 +1036,7 @@ def inf_llm_forward(
     perhead=False,
     dense_decoding=False,
     *args,
-    **kwargs
+    **kwargs,
 ):
     def forward(
         self,

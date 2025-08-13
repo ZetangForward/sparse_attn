@@ -114,9 +114,9 @@ def pack_tensor(data, bits, pack_dim):
     shape = data.shape
     feat_per_int = 32 // bits
     assert bits in [2, 4, 8], "Only 2, 4, 8 bits are supported"
-    assert (
-        shape[pack_dim] % feat_per_int == 0
-    ), "Dimension length must be divisible by number of features per int"
+    assert shape[pack_dim] % feat_per_int == 0, (
+        "Dimension length must be divisible by number of features per int"
+    )
     # BS, nh, T, nd // 16 # 16 is for 2bit
     code = torch.zeros(
         shape[:pack_dim] + (shape[pack_dim] // feat_per_int,) + shape[pack_dim + 1 :],
@@ -345,12 +345,12 @@ def qbvm_kernel(
     scales_ptr = (
         scales_ptr
         + pid_batch * stride_scales_b
-        + ((offs_bn[None, :] // groupsize)) * stride_scales_g
+        + (offs_bn[None, :] // groupsize) * stride_scales_g
     )  # (BLOCK_SIZE_N,)
     zeros_ptr = (
         zeros_ptr
         + pid_batch * stride_zeros_b
-        + ((offs_bn[None, :] // groupsize)) * stride_zeros_g
+        + (offs_bn[None, :] // groupsize) * stride_zeros_g
     )  # (BLOCK_SIZE_N,)
 
     # Now calculate a block of output of shape (BLOCK_SIZE_M, BLOCK_SIZE_N)
@@ -440,9 +440,9 @@ def triton_bmm_fA_qB_outer(
     # This is based on the possible BLOCK_SIZE_Ks
     # assert K % 16 == 0 and K % 32 == 0 and K % 64 == 0 and K % 128 == 0, "K must be a multiple of 16, 32, 64, and 128"
     # This is based on the possible BLOCK_SIZE_Ns
-    assert (
-        N % 16 == 0 and N % 32 == 0 and N % 64 == 0
-    ), "N must be a multiple of 16, 32, 64, 128, and 256"
+    assert N % 16 == 0 and N % 32 == 0 and N % 64 == 0, (
+        "N must be a multiple of 16, 32, 64, 128, and 256"
+    )
     # This is based on the possible BLOCK_SIZE_Ks
     assert group_size % 64 == 0, "groupsize must be a multiple of 64, and 128"
     flatten_B = B * nh

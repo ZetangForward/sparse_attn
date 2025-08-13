@@ -29,7 +29,6 @@ class UlyssesAttention(torch.nn.Module):
         scatter_idx: int = 2,
         gather_idx: int = 1,
     ) -> None:
-
         super(UlyssesAttention, self).__init__()
         self.spg = sequence_process_group
         self.scatter_idx = scatter_idx

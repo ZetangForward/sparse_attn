@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .quest import repeat_kv
 
+
 class SnapKVCluster:
     def __init__(
         self,
@@ -58,12 +59,16 @@ class SnapKVCluster:
         else:
             bsz, num_kv_heads, q_len, head_dim = key_states.shape
             num_heads = num_kv_heads * self.n_rep
-        
+
         k_cur = key_states[:, :, -self.window_size :, :]
         v_cur = value_states[:, :, -self.window_size :, :]
 
         # Use override if provided, otherwise use the class default
-        current_max_capacity = capacity_override if capacity_override is not None else self.max_capacity_prompt
+        current_max_capacity = (
+            capacity_override
+            if capacity_override is not None
+            else self.max_capacity_prompt
+        )
 
         if q_len < current_max_capacity:
             return key_states, value_states
@@ -74,7 +79,8 @@ class SnapKVCluster:
                 key_states_for_calculation = repeat_kv(key_states, self.n_rep)
 
             attn_weights = torch.matmul(
-                query_states[..., -self.window_size :, :], key_states_for_calculation.transpose(2, 3)
+                query_states[..., -self.window_size :, :],
+                key_states_for_calculation.transpose(2, 3),
             ) / math.sqrt(head_dim)
             mask = torch.full(
                 (self.window_size, self.window_size),
@@ -86,9 +92,9 @@ class SnapKVCluster:
             mask = mask.to(attn_weights.device)
             attention_mask = mask[None, None, :, :]
 
-            attn_weights[
-                :, :, -self.window_size :, -self.window_size :
-            ] += attention_mask
+            attn_weights[:, :, -self.window_size :, -self.window_size :] += (
+                attention_mask
+            )
 
             attn_weights = nn.functional.softmax(
                 attn_weights, dim=-1, dtype=torch.float32
@@ -112,7 +118,7 @@ class SnapKVCluster:
                 )
             else:
                 raise ValueError("Pooling method not supported")
-            
+
             if self.n_rep is not None:
                 # The attn is are currently [bsz, num_heads, window_size, q_len]
                 # We need to convert them to [bsz, num_kv_heads, window_size, q_len] by mean pooling
@@ -126,14 +132,13 @@ class SnapKVCluster:
                 value_states = v_cur
             else:
                 indices = attn_cache.topk(
-                    min(
-                        current_max_capacity - self.window_size,
-                        attn_cache.shape[-1]
-                    ), 
-                    dim=-1
+                    min(current_max_capacity - self.window_size, attn_cache.shape[-1]),
+                    dim=-1,
                 ).indices
-                indices = indices.sort(dim=-1)[0] # New: sort in the correct order of tokens
-                
+                indices = indices.sort(dim=-1)[
+                    0
+                ]  # New: sort in the correct order of tokens
+
                 indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
                 k_past_compress = key_states[:, :, : -self.window_size, :].gather(
                     dim=2, index=indices
@@ -143,7 +148,7 @@ class SnapKVCluster:
                 )
                 k_cur = key_states[:, :, -self.window_size :, :]
                 v_cur = value_states[:, :, -self.window_size :, :]
-                
+
                 key_states = torch.cat([k_past_compress, k_cur], dim=2)
                 value_states = torch.cat([v_past_compress, v_cur], dim=2)
             return key_states, value_states
@@ -190,7 +195,11 @@ class StreamingLLMKVCluster:
         bsz, num_heads, q_len, head_dim = query_states.shape
 
         # Use override if provided, otherwise use the class default
-        current_max_capacity = capacity_override if capacity_override is not None else self.max_capacity_prompt
+        current_max_capacity = (
+            capacity_override
+            if capacity_override is not None
+            else self.max_capacity_prompt
+        )
 
         if q_len < current_max_capacity:
             return key_states, value_states

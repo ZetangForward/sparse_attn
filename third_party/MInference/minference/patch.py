@@ -1234,9 +1234,9 @@ def minference_patch_vllm_executor(config_file: str, patch_config={}):
                     q, k, v, kv_cache, attn_metadata, layer_idx=layer_idx
                 )
             else:
-                assert (
-                    False
-                ), "Only support 'vllm>=0.4.1'. Please update your vllm version."
+                assert False, (
+                    "Only support 'vllm>=0.4.1'. Please update your vllm version."
+                )
 
             output, _ = self.o_proj(attn_output)
             return output

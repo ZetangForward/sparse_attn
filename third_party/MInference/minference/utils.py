@@ -156,9 +156,9 @@ def prepare_input(
     ):
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
-        kwargs[
-            "position_ids"
-        ] = position_ids  # placed in kwargs for further processing (see below)
+        kwargs["position_ids"] = (
+            position_ids  # placed in kwargs for further processing (see below)
+        )
 
     for model_input_name in ["position_ids", "token_type_ids"]:
         model_input = kwargs.get(model_input_name)

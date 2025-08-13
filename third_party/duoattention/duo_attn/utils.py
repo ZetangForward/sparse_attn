@@ -132,9 +132,9 @@ import re
 def get_mistral_config(
     model_config: PretrainedConfig, devices: Sequence[torch.device]
 ) -> Config:
-    assert (
-        model_config.model_type == "mistral"
-    ), f"Trying to pass {model_config.model_type} as mistral config"
+    assert model_config.model_type == "mistral", (
+        f"Trying to pass {model_config.model_type} as mistral config"
+    )
 
     world_size = len(devices)
     head_dim = model_config.hidden_size // model_config.num_attention_heads

@@ -16,7 +16,7 @@ from .src import (
     Xattention_prefill,
     Flexprefill_prefill,
     Minference_prefill,
-    Full_prefill
+    Full_prefill,
 )
 
 from .threshold import (
@@ -26,9 +26,7 @@ from .threshold import (
 )
 
 # Training modules
-from .training import (
-    DistributedAttention
-)
+from .training import DistributedAttention
 
 __all__ = [
     "Xattention_prefill",
@@ -38,7 +36,7 @@ __all__ = [
     "llama_fuse_16",
     "llama_fuse_8",
     "llama_fuse_4",
-    "DistributedAttention"
+    "DistributedAttention",
 ]
 
 __version__ = "0.1.0"

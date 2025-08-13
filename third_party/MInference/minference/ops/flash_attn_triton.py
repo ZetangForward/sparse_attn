@@ -61,13 +61,22 @@ def _fwd_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_HEADDIM)
     q_ptrs = (
-        Q + off_b * stride_qb + off_h * stride_qh + (offs_m[:, None] * stride_qm + offs_d[None, :])
+        Q
+        + off_b * stride_qb
+        + off_h * stride_qh
+        + (offs_m[:, None] * stride_qm + offs_d[None, :])
     )
     k_ptrs = (
-        K + off_b * stride_kb + off_h * stride_kh + (offs_n[:, None] * stride_kn + offs_d[None, :])
+        K
+        + off_b * stride_kb
+        + off_h * stride_kh
+        + (offs_n[:, None] * stride_kn + offs_d[None, :])
     )
     v_ptrs = (
-        V + off_b * stride_vb + off_h * stride_vh + (offs_n[:, None] * stride_vn + offs_d[None, :])
+        V
+        + off_b * stride_vb
+        + off_h * stride_vh
+        + (offs_n[:, None] * stride_vn + offs_d[None, :])
     )
     if BIAS_TYPE == "vector":
         b_ptrs = Bias + off_b * stride_bb + off_h * stride_bh + offs_n
@@ -92,18 +101,26 @@ def _fwd_kernel(
             q = tl.load(q_ptrs, mask=offs_m[:, None] < seqlen_q, other=0.0)
         else:
             q = tl.load(
-                q_ptrs, mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim), other=0.0
+                q_ptrs,
+                mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
+                other=0.0,
             )
     # loop over k, v and update accumulator
     end_n = seqlen_k if not IS_CAUSAL else tl.minimum((start_m + 1) * BLOCK_M, seqlen_k)
     for start_n in range(0, end_n, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        if EVEN_N & EVEN_M:  # If we just do "if EVEN_N", there seems to be some race condition
+        if (
+            EVEN_N & EVEN_M
+        ):  # If we just do "if EVEN_N", there seems to be some race condition
             if EVEN_HEADDIM:
                 k = tl.load(k_ptrs + start_n * stride_kn)
             else:
-                k = tl.load(k_ptrs + start_n * stride_kn, mask=offs_d[None, :] < headdim, other=0.0)
+                k = tl.load(
+                    k_ptrs + start_n * stride_kn,
+                    mask=offs_d[None, :] < headdim,
+                    other=0.0,
+                )
         else:
             if EVEN_HEADDIM:
                 k = tl.load(
@@ -114,7 +131,8 @@ def _fwd_kernel(
             else:
                 k = tl.load(
                     k_ptrs + start_n * stride_kn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
+                    mask=((start_n + offs_n)[:, None] < seqlen_k)
+                    & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -123,7 +141,9 @@ def _fwd_kernel(
         if not EVEN_N:  # Need to mask out otherwise the softmax is wrong
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
         if IS_CAUSAL:
-            qk += tl.where(offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf"))
+            qk += tl.where(
+                offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf")
+            )
         if BIAS_TYPE != "none":
             if BIAS_TYPE == "vector":
                 if EVEN_N:
@@ -159,11 +179,17 @@ def _fwd_kernel(
         acc_o_scale = tl.load(t_ptrs)
         acc_o = acc_o * acc_o_scale[:, None]
         # update acc_o
-        if EVEN_N & EVEN_M:  # If we just do "if EVEN_N", there seems to be some race condition
+        if (
+            EVEN_N & EVEN_M
+        ):  # If we just do "if EVEN_N", there seems to be some race condition
             if EVEN_HEADDIM:
                 v = tl.load(v_ptrs + start_n * stride_vn)
             else:
-                v = tl.load(v_ptrs + start_n * stride_vn, mask=offs_d[None, :] < headdim, other=0.0)
+                v = tl.load(
+                    v_ptrs + start_n * stride_vn,
+                    mask=offs_d[None, :] < headdim,
+                    other=0.0,
+                )
         else:
             if EVEN_HEADDIM:
                 v = tl.load(
@@ -174,7 +200,8 @@ def _fwd_kernel(
             else:
                 v = tl.load(
                     v_ptrs + start_n * stride_vn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
+                    mask=((start_n + offs_n)[:, None] < seqlen_k)
+                    & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
         p = p.to(v.dtype)
@@ -210,10 +237,15 @@ def _fwd_kernel(
             tl.store(out_ptrs, acc_o, mask=offs_m[:, None] < seqlen_q)
         else:
             tl.store(
-                out_ptrs, acc_o, mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim)
+                out_ptrs,
+                acc_o,
+                mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
             )
 
-def _flash_attn_triton_decoding(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False):
+
+def _flash_attn_triton_decoding(
+    q, k, v, dropout_p=0.0, softmax_scale=None, causal=False
+):
     # shape constraints
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
@@ -241,14 +273,21 @@ def _flash_attn_triton_decoding(q, k, v, dropout_p=0.0, softmax_scale=None, caus
             bias_type = "matrix"
         else:
             raise RuntimeError(
-                "Last 2 dimensions of bias must be (1, seqlen_k)" " or (seqlen_q, seqlen_k)"
+                "Last 2 dimensions of bias must be (1, seqlen_k)"
+                " or (seqlen_q, seqlen_k)"
             )
         bias = bias.expand(batch, nheads, seqlen_q, seqlen_k)
-    bias_strides = (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
+    bias_strides = (
+        (bias.stride(0), bias.stride(1), bias.stride(2)) if has_bias else (0, 0, 0)
+    )
 
     seqlen_q_rounded = math.ceil(seqlen_q / 128) * 128
-    lse = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
-    tmp = torch.empty((batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32)
+    lse = torch.empty(
+        (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
+    )
+    tmp = torch.empty(
+        (batch, nheads, seqlen_q_rounded), device=q.device, dtype=torch.float32
+    )
     o = torch.empty_like(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
@@ -294,11 +333,13 @@ def _flash_attn_triton_decoding(q, k, v, dropout_p=0.0, softmax_scale=None, caus
         num_warps=num_warps,
         num_stages=1,
     )
-    return o #, lse, softmax_scale
+    return o  # , lse, softmax_scale
+
 
 def torch_decoding(q, k, v):
     def repeat_kv(kv, num_groups):
         return kv.repeat(num_groups, 1, 1)
+
     # q: [bsz, num_heads, q_len, head_dim]
     # k,v: [bsz, num_kv_heads, kv_len, head_dim]
     bsz, num_heads, q_len, head_dim = q.size()
@@ -313,27 +354,35 @@ def torch_decoding(q, k, v):
     v = repeat_kv(v, num_groups)
 
     o = torch.bmm(q, k.transpose(1, 2))
-    o = o / (head_dim ** 0.5)
+    o = o / (head_dim**0.5)
     o = torch.nn.functional.softmax(o, dim=-1, dtype=torch.float32).to(q.dtype)
     o = torch.bmm(o, v)
     return o.transpose(0, 1).view(1, num_heads, head_dim)
 
+
 if __name__ == "__main__":
     from flash_attn import flash_attn_func
+
     q = torch.randn(1, 32, 1, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(1, 32, 20, 128, device="cuda", dtype=torch.bfloat16)
     v = torch.randn(1, 32, 20, 128, device="cuda", dtype=torch.bfloat16)
 
     fa_o = flash_attn_func(
-        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1,2),
-        0.0, softmax_scale=None, causal=True
+        q.transpose(1, 2),
+        k.transpose(1, 2),
+        v.transpose(1, 2),
+        0.0,
+        softmax_scale=None,
+        causal=True,
     )
     t_o = torch_decoding(q, k, v)[:, None, ...]
 
-    print('testing flash_attn')
+    print("testing flash_attn")
     triton.testing.assert_close(fa_o, t_o)
 
-    print('testing flash_attn_triton_decoding')
-    fad_o, _, _ = _flash_attn_triton_decoding(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+    print("testing flash_attn_triton_decoding")
+    fad_o, _, _ = _flash_attn_triton_decoding(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+    )
     triton.testing.assert_close(fad_o, t_o)
     print(fad_o.shape)

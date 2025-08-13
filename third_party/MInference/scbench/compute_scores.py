@@ -604,9 +604,9 @@ def compute_scores(
                 try:
                     labels = get_labels(preds, subtask)
                     preds_ = get_preds(preds, subtask)
-                    assert len(preds_) == len(
-                        labels
-                    ), f"Length of preds_: {len(preds_)}, length of labels: {len(labels)}, subtask: {subtask}"
+                    assert len(preds_) == len(labels), (
+                        f"Length of preds_: {len(preds_)}, length of labels: {len(labels)}, subtask: {subtask}"
+                    )
                 except ValueError:
                     print(f"No prediction for {subtask}")
                     acc[subtask] = 0

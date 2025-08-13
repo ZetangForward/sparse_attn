@@ -7,7 +7,6 @@ from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
     LlamaModel,
     apply_rotary_pos_emb,
-
 )
 import types
 from .utils import (
@@ -40,7 +39,7 @@ def llama_duo_attention_forward_two_way(
     position_ids: Optional[torch.LongTensor] = None,
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     use_cache: bool = False,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -58,26 +57,56 @@ def llama_duo_attention_forward_two_way(
         full_key_states = self.k_proj(full_hidden_states)
         full_value_states = self.v_proj(full_hidden_states)
         full_query_states = full_query_states.view(
-            bsz, q_len, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, self.head_dim
+            bsz,
+            q_len,
+            self.num_heads
+            if hasattr(self, "num_heads")
+            else self.config.num_attention_heads,
+            self.head_dim,
         )
         full_key_states = full_key_states.view(
-            bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim
+            bsz,
+            q_len,
+            self.num_key_value_heads
+            if hasattr(self, "num_key_value_heads")
+            else self.config.num_key_value_heads,
+            self.head_dim,
         )
         full_value_states = full_value_states.view(
-            bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim
+            bsz,
+            q_len,
+            self.num_key_value_heads
+            if hasattr(self, "num_key_value_heads")
+            else self.config.num_key_value_heads,
+            self.head_dim,
         )
 
     streaming_query_states = self.q_proj(streaming_hidden_states)
     streaming_key_states = self.k_proj(streaming_hidden_states)
     streaming_value_states = self.v_proj(streaming_hidden_states)
     streaming_query_states = streaming_query_states.view(
-        bsz, q_len, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, self.head_dim
+        bsz,
+        q_len,
+        self.num_heads
+        if hasattr(self, "num_heads")
+        else self.config.num_attention_heads,
+        self.head_dim,
     )
     streaming_key_states = streaming_key_states.view(
-        bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim
+        bsz,
+        q_len,
+        self.num_key_value_heads
+        if hasattr(self, "num_key_value_heads")
+        else self.config.num_key_value_heads,
+        self.head_dim,
     )
     streaming_value_states = streaming_value_states.view(
-        bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim
+        bsz,
+        q_len,
+        self.num_key_value_heads
+        if hasattr(self, "num_key_value_heads")
+        else self.config.num_key_value_heads,
+        self.head_dim,
     )
 
     if position_embeddings is None:
@@ -118,9 +147,32 @@ def llama_duo_attention_forward_two_way(
 
     full_attention_heads = (
         self.full_attention_heads.clamp(0, 1)
-        .view(1, 1, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, 1, 1)
-        .expand(1, 1, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.num_key_value_groups, 1)
-        .reshape(1, 1, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, 1)
+        .view(
+            1,
+            1,
+            self.num_key_value_heads
+            if hasattr(self, "num_key_value_heads")
+            else self.config.num_key_value_heads,
+            1,
+            1,
+        )
+        .expand(
+            1,
+            1,
+            self.num_key_value_heads
+            if hasattr(self, "num_key_value_heads")
+            else self.config.num_key_value_heads,
+            self.num_key_value_groups,
+            1,
+        )
+        .reshape(
+            1,
+            1,
+            self.num_heads
+            if hasattr(self, "num_heads")
+            else self.config.num_attention_heads,
+            1,
+        )
     )
 
     streaming_attn_output = (
@@ -150,7 +202,7 @@ def llama_duo_attention_forward_one_way_reordered(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     bsz, q_len, _ = hidden_states.size()
@@ -159,10 +211,29 @@ def llama_duo_attention_forward_one_way_reordered(
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, self.head_dim)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim)
+    query_states = query_states.view(
+        bsz,
+        q_len,
+        self.num_heads
+        if hasattr(self, "num_heads")
+        else self.config.num_attention_heads,
+        self.head_dim,
+    )
+    key_states = key_states.view(
+        bsz,
+        q_len,
+        self.num_key_value_heads
+        if hasattr(self, "num_key_value_heads")
+        else self.config.num_key_value_heads,
+        self.head_dim,
+    )
     value_states = value_states.view(
-        bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim
+        bsz,
+        q_len,
+        self.num_key_value_heads
+        if hasattr(self, "num_key_value_heads")
+        else self.config.num_key_value_heads,
+        self.head_dim,
     )
 
     # new data structure for past_key_value
@@ -190,11 +261,17 @@ def llama_duo_attention_forward_one_way_reordered(
         self.full_attn_head_mask = self.full_attention_heads > 0.5
         self.num_full_attn_head = self.full_attn_head_mask.sum().item()
         self.num_streaming_attn_head = (
-            self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads - self.num_full_attn_head
+            self.num_key_value_heads
+            if hasattr(self, "num_key_value_heads")
+            else self.config.num_key_value_heads - self.num_full_attn_head
         )
 
         self.num_full_query_head = self.num_full_attn_head * self.num_key_value_groups
-        self.num_streaming_query_head = self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads - self.num_full_query_head
+        self.num_streaming_query_head = (
+            self.num_heads
+            if hasattr(self, "num_heads")
+            else self.config.num_attention_heads - self.num_full_query_head
+        )
 
     full_key_states = key_states[:, :, : self.num_full_attn_head, :]
     full_value_states = value_states[:, :, : self.num_full_attn_head, :]
@@ -326,10 +403,29 @@ def llama_duo_attention_forward_one_way_reordered_static(
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads, self.head_dim)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim)
+    query_states = query_states.view(
+        bsz,
+        q_len,
+        self.num_heads
+        if hasattr(self, "num_heads")
+        else self.config.num_attention_heads,
+        self.head_dim,
+    )
+    key_states = key_states.view(
+        bsz,
+        q_len,
+        self.num_key_value_heads
+        if hasattr(self, "num_key_value_heads")
+        else self.config.num_key_value_heads,
+        self.head_dim,
+    )
     value_states = value_states.view(
-        bsz, q_len, self.num_key_value_heads if hasattr(self, 'num_key_value_heads') else self.config.num_key_value_heads, self.head_dim
+        bsz,
+        q_len,
+        self.num_key_value_heads
+        if hasattr(self, "num_key_value_heads")
+        else self.config.num_key_value_heads,
+        self.head_dim,
     )
 
     kv_seq_len = q_len
@@ -404,7 +500,11 @@ def llama_duo_attention_forward_one_way_reordered_static(
         else:
             full_attn_output = None
 
-        if self.num_heads if hasattr(self, 'num_heads') else self.config.num_attention_heads - num_full_query_head > 0:
+        if (
+            self.num_heads
+            if hasattr(self, "num_heads")
+            else self.config.num_attention_heads - num_full_query_head > 0
+        ):
             streaming_query_states = query_states[:, :, num_full_query_head:, :]
             streaming_attn_output = flash_attn_func(
                 streaming_query_states,

@@ -662,7 +662,6 @@ def enable_llama_duo_attention_eval(
     sink_size,
     recent_size,
 ):
-
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     for idx, layer in enumerate(model.model.layers):

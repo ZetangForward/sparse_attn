@@ -325,9 +325,9 @@ if __name__ == "__main__":
     for data_name in data_names:
         max_new_tokens = DATA_NAME_TO_MAX_NEW_TOKENS[data_name]
         if isinstance(max_new_tokens, dict):
-            assert (
-                max(max_new_tokens.values()) <= max_seq_length
-            ), "max_new_tokens must be less than max_seq_length"
+            assert max(max_new_tokens.values()) <= max_seq_length, (
+                "max_new_tokens must be less than max_seq_length"
+            )
         elif max_new_tokens >= max_seq_length:
             max_new_tokens = 500
 

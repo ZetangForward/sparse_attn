@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .quest import repeat_kv
 
+
 class PyramidKVCluster:
     def __init__(
         self,
@@ -66,14 +67,18 @@ class PyramidKVCluster:
         else:
             bsz, num_kv_heads, q_len, head_dim = key_states.shape
             num_heads = num_kv_heads * self.n_rep
-        
+
         k_cur = key_states[:, :, -self.window_size :, :]
         v_cur = value_states[:, :, -self.window_size :, :]
 
         # TODO
         # window_sizes = 32
         # capacity_override overrides self.max_capacity_prompt
-        current_max_capacity = capacity_override if capacity_override is not None else self.max_capacity_prompt
+        current_max_capacity = (
+            capacity_override
+            if capacity_override is not None
+            else self.max_capacity_prompt
+        )
 
         min_num = (current_max_capacity - self.window_size) // self.beta
         max_num = (current_max_capacity - self.window_size) * 2 - min_num
@@ -95,7 +100,8 @@ class PyramidKVCluster:
                 key_states_for_calculation = repeat_kv(key_states, self.n_rep)
 
             attn_weights = torch.matmul(
-                query_states[..., -self.window_size :, :], key_states_for_calculation.transpose(2, 3)
+                query_states[..., -self.window_size :, :],
+                key_states_for_calculation.transpose(2, 3),
             ) / math.sqrt(head_dim)
             mask = torch.full(
                 (self.window_size, self.window_size),
@@ -107,9 +113,9 @@ class PyramidKVCluster:
             mask = mask.to(attn_weights.device)
             attention_mask = mask[None, None, :, :]
 
-            attn_weights[
-                :, :, -self.window_size :, -self.window_size :
-            ] += attention_mask
+            attn_weights[:, :, -self.window_size :, -self.window_size :] += (
+                attention_mask
+            )
 
             attn_weights = nn.functional.softmax(
                 attn_weights, dim=-1, dtype=torch.float32
@@ -117,7 +123,7 @@ class PyramidKVCluster:
             attn_weights_sum = attn_weights[
                 :, :, -self.window_size :, : -self.window_size
             ].sum(dim=-2)
-            
+
             if self.pooling == "avgpool":
                 attn_cache = F.avg_pool1d(
                     attn_weights_sum,
@@ -134,7 +140,7 @@ class PyramidKVCluster:
                 )
             else:
                 raise ValueError("Pooling method not supported")
-            
+
             if self.n_rep is not None:
                 # The attn is are currently [bsz, num_heads, window_size, q_len]
                 # We need to convert them to [bsz, num_kv_heads, window_size, q_len] by mean pooling
@@ -147,14 +153,13 @@ class PyramidKVCluster:
                 value_states = v_cur
             else:
                 indices = attn_cache.topk(
-                    min(
-                        current_max_capacity - self.window_size,
-                        attn_cache.shape[-1]
-                    ), 
-                    dim=-1
+                    min(current_max_capacity - self.window_size, attn_cache.shape[-1]),
+                    dim=-1,
                 ).indices
-                indices = indices.sort(dim=-1)[0] # New: sort in the correct order of tokens
-                
+                indices = indices.sort(dim=-1)[
+                    0
+                ]  # New: sort in the correct order of tokens
+
                 indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
                 k_past_compress = key_states[:, :, : -self.window_size, :].gather(
                     dim=2, index=indices
@@ -174,7 +179,8 @@ class PyramidKVCluster:
                 key_states_for_calculation = repeat_kv(key_states, self.n_rep)
 
             attn_weights = torch.matmul(
-                query_states[..., -self.window_size :, :], key_states_for_calculation.transpose(2, 3)
+                query_states[..., -self.window_size :, :],
+                key_states_for_calculation.transpose(2, 3),
             ) / math.sqrt(head_dim)
             mask = torch.full(
                 (self.window_size, self.window_size),
@@ -186,9 +192,9 @@ class PyramidKVCluster:
             mask = mask.to(attn_weights.device)
             attention_mask = mask[None, None, :, :]
 
-            attn_weights[
-                :, :, -self.window_size :, -self.window_size :
-            ] += attention_mask
+            attn_weights[:, :, -self.window_size :, -self.window_size :] += (
+                attention_mask
+            )
 
             attn_weights = nn.functional.softmax(
                 attn_weights, dim=-1, dtype=torch.float32
@@ -212,7 +218,7 @@ class PyramidKVCluster:
                 )
             else:
                 raise ValueError("Pooling method not supported")
-            
+
             if self.n_rep is not None:
                 # The attn is are currently [bsz, num_heads, window_size, q_len]
                 # We need to convert them to [bsz, num_kv_heads, window_size, q_len] by mean pooling
@@ -221,18 +227,16 @@ class PyramidKVCluster:
                 attn_cache = attn_cache.mean(dim=2)
 
             if current_max_capacity <= self.window_size:
-                key_states = key_states[:, :, -self.window_size:, :]
-                value_states = value_states[:, :, -self.window_size:, :]
+                key_states = key_states[:, :, -self.window_size :, :]
+                value_states = value_states[:, :, -self.window_size :, :]
             else:
                 indices = attn_cache.topk(
-                    min(
-                        max_capacity_prompt,
-                        attn_cache.shape[-1]
-                    ), 
-                    dim=-1
+                    min(max_capacity_prompt, attn_cache.shape[-1]), dim=-1
                 ).indices
-                indices = indices.sort(dim=-1)[0] # New: sort in the correct order of tokens
-                
+                indices = indices.sort(dim=-1)[
+                    0
+                ]  # New: sort in the correct order of tokens
+
                 indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
                 k_past_compress = key_states[:, :, : -self.window_size, :].gather(
                     dim=2, index=indices

@@ -20,25 +20,54 @@ import torch
 import triton
 import triton.language as tl
 
-_BLOCK_N=64
-_BLOCK_M=64
+_BLOCK_N = 64
+_BLOCK_M = 64
+
 
 @triton.jit
-def _attn_fwd_inner(acc, l_i, m_i, q,
-                    K_block_ptr, V_block_ptr,
-                    start_m, qk_scale, N_CTX,
-                    sliding_window_offset, sliding_window_size,
-                    BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, SLIDING_WINDOW: tl.constexpr,
-                    IS_EVEN_M: tl.constexpr, IS_EVEN_N: tl.constexpr, COMPLEMENT_SLIDING_WINDOW: tl.constexpr
-                ):
+def _attn_fwd_inner(
+    acc,
+    l_i,
+    m_i,
+    q,
+    K_block_ptr,
+    V_block_ptr,
+    start_m,
+    qk_scale,
+    N_CTX,
+    sliding_window_offset,
+    sliding_window_size,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    IS_EVEN_M: tl.constexpr,
+    IS_EVEN_N: tl.constexpr,
+    COMPLEMENT_SLIDING_WINDOW: tl.constexpr,
+):
     # range of values handled by this stage
     if SLIDING_WINDOW and not COMPLEMENT_SLIDING_WINDOW:
         if COMPLEMENT_SLIDING_WINDOW:
             lo = 0
-            hi = (((start_m + 1) * BLOCK_M + sliding_window_offset - sliding_window_size + BLOCK_N - 1) // BLOCK_N) * BLOCK_N
+            hi = (
+                (
+                    (start_m + 1) * BLOCK_M
+                    + sliding_window_offset
+                    - sliding_window_size
+                    + BLOCK_N
+                    - 1
+                )
+                // BLOCK_N
+            ) * BLOCK_N
         else:
-            lo = ((start_m * BLOCK_M + sliding_window_offset - sliding_window_size + 1) // BLOCK_N) * BLOCK_N
-            hi = ((((start_m + 1) * BLOCK_M - 1) + sliding_window_offset + BLOCK_N) // BLOCK_N) * BLOCK_N
+            lo = (
+                (start_m * BLOCK_M + sliding_window_offset - sliding_window_size + 1)
+                // BLOCK_N
+            ) * BLOCK_N
+            hi = (
+                (((start_m + 1) * BLOCK_M - 1) + sliding_window_offset + BLOCK_N)
+                // BLOCK_N
+            ) * BLOCK_N
             if lo < 0:
                 lo = 0
             if hi > N_CTX:
@@ -66,18 +95,25 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
         qk = qk * qk_scale
 
         if SLIDING_WINDOW:
-            dist = tl.arange(0, BLOCK_M)[:, None] - tl.arange(0, BLOCK_N)[None, :] \
-                   + start_m * BLOCK_M - start_n + sliding_window_offset
+            dist = (
+                tl.arange(0, BLOCK_M)[:, None]
+                - tl.arange(0, BLOCK_N)[None, :]
+                + start_m * BLOCK_M
+                - start_n
+                + sliding_window_offset
+            )
 
             if COMPLEMENT_SLIDING_WINDOW:
-                mask = (dist >= sliding_window_size)
+                mask = dist >= sliding_window_size
             else:
                 mask = (dist >= 0) & (dist < sliding_window_size)
 
             qk = tl.where(mask, qk, float("-inf"))
 
         if not IS_EVEN_N:
-            qk = tl.where(((tl.arange(0, BLOCK_N) + start_n) < N_CTX)[None, :], qk, float("-inf"))
+            qk = tl.where(
+                ((tl.arange(0, BLOCK_N) + start_n) < N_CTX)[None, :], qk, float("-inf")
+            )
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk = qk - m_ij[:, None]
@@ -92,9 +128,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
         tmp = m_i - m_ij
-        alpha_mask = (tmp != tmp) # check nan
+        alpha_mask = tmp != tmp  # check nan
         alpha = tl.math.exp2(tmp)
-        alpha = tl.where(alpha_mask, 1., alpha)
+        alpha = tl.where(alpha_mask, 1.0, alpha)
         l_i = l_i * alpha + l_ij
         # -- update output accumulator --
         acc = acc * alpha[:, None]
@@ -114,19 +150,19 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
 
 
 @triton.autotune(
-   configs=[
-       triton.Config({}, num_stages=1, num_warps=4),
-       triton.Config({}, num_stages=1, num_warps=8),
-       triton.Config({}, num_stages=2, num_warps=4),
-       triton.Config({}, num_stages=2, num_warps=8),
-       triton.Config({}, num_stages=3, num_warps=4),
-       triton.Config({}, num_stages=3, num_warps=8),
-       triton.Config({}, num_stages=4, num_warps=4),
-       triton.Config({}, num_stages=4, num_warps=8),
-       triton.Config({}, num_stages=5, num_warps=4),
-       triton.Config({}, num_stages=5, num_warps=8),
-   ],
-   key=['N_CTX'],
+    configs=[
+        triton.Config({}, num_stages=1, num_warps=4),
+        triton.Config({}, num_stages=1, num_warps=8),
+        triton.Config({}, num_stages=2, num_warps=4),
+        triton.Config({}, num_stages=2, num_warps=8),
+        triton.Config({}, num_stages=3, num_warps=4),
+        triton.Config({}, num_stages=3, num_warps=8),
+        triton.Config({}, num_stages=4, num_warps=4),
+        triton.Config({}, num_stages=4, num_warps=8),
+        triton.Config({}, num_stages=5, num_warps=4),
+        triton.Config({}, num_stages=5, num_warps=8),
+    ],
+    key=["N_CTX"],
 )
 @triton.heuristics(
     {
@@ -135,33 +171,53 @@ def _attn_fwd_inner(acc, l_i, m_i, q,
     }
 )
 @triton.jit
-def _attn_fwd(Q, K, V, sm_scale, M, Out, L,#
-              stride_qz, stride_qh, stride_qm, stride_qk,  #
-              stride_kz, stride_kh, stride_kn, stride_kk,  #
-              stride_vz, stride_vh, stride_vk, stride_vn,  #
-              stride_oz, stride_oh, stride_om, stride_on,  #
-              Z, H, H_KV, #
-              N_CTX,  #
-              ROUND_CTX,
-              NKV_CTX,
-              sliding_window_offset,
-              sliding_window_size,
-              IS_EVEN_M: tl.constexpr,
-              IS_EVEN_N: tl.constexpr,
-              BLOCK_M: tl.constexpr,  #
-              BLOCK_DMODEL: tl.constexpr,  #
-              BLOCK_N: tl.constexpr,  #
-              END: tl.constexpr,
-              INIT: tl.constexpr,
-              SLIDING_WINDOW: tl.constexpr,
-              COMPLEMENT_SLIDING_WINDOW: tl.constexpr
-            ):
-
+def _attn_fwd(
+    Q,
+    K,
+    V,
+    sm_scale,
+    M,
+    Out,
+    L,  #
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,  #
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,  #
+    stride_vz,
+    stride_vh,
+    stride_vk,
+    stride_vn,  #
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,  #
+    Z,
+    H,
+    H_KV,  #
+    N_CTX,  #
+    ROUND_CTX,
+    NKV_CTX,
+    sliding_window_offset,
+    sliding_window_size,
+    IS_EVEN_M: tl.constexpr,
+    IS_EVEN_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,  #
+    BLOCK_DMODEL: tl.constexpr,  #
+    BLOCK_N: tl.constexpr,  #
+    END: tl.constexpr,
+    INIT: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    COMPLEMENT_SLIDING_WINDOW: tl.constexpr,
+):
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
-    off_hkv = off_h // (H//H_KV)
+    off_hkv = off_h // (H // H_KV)
     q_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
     k_offset = off_z.to(tl.int64) * stride_kz + off_hkv.to(tl.int64) * stride_kh
     v_offset = off_z.to(tl.int64) * stride_vz + off_hkv.to(tl.int64) * stride_vh
@@ -216,20 +272,35 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out, L,#
         acc = tl.load(O_block_ptr).to(tl.float32)
 
     qk_scale = sm_scale
-    qk_scale *= 1.4426950408889634   # 1/log(2)
+    qk_scale *= 1.4426950408889634  # 1/log(2)
     # load q: it will stay in SRAM throughout
     if IS_EVEN_M:
         q = tl.load(Q_block_ptr)
     else:
         q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr, #
-                                    start_m, qk_scale, NKV_CTX, #
-                                    sliding_window_offset, sliding_window_size,
-                                    BLOCK_M, BLOCK_DMODEL, BLOCK_N, SLIDING_WINDOW, IS_EVEN_M, IS_EVEN_N,
-                                    COMPLEMENT_SLIDING_WINDOW)
+    acc, l_i, m_i = _attn_fwd_inner(
+        acc,
+        l_i,
+        m_i,
+        q,
+        K_block_ptr,
+        V_block_ptr,  #
+        start_m,
+        qk_scale,
+        NKV_CTX,  #
+        sliding_window_offset,
+        sliding_window_size,
+        BLOCK_M,
+        BLOCK_DMODEL,
+        BLOCK_N,
+        SLIDING_WINDOW,
+        IS_EVEN_M,
+        IS_EVEN_N,
+        COMPLEMENT_SLIDING_WINDOW,
+    )
     # epilogue
-    if (END):
+    if END:
         m_i += tl.math.log2(l_i)
         acc = acc / l_i[:, None]
     else:
@@ -247,11 +318,25 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out, L,#
 )
 @triton.jit
 def _score_kernel(
-    Q, K, M, sm_scale, Out,
-    stride_qz, stride_qh, stride_qm, stride_qk,  #
-    stride_kz, stride_kh, stride_kn, stride_kk,  #
-    stride_oz, stride_oh, stride_on,
-    Z, H, H_KV, #
+    Q,
+    K,
+    M,
+    sm_scale,
+    Out,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,  #
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,  #
+    stride_oz,
+    stride_oh,
+    stride_on,
+    Z,
+    H,
+    H_KV,  #
     N_CTX,  #
     ROUND_CTX,
     NKV_CTX,
@@ -269,7 +354,7 @@ def _score_kernel(
     off_hz = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
-    off_hkv = off_h // (H//H_KV)
+    off_hkv = off_h // (H // H_KV)
     q_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
     k_offset = off_z.to(tl.int64) * stride_kz + off_hkv.to(tl.int64) * stride_kh
     m_ptrs = M + off_hz * ROUND_CTX + tl.arange(0, BLOCK_M)
@@ -297,18 +382,17 @@ def _score_kernel(
     else:
         k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-
     lo = 0
     hi = ROUND_CTX
     qk_scale = sm_scale
-    qk_scale *= 1.4426950408889634   # 1/log(2)
+    qk_scale *= 1.4426950408889634  # 1/log(2)
 
     for start_m in range(lo, hi, BLOCK_M):
         start_m = tl.multiple_of(start_m, BLOCK_M)
         if IS_EVEN_M:
             q = tl.load(Q_block_ptr)
         else:
-            q = tl.load(Q_block_ptr, boundary_check=(0,1), padding_option="zero")
+            q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
         m = tl.load(m_ptrs)
 
@@ -320,36 +404,38 @@ def _score_kernel(
         if SLIDING_WINDOW:
             # dist = tl.arange(start_m, start_m + BLOCK_M)[:, None] \
             #     - tl.arange(start_n * BLOCK_N, (start_n + 1) + BLOCK_N)[None, :] + sliding_window_offset
-            dist = tl.arange(0, BLOCK_M)[:, None] - tl.arange(0, BLOCK_N)[None, :] \
-                 + start_m - start_n * BLOCK_N + sliding_window_offset
+            dist = (
+                tl.arange(0, BLOCK_M)[:, None]
+                - tl.arange(0, BLOCK_N)[None, :]
+                + start_m
+                - start_n * BLOCK_N
+                + sliding_window_offset
+            )
 
             if COMPLEMENT_SLIDING_WINDOW:
-                mask = (dist >= sliding_window_size)
+                mask = dist >= sliding_window_size
             else:
                 mask = (dist >= 0) & (dist < sliding_window_size)
 
         qk = qk - m[:, None]
-        p = tl.math.exp2(qk) # (BLOCK_M, BLOCK_N)
+        p = tl.math.exp2(qk)  # (BLOCK_M, BLOCK_N)
 
         if SLIDING_WINDOW:
             p = tl.where(mask, p, 0)
 
         if not IS_EVEN_N:
-            p = tl.where(
-                ((tl.arange(0, BLOCK_M) + start_m) < N_CTX)[:, None],
-                p, 0
-            )
+            p = tl.where(((tl.arange(0, BLOCK_M) + start_m) < N_CTX)[:, None], p, 0)
 
         o += tl.sum(p, axis=0)
-
 
         Q_block_ptr = tl.advance(Q_block_ptr, offsets=(BLOCK_M, 0))
         m_ptrs = m_ptrs + BLOCK_M
 
     o_offset = off_z.to(tl.int64) * stride_oz + off_h.to(tl.int64) * stride_oh
-    o_range = tl.arange(0, BLOCK_N) + start_n * BLOCK_N # orange
+    o_range = tl.arange(0, BLOCK_N) + start_n * BLOCK_N  # orange
     o_ptrs = Out + o_offset + o_range
-    tl.store(o_ptrs, o.to(Out.type.element_ty), mask = o_range < NKV_CTX)
+    tl.store(o_ptrs, o.to(Out.type.element_ty), mask=o_range < NKV_CTX)
+
 
 def get_score(q, k, m, sliding_window, complement_sliding_window):
     assert q.dim() == 4
@@ -359,19 +445,15 @@ def get_score(q, k, m, sliding_window, complement_sliding_window):
     N_CTX = q.size(-2)
     NKV_CTX = k.size(-2)
     ROUND_CTX = m.size(-1)
-    ret = torch.zeros(
-        (q.size(0), q.size(1), k.size(2)),
-        dtype=k.dtype, device=k.device
-    )
+    ret = torch.zeros((q.size(0), q.size(1), k.size(2)), dtype=k.dtype, device=k.device)
     if sliding_window is not None:
         sliding_window_offset, sliding_window_size = sliding_window
     else:
         sliding_window_offset, sliding_window_size = None, None
 
-
     grid = lambda META: (
         triton.cdiv(k.shape[2], META["BLOCK_N"]),
-        q.shape[0] * q.shape[1]
+        q.shape[0] * q.shape[1],
     )
     sm_scale = 1 / math.sqrt(q.size(-1))
 
@@ -380,48 +462,91 @@ def get_score(q, k, m, sliding_window, complement_sliding_window):
 
     try:
         _score_kernel[grid](
-            q, k, m, sm_scale, ret,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            ret.stride(0), ret.stride(1), ret.stride(2),
-            q.size(0), q.size(1), k.size(1),
-            N_CTX, ROUND_CTX, NKV_CTX,
+            q,
+            k,
+            m,
+            sm_scale,
+            ret,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            ret.stride(0),
+            ret.stride(1),
+            ret.stride(2),
+            q.size(0),
+            q.size(1),
+            k.size(1),
+            N_CTX,
+            ROUND_CTX,
+            NKV_CTX,
             sliding_window_offset,
             sliding_window_size,
             SLIDING_WINDOW=(sliding_window is not None),
             COMPLEMENT_SLIDING_WINDOW=complement_sliding_window,
             BLOCK_M=_BLOCK_M,
             BLOCK_N=_BLOCK_N,
-            BLOCK_DMODEL=q.size(-1)
+            BLOCK_DMODEL=q.size(-1),
         )
     except triton.OutOfResources as E:
         from warnings import warn
+
         _BLOCK_N = _BLOCK_N // 2
         _BLOCK_M = _BLOCK_M // 2
-        warn(f"Triton Attention Output Resources. {E}\nUse smaller block size {_BLOCK_N}.")
+        warn(
+            f"Triton Attention Output Resources. {E}\nUse smaller block size {_BLOCK_N}."
+        )
         _score_kernel[grid](
-            q, k, m, sm_scale, ret,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            ret.stride(0), ret.stride(1), ret.stride(2),
-            q.size(0), q.size(1), k.size(1),
-            N_CTX, ROUND_CTX, NKV_CTX,
+            q,
+            k,
+            m,
+            sm_scale,
+            ret,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            ret.stride(0),
+            ret.stride(1),
+            ret.stride(2),
+            q.size(0),
+            q.size(1),
+            k.size(1),
+            N_CTX,
+            ROUND_CTX,
+            NKV_CTX,
             sliding_window_offset,
             sliding_window_size,
             SLIDING_WINDOW=(sliding_window is not None),
             COMPLEMENT_SLIDING_WINDOW=complement_sliding_window,
             BLOCK_M=_BLOCK_M,
             BLOCK_N=_BLOCK_N,
-            BLOCK_DMODEL=q.size(-1)
+            BLOCK_DMODEL=q.size(-1),
         )
 
     return ret
 
+
 def _forward(
-    q, k, v, sm_scale,
-    o = None, m = None, l = None, end = False,
-    sliding_window=None, init=False,
-    complement_sliding_window=False
+    q,
+    k,
+    v,
+    sm_scale,
+    o=None,
+    m=None,
+    l=None,
+    end=False,
+    sliding_window=None,
+    init=False,
+    complement_sliding_window=False,
 ):
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
 
@@ -446,12 +571,32 @@ def _forward(
     try:
         with torch.cuda.device(q.device):
             _attn_fwd[grid](
-                q, k, v, sm_scale, m, o, l, #
-                q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-                k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
-                v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
-                o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
-                q.shape[0], q.shape[1], k.shape[1], #
+                q,
+                k,
+                v,
+                sm_scale,
+                m,
+                o,
+                l,  #
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                q.stride(3),  #
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                k.stride(3),  #
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                v.stride(3),  #
+                o.stride(0),
+                o.stride(1),
+                o.stride(2),
+                o.stride(3),  #
+                q.shape[0],
+                q.shape[1],
+                k.shape[1],  #
                 q.shape[2],  #
                 q_round_len,
                 k.shape[2],
@@ -469,15 +614,38 @@ def _forward(
         _BLOCK_N = _BLOCK_N // 2
         _BLOCK_M = _BLOCK_M // 2
         from warnings import warn
-        warn(f"Triton Attention Output Resources. {E}\nUse smaller block size {_BLOCK_N}.")
+
+        warn(
+            f"Triton Attention Output Resources. {E}\nUse smaller block size {_BLOCK_N}."
+        )
         with torch.cuda.device(q.device):
             _attn_fwd[grid](
-                q, k, v, sm_scale, m, o, l, #
-                q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-                k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
-                v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
-                o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
-                q.shape[0], q.shape[1], k.shape[1], #
+                q,
+                k,
+                v,
+                sm_scale,
+                m,
+                o,
+                l,  #
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                q.stride(3),  #
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                k.stride(3),  #
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                v.stride(3),  #
+                o.stride(0),
+                o.stride(1),
+                o.stride(2),
+                o.stride(3),  #
+                q.shape[0],
+                q.shape[1],
+                k.shape[1],  #
                 q.shape[2],  #
                 q_round_len,
                 k.shape[2],
@@ -492,11 +660,11 @@ def _forward(
                 COMPLEMENT_SLIDING_WINDOW=complement_sliding_window,
             )
 
-
     if end:
-        o = o[:, :, :q.shape[2], :].contiguous().to(q.dtype)
+        o = o[:, :, : q.shape[2], :].contiguous().to(q.dtype)
 
     return o, m, l
+
 
 class MultiStageDotProductionAttention:
     def __init__(
@@ -509,20 +677,22 @@ class MultiStageDotProductionAttention:
         self.dtype = dtype
         self.device = device
         self.end = False
-        self.ret = torch.zeros(
-            q_shape, dtype=dtype, device=device
-        )
+        self.ret = torch.zeros(q_shape, dtype=dtype, device=device)
         self.score_list = []
 
     def append(
         self,
-        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-        sliding_window=None, complement_sliding_window: bool = False,
-        end=False, get_score=False,
-        *args, **kwargs
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sliding_window=None,
+        complement_sliding_window: bool = False,
+        end=False,
+        get_score=False,
+        *args,
+        **kwargs,
     ):
         raise NotImplementedError
-
 
     def get_result(self):
         return self.ret, self.score_list
@@ -551,7 +721,12 @@ class TritonMultiStageDotProductionAttention(MultiStageDotProductionAttention):
 
     def finalize(self):
         self.end = True
-        for q, k, sliding_window, comp in zip(self.q_list, self.k_list, self.sliding_window_list, self.complement_sliding_window_list):
+        for q, k, sliding_window, comp in zip(
+            self.q_list,
+            self.k_list,
+            self.sliding_window_list,
+            self.complement_sliding_window_list,
+        ):
             if q is not None:
                 score = get_score(q, k, self.m, sliding_window, comp)
                 self.score_list.append(score)
@@ -560,13 +735,20 @@ class TritonMultiStageDotProductionAttention(MultiStageDotProductionAttention):
 
         self.ret = self.o
 
-    def append(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, end=False, get_score=False, sliding_window = None, complement_sliding_window: bool = False):
+    def append(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        end=False,
+        get_score=False,
+        sliding_window=None,
+        complement_sliding_window: bool = False,
+    ):
         assert q.shape == self.q_shape
 
         if isinstance(sliding_window, int):
-            sliding_window = (
-                k.shape[2] - q.shape[2], sliding_window
-            )
+            sliding_window = (k.shape[2] - q.shape[2], sliding_window)
 
         q = q.contiguous()
         k = k.contiguous()
@@ -574,9 +756,17 @@ class TritonMultiStageDotProductionAttention(MultiStageDotProductionAttention):
 
         sm_scale = 1 / math.sqrt(q.shape[-1])
         o, m, l = _forward(
-            q, k, v, sm_scale, self.o, self.m, self.l,
-            sliding_window=sliding_window, end=end, init=not self.init,
-            complement_sliding_window=complement_sliding_window
+            q,
+            k,
+            v,
+            sm_scale,
+            self.o,
+            self.m,
+            self.l,
+            sliding_window=sliding_window,
+            end=end,
+            init=not self.init,
+            complement_sliding_window=complement_sliding_window,
         )
         self.init = True
         self.o = o
@@ -597,6 +787,7 @@ class TritonMultiStageDotProductionAttention(MultiStageDotProductionAttention):
             assert not self.end
             self.finalize()
 
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -605,17 +796,23 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
+
 def streaming_forward(
-    q, k, v,
-    n_init, n_local,
+    q,
+    k,
+    v,
+    n_init,
+    n_local,
 ):
     # q,k,v should be tensors already equipped with RoPE
     # k,v should already repeated to align with q.shape
 
-    assert q.dim() == 4 # (bsz, num_heads, seqlen, head_dim)
+    assert q.dim() == 4  # (bsz, num_heads, seqlen, head_dim)
     assert q.shape == k.shape == v.shape
 
     head_dim = q.shape[-1]
@@ -636,18 +833,26 @@ def streaming_forward(
 
         attn.append(q, k, v, sliding_window=n_local)
         attn.append(
-            q, init_k, init_v, end=True,
-            sliding_window=(k_len - q_len, n_local), complement_sliding_window=True
+            q,
+            init_k,
+            init_v,
+            end=True,
+            sliding_window=(k_len - q_len, n_local),
+            complement_sliding_window=True,
         )
     else:
         attn.append(q, k, v, sliding_window=n_local, end=True)
 
     score, _ = attn.get_result()
-    return score[...,:head_dim]
+    return score[..., :head_dim]
+
 
 def streaming_forward2(
-    q, k, v,
-    n_init, n_local,
+    q,
+    k,
+    v,
+    n_init,
+    n_local,
 ):
     q_len = q.size(2)
     k_len = k.size(2)
@@ -660,49 +865,65 @@ def streaming_forward2(
 
     else:
         init_k = torch.empty(
-            (k.size(0), k.size(1), 0, k.size(3)),
-            dtype=k.dtype, device=k.device
+            (k.size(0), k.size(1), 0, k.size(3)), dtype=k.dtype, device=k.device
         )
         init_v = torch.empty(
-            (v.size(0), v.size(1), 0, v.size(3)),
-            dtype=v.dtype, device=v.device
+            (v.size(0), v.size(1), 0, v.size(3)), dtype=v.dtype, device=v.device
         )
 
     attn.append(q, k, v, sliding_window=n_local)
     attn.append(
-        q, init_k, init_v, end=True,
-        sliding_window=(k_len - q_len, n_local), complement_sliding_window=True
+        q,
+        init_k,
+        init_v,
+        end=True,
+        sliding_window=(k_len - q_len, n_local),
+        complement_sliding_window=True,
     )
 
     score, _ = attn.get_result()
     return score
 
+
 def stream_llm_forward(n_local, n_init, *args, **kwargs):
     Attn = TritonMultiStageDotProductionAttention
-    def forward(self, query : torch.Tensor,
-                    key_value : torch.Tensor,
-                    position_bias : torch.Tensor,
-                    use_cache: bool,
-                    past_key_value,
-                    project_q, project_k, project_v, attention_out,
-                    dim_head, num_heads, num_heads_kv
-    ):
 
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_value: torch.Tensor,
+        position_bias: torch.Tensor,
+        use_cache: bool,
+        past_key_value,
+        project_q,
+        project_k,
+        project_v,
+        attention_out,
+        dim_head,
+        num_heads,
+        num_heads_kv,
+    ):
         batch_size = query.size(0)
         len_q = query.size(1)
         len_k = key_value.size(1)
 
-        h_q = project_q(query)             # (batch, len_q, num_heads * dim_head)
-        h_k = project_k(key_value)         # (batch, len_k, num_heads * dim_head)
-        h_v = project_v(key_value)         # (batch, len_k, num_heads * dim_head)
+        h_q = project_q(query)  # (batch, len_q, num_heads * dim_head)
+        h_k = project_k(key_value)  # (batch, len_k, num_heads * dim_head)
+        h_v = project_v(key_value)  # (batch, len_k, num_heads * dim_head)
 
-        h_q = h_q.view(batch_size, len_q, num_heads, dim_head).permute(0, 2, 1, 3)   # (batch, num_heads, len_q, dim_head)
-        h_k = h_k.view(batch_size, len_k, num_heads_kv, dim_head).permute(0, 2, 1, 3)   # (batch, num_heads_kv, len_k, dim_head)
-        h_v = h_v.view(batch_size, len_k, num_heads_kv, dim_head).permute(0, 2, 1, 3)   # (batch, num_heads_kv, len_k, dim_head)
+        h_q = h_q.view(batch_size, len_q, num_heads, dim_head).permute(
+            0, 2, 1, 3
+        )  # (batch, num_heads, len_q, dim_head)
+        h_k = h_k.view(batch_size, len_k, num_heads_kv, dim_head).permute(
+            0, 2, 1, 3
+        )  # (batch, num_heads_kv, len_k, dim_head)
+        h_v = h_v.view(batch_size, len_k, num_heads_kv, dim_head).permute(
+            0, 2, 1, 3
+        )  # (batch, num_heads_kv, len_k, dim_head)
 
-        h_q = h_q.contiguous()      # (batch * num_heads, len_q, dim_head)
-        h_k = h_k.contiguous()      # (batch * num_heads, len_k, dim_head)
-        h_v = h_v.contiguous()      # (batch * num_heads, len_k, dim_head)
+        h_q = h_q.contiguous()  # (batch * num_heads, len_q, dim_head)
+        h_k = h_k.contiguous()  # (batch * num_heads, len_k, dim_head)
+        h_v = h_v.contiguous()  # (batch * num_heads, len_k, dim_head)
 
         if past_key_value is not None:
             h_k = torch.cat([past_key_value[0], h_k], dim=-2)
@@ -715,8 +936,20 @@ def stream_llm_forward(n_local, n_init, *args, **kwargs):
                 h_k_cache = h_k
                 h_v_cache = h_v
             else:
-                h_k_cache = torch.cat([h_k[:,:, :n_init, :], h_k[:, :, max(0, h_k.size(-2) - n_local):, :]], dim=2)
-                h_v_cache = torch.cat([h_v[:,:, :n_init, :], h_v[:, :, max(0, h_k.size(-2) - n_local):, :]], dim=2)
+                h_k_cache = torch.cat(
+                    [
+                        h_k[:, :, :n_init, :],
+                        h_k[:, :, max(0, h_k.size(-2) - n_local) :, :],
+                    ],
+                    dim=2,
+                )
+                h_v_cache = torch.cat(
+                    [
+                        h_v[:, :, :n_init, :],
+                        h_v[:, :, max(0, h_k.size(-2) - n_local) :, :],
+                    ],
+                    dim=2,
+                )
 
             current_key_value = (h_k_cache, h_v_cache, len_k)
 
@@ -728,8 +961,8 @@ def stream_llm_forward(n_local, n_init, *args, **kwargs):
         h_v_ = h_v
 
         if len_q + n_local < h_k_.size(-2):
-            h_k_ = h_k_[:, :, h_k_.size(-2) - len_q - n_local:, :].contiguous().clone()
-            h_v_ = h_v_[:, :, h_v_.size(-2) - len_q - n_local:, :].contiguous().clone()
+            h_k_ = h_k_[:, :, h_k_.size(-2) - len_q - n_local :, :].contiguous().clone()
+            h_v_ = h_v_[:, :, h_v_.size(-2) - len_q - n_local :, :].contiguous().clone()
 
         local_h_q, local_h_k = position_bias(h_q_, h_k_)
         local_h_v = h_v_
@@ -740,7 +973,10 @@ def stream_llm_forward(n_local, n_init, *args, **kwargs):
             )
             init_h_k = position_bias.apply_rotary_pos_emb(
                 h_k[:, :, :n_init, :].contiguous(),
-                n_init, n_init, position_bias._cos_cached, position_bias._sin_cached
+                n_init,
+                n_init,
+                position_bias._cos_cached,
+                position_bias._sin_cached,
             )
             init_h_v = h_v[:, :, :n_init, :].contiguous()
 
@@ -749,25 +985,34 @@ def stream_llm_forward(n_local, n_init, *args, **kwargs):
             init_h_k = torch.empty(
                 (batch_size, num_heads_kv, 0, dim_head),
                 device=h_k.device,
-                dtype=h_k.dtype
+                dtype=h_k.dtype,
             )
             init_h_v = torch.empty(
                 (batch_size, num_heads_kv, 0, dim_head),
                 device=h_v.device,
-                dtype=h_v.dtype
+                dtype=h_v.dtype,
             )
 
         attn = Attn(local_h_q.shape, local_h_q.dtype, local_h_q.device)
         attn.append(local_h_q, local_h_k, local_h_v, sliding_window=n_local)
         attn.append(
-            init_h_q, init_h_k, init_h_v, end=True,
+            init_h_q,
+            init_h_k,
+            init_h_v,
+            end=True,
             sliding_window=(len_k - len_q, n_local),
-            complement_sliding_window=True
+            complement_sliding_window=True,
         )
         score, _ = attn.get_result()
 
-        score = score.view(batch_size, num_heads, len_q, dim_head).permute(0, 2, 1, 3).contiguous() # (batch, len_q, num_heads, dim_head)
-        score = score.reshape(batch_size, len_q, num_heads * dim_head) # (batch, len_q, num_heads * dim_head)
+        score = (
+            score.view(batch_size, num_heads, len_q, dim_head)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )  # (batch, len_q, num_heads, dim_head)
+        score = score.reshape(
+            batch_size, len_q, num_heads * dim_head
+        )  # (batch, len_q, num_heads * dim_head)
 
         score = attention_out(score)
 
@@ -778,8 +1023,12 @@ def stream_llm_forward(n_local, n_init, *args, **kwargs):
 
     return forward
 
+
 def a_shape_kernel(
-    q, k, v, config,
+    q,
+    k,
+    v,
+    config,
 ):
     # q,k,v should be tensors already equipped with RoPE
     # k,v should already repeated to align with q.shape
@@ -787,7 +1036,7 @@ def a_shape_kernel(
     n_init = config["attn_forward_config"].get("n_init", 128)
     n_local = config["attn_forward_config"].get("n_local", 3968)
 
-    assert q.dim() == 4 # (bsz, num_heads, seqlen, head_dim)
+    assert q.dim() == 4  # (bsz, num_heads, seqlen, head_dim)
     assert q.shape == k.shape == v.shape
 
     head_dim = q.shape[-1]
@@ -808,32 +1057,43 @@ def a_shape_kernel(
 
         attn.append(q, k, v, sliding_window=n_local)
         attn.append(
-            q, init_k, init_v, end=True,
-            sliding_window=(k_len - q_len, n_local), complement_sliding_window=True
+            q,
+            init_k,
+            init_v,
+            end=True,
+            sliding_window=(k_len - q_len, n_local),
+            complement_sliding_window=True,
         )
     else:
         attn.append(q, k, v, sliding_window=n_local, end=True)
 
     score, _ = attn.get_result()
-    return score[...,:head_dim]
+    return score[..., :head_dim]
+
 
 def tri_shape_kernel(q, k, v, config):
     n_last = config["attn_forward_config"].get("n_last", 100)
     n_last = min(n_last, q.size(2) - 1)
 
-    q1, q2 = q[:,:,:-n_last], q[:,:,-n_last:]
-    y1 = a_shape_kernel(q1, k[:,:,:-n_last], v[:,:,:-n_last], config)
+    q1, q2 = q[:, :, :-n_last], q[:, :, -n_last:]
+    y1 = a_shape_kernel(q1, k[:, :, :-n_last], v[:, :, :-n_last], config)
 
-    qk = torch.einsum(f'bhmk, bhnk -> bhmn', q2, k) / math.sqrt(q.shape[-1])
+    qk = torch.einsum(f"bhmk, bhnk -> bhmn", q2, k) / math.sqrt(q.shape[-1])
     arange = torch.arange(n_last, device="cuda")
     mask = arange[None, None, :, None] >= arange[None, None, None, :]
     qk[:, :, :, -n_last:] = torch.where(mask, qk[:, :, :, -n_last:], -torch.inf)
     qk = torch.nn.functional.softmax(qk, dim=-1, dtype=torch.float32).to(q.dtype)
-    y2 = torch.einsum(f'bhmn, bhnk -> bhmk', qk, v)
+    y2 = torch.einsum(f"bhmn, bhnk -> bhmk", qk, v)
     return torch.cat([y1, y2], dim=2)
 
 
 if __name__ == "__main__":
     b, h, m, k = 1, 1, 1024, 192
-    q, k, v = torch.rand(b, h, m, k).cuda(), torch.rand(b, h, m, k).cuda(), torch.rand(b, h, m, k).cuda()
-    output = a_shape_kernel(q, k, v, {"attn_forward_config": {"n_init": 128, "n_local": 512}})
+    q, k, v = (
+        torch.rand(b, h, m, k).cuda(),
+        torch.rand(b, h, m, k).cuda(),
+        torch.rand(b, h, m, k).cuda(),
+    )
+    output = a_shape_kernel(
+        q, k, v, {"attn_forward_config": {"n_init": 128, "n_local": 512}}
+    )

@@ -42,7 +42,7 @@ def old_flash_attention_2_forward(
     past_key_value: Optional[Tuple[torch.Tensor]] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     padding_mask: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     # LlamaFlashAttention2 attention does not support output_attentions
@@ -400,7 +400,7 @@ def old_llama_model_forward(
     )
 
     hidden_states = inputs_embeds
-    
+
     position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
     # decoder layers

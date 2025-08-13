@@ -194,7 +194,7 @@ def test_with_chunked_prefilling(chunk_size=32000):
             )
             used_mem = torch.cuda.max_memory_allocated() / (1024**3)  # Convert to GB
             pbar.set_description(
-                f"Pre-filling ({min(i + chunk_size, input_ids.size(1)) // 1000}K/{input_ids.size(1)//1000}K, Mem: {used_mem:.1f} GB)"
+                f"Pre-filling ({min(i + chunk_size, input_ids.size(1)) // 1000}K/{input_ids.size(1) // 1000}K, Mem: {used_mem:.1f} GB)"
             )
         pbar.close()
     end_time = time.time()
@@ -209,4 +209,4 @@ def test_with_chunked_prefilling(chunk_size=32000):
 torch.cuda.reset_peak_memory_stats()
 test_with_chunked_prefilling(32000)
 used_mem = torch.cuda.max_memory_allocated()
-print(f"Peak memory: {used_mem / 1024 ** 3:.2f} GB")
+print(f"Peak memory: {used_mem / 1024**3:.2f} GB")

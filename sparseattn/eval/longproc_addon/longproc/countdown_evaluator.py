@@ -41,34 +41,34 @@ def _choose_two_numbers(nums: list[int]):
 
 
 def _verbalized_dfs_search(
-        nums: list[int],
-        target: int,
-        parent_state_id: int,
-        transition_eq: str,
-        recursion_depth: int,
-        explored_states: list,
-        search_log: list,
-        indent_func,
-    ):
+    nums: list[int],
+    target: int,
+    parent_state_id: int,
+    transition_eq: str,
+    recursion_depth: int,
+    explored_states: list,
+    search_log: list,
+    indent_func,
+):
     state_id = len(explored_states)
     state = {
-        'state_id': state_id,
-        'parent_state_id': parent_state_id,
-        'transition_eq': transition_eq,
-        'nums': nums,
-        'target': target,
-        'depth': recursion_depth,
+        "state_id": state_id,
+        "parent_state_id": parent_state_id,
+        "transition_eq": transition_eq,
+        "nums": nums,
+        "target": target,
+        "depth": recursion_depth,
     }
     explored_states.append(state)
     if not transition_eq == _INIT_TRANSITION:
         if nums[0] == _DIV_BY_ZERO:
-           trans_eval_log = f"\n{indent_func(recursion_depth)}Try {transition_eq}. drop this branch."
-           search_log.append(trans_eval_log)
-           return False 
+            trans_eval_log = f"\n{indent_func(recursion_depth)}Try {transition_eq}. drop this branch."
+            search_log.append(trans_eval_log)
+            return False
         assert nums[0] >= 0
         # Transition evaluation, if nums[0] is float or negative, return False
         if nums[0] % 1 != 0:
-            trans_eval_log = f"\n{indent_func(recursion_depth)}Try {transition_eq}. {nums[0]:.1f} is a decimal, drop this branch." 
+            trans_eval_log = f"\n{indent_func(recursion_depth)}Try {transition_eq}. {nums[0]:.1f} is a decimal, drop this branch."
             search_log.append(trans_eval_log)
             return False
         elif nums[0] >= _MAX_INTERMEDIATE_RESULTS:
@@ -93,13 +93,15 @@ def _verbalized_dfs_search(
     if not transition_eq == _INIT_TRANSITION:
         trans_eval_log = f"\n{indent_func(recursion_depth)}Try {transition_eq}. Add {nums[0]} to the number set."
         search_log.append(trans_eval_log)
-    two_num_options = [(a,b) for a, b, _ in _choose_two_numbers(nums)]
+    two_num_options = [(a, b) for a, b, _ in _choose_two_numbers(nums)]
 
     if len(nums) == 2:
         bigger_num = max(nums)
         smaller_num = min(nums)
         # state_descp_log = f"\n{indent_func(recursion_depth)}Current number set: {nums}, target: {target}, just two numbers left"
-        state_descp_log = f" Current number set: {nums}, target: {target}, just two numbers left."
+        state_descp_log = (
+            f" Current number set: {nums}, target: {target}, just two numbers left."
+        )
         search_log.append(state_descp_log)
     else:
         if not transition_eq == _INIT_TRANSITION:
@@ -115,31 +117,85 @@ def _verbalized_dfs_search(
         bigger_num = max(a, b)
         smaller_num = min(a, b)
         if len(nums) > 2:
-            pick_act_log = f"\n{indent_func(recursion_depth)}Pick two numbers ({a}, {b}) (numbers left: {leftover}). Try possible operations." 
+            pick_act_log = f"\n{indent_func(recursion_depth)}Pick two numbers ({a}, {b}) (numbers left: {leftover}). Try possible operations."
             search_log.append(pick_act_log)
         # let a >= b
         if a < b:
             a, b = b, a
         # possible options: a + b, a - b, b - a, a * b, a / b, b / a
         # a + b
-        if _verbalized_dfs_search([a + b] + leftover, target, state_id, f"{a} + {b} = {a+b}", recursion_depth + 1, explored_states, search_log, indent_func):
+        if _verbalized_dfs_search(
+            [a + b] + leftover,
+            target,
+            state_id,
+            f"{a} + {b} = {a + b}",
+            recursion_depth + 1,
+            explored_states,
+            search_log,
+            indent_func,
+        ):
             return True
         # a - b
-        if _verbalized_dfs_search([a - b] + leftover, target, state_id, f"{a} - {b} = {a-b}", recursion_depth + 1, explored_states, search_log, indent_func):
+        if _verbalized_dfs_search(
+            [a - b] + leftover,
+            target,
+            state_id,
+            f"{a} - {b} = {a - b}",
+            recursion_depth + 1,
+            explored_states,
+            search_log,
+            indent_func,
+        ):
             return True
         # a * b
-        if _verbalized_dfs_search([a * b] + leftover, target, state_id, f"{a} * {b} = {a*b}", recursion_depth + 1, explored_states, search_log, indent_func):
+        if _verbalized_dfs_search(
+            [a * b] + leftover,
+            target,
+            state_id,
+            f"{a} * {b} = {a * b}",
+            recursion_depth + 1,
+            explored_states,
+            search_log,
+            indent_func,
+        ):
             return True
         # a / b
         if b != 0:
             if a % b == 0:
-                if _verbalized_dfs_search([int(a / b)] + leftover, target, state_id, f"{a} / {b} = {int(a/b)}", recursion_depth + 1, explored_states, search_log, indent_func):
+                if _verbalized_dfs_search(
+                    [int(a / b)] + leftover,
+                    target,
+                    state_id,
+                    f"{a} / {b} = {int(a / b)}",
+                    recursion_depth + 1,
+                    explored_states,
+                    search_log,
+                    indent_func,
+                ):
                     return True
             else:
-                if _verbalized_dfs_search([a / b] + leftover, target, state_id, f"{a} / {b} = {a/b:.1f}", recursion_depth + 1, explored_states, search_log, indent_func):
+                if _verbalized_dfs_search(
+                    [a / b] + leftover,
+                    target,
+                    state_id,
+                    f"{a} / {b} = {a / b:.1f}",
+                    recursion_depth + 1,
+                    explored_states,
+                    search_log,
+                    indent_func,
+                ):
                     return True
         else:
-            if _verbalized_dfs_search([_DIV_BY_ZERO] + leftover, target, state_id, f"{a} / {b} (invalid operation)", recursion_depth + 1, explored_states, search_log, indent_func):
+            if _verbalized_dfs_search(
+                [_DIV_BY_ZERO] + leftover,
+                target,
+                state_id,
+                f"{a} / {b} (invalid operation)",
+                recursion_depth + 1,
+                explored_states,
+                search_log,
+                indent_func,
+            ):
                 return True
     #     search_log.append(f"\n{indent_func(recursion_depth + 1)}All possible operations tried for pair ({_in_a}, {_in_b}), backtrack")
     # search_log.append(f"\n{indent_func(recursion_depth)}All possible number pairs tried for {nums}, backtrack")
@@ -147,10 +203,18 @@ def _verbalized_dfs_search(
 
 
 def build_countdown_demonstration(nums: list, target: int) -> str:
-
     search_states = []
     search_log = []
-    success_status = _verbalized_dfs_search(nums, target, _DUMMY_STATE_ID, _INIT_TRANSITION, 0, search_states, search_log, _get_indent)
+    success_status = _verbalized_dfs_search(
+        nums,
+        target,
+        _DUMMY_STATE_ID,
+        _INIT_TRANSITION,
+        0,
+        search_states,
+        search_log,
+        _get_indent,
+    )
     if not success_status:
         raise ValueError("Failed to find solution")
 
@@ -158,9 +222,9 @@ def build_countdown_demonstration(nums: list, target: int) -> str:
 
     solution = []
     state = search_states[-1]
-    while state['parent_state_id'] != _DUMMY_STATE_ID:
-        solution.append(state['transition_eq'])
-        state = search_states[state['parent_state_id']]
+    while state["parent_state_id"] != _DUMMY_STATE_ID:
+        solution.append(state["transition_eq"])
+        state = search_states[state["parent_state_id"]]
     solution.reverse()
     # verbolize the solution
     try:
@@ -197,9 +261,21 @@ def evaluate_countdown_final_solution(nums: list, target: int, solution: str) ->
         elif "/" in lhs:
             op = "/"
         else:
-            return False, None, None, None, None,
+            return (
+                False,
+                None,
+                None,
+                None,
+                None,
+            )
         a, b = lhs.split(op)
-        return lhs_result == int(rhs), int(a), int(b), int(rhs), op, 
+        return (
+            lhs_result == int(rhs),
+            int(a),
+            int(b),
+            int(rhs),
+            op,
+        )
 
     # parse solution into equations
     lines = solution.split("\n")
@@ -224,7 +300,9 @@ def evaluate_countdown_final_solution(nums: list, target: int, solution: str) ->
     return final_result == target
 
 
-def evaluate_countdown_search_procedure(nums: list, target: int, procedure: str, gt_procedure: str) -> tuple:
+def evaluate_countdown_search_procedure(
+    nums: list, target: int, procedure: str, gt_procedure: str
+) -> tuple:
     # return partial accuracy as a float, and return error report
     # we focus on evaluating the "actions" in the procedure
     nums = nums[:]
@@ -234,7 +312,11 @@ def evaluate_countdown_search_procedure(nums: list, target: int, procedure: str,
 
     # initalization statement should be the same
     if pred_lines[0] != gt_lines[0]:
-        return 0.0, {"line_number": 0, "prediction": pred_lines[0], "ground_truth": gt_lines[0]}
+        return 0.0, {
+            "line_number": 0,
+            "prediction": pred_lines[0],
+            "ground_truth": gt_lines[0],
+        }
     pred_lines = pred_lines[1:]
     gt_lines = gt_lines[1:]
 
@@ -246,11 +328,11 @@ def evaluate_countdown_search_procedure(nums: list, target: int, procedure: str,
         if pred_l == gt_l:
             continue
         # categorize the gt lines
-        if "Pick two numbers" in gt_l: # pick numbers, it should follow the same order 
+        if "Pick two numbers" in gt_l:  # pick numbers, it should follow the same order
             if pred_l != gt_l:
                 error_report = {"line": idx, "pr": pred_l, "gt": gt_l}
                 break
-        elif "|- Try" in gt_l: # try operation
+        elif "|- Try" in gt_l:  # try operation
             # everything up to the = should be the same, should be operating on the same numbers
             pred_eq = pred_l.split("=")[0]
             gt_eq = gt_l.split("=")[0]

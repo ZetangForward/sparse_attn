@@ -57,9 +57,9 @@ class MInferenceConfig:
         assert (
             attn_type in self.MINFERENCE_ATTENTION_TYPES + self.OTHER_ATTENTION_TYPES
         ), f"The attn_type {attn_type} you specified is not supported."
-        assert (
-            kv_type in self.KV_TYPES
-        ), f"The kv_type {kv_type} you specified is not supported."
+        assert kv_type in self.KV_TYPES, (
+            f"The kv_type {kv_type} you specified is not supported."
+        )
         print(
             f"<---- MInference Config Detail ----> attn_type {attn_type}, kv_type {kv_type}"
         )
@@ -78,9 +78,9 @@ class MInferenceConfig:
             return ""
         if config_path is not None:
             return config_path
-        assert (
-            model_name in MODEL2PATH
-        ), f"The model {model_name} you specified is not supported. You are welcome to add it and open a PR :)"
+        assert model_name in MODEL2PATH, (
+            f"The model {model_name} you specified is not supported. You are welcome to add it and open a PR :)"
+        )
         return MODEL2PATH[model_name]
 
     def get(self, attr, default=None):

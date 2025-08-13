@@ -10,8 +10,11 @@ import numpy as np
 
 from typing import Optional, Any, Dict, List
 import logging
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                    datefmt='%m/%d/%Y %H:%M:%S')
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -23,12 +26,20 @@ from tqdm.contrib.concurrent import thread_map
 import time
 
 # Get the parent directory path
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # Add the parent directory to the Python path
 sys.path.append(parent_dir)
 
 # Import shared utilities
-from gpt4_eval_utils import LLM, OpenAIModel, TgiVllmModel, format_chat, parse_output, parse_json, check_metrics
+from gpt4_eval_utils import (
+    LLM,
+    OpenAIModel,
+    TgiVllmModel,
+    format_chat,
+    parse_output,
+    parse_json,
+    check_metrics,
+)
 
 
 # Evaluation prompts for summarization tasks
@@ -236,7 +247,7 @@ def evaluate_fluency(model, text, is_book=False):
     """Evaluate the fluency of generated text."""
     prompt = fluency_prompt_book if is_book else fluency_prompt
     formatted_prompt = prompt.format(text=text)
-    
+
     output = model.generate(prompt=formatted_prompt)
     if output:
         scores = parse_json(output["output"])
@@ -248,9 +259,9 @@ def evaluate_fluency(model, text, is_book=False):
 def evaluate_recall(model, summary, keypoints, is_book=False):
     """Evaluate the recall score of a summary against key points."""
     prompt = recall_prompt_book if is_book else recall_prompt
-    keypoints_str = "\n".join([f"{i+1}. {kp}" for i, kp in enumerate(keypoints)])
+    keypoints_str = "\n".join([f"{i + 1}. {kp}" for i, kp in enumerate(keypoints)])
     formatted_prompt = prompt.format(keypoints=keypoints_str, summary=summary)
-    
+
     output = model.generate(prompt=formatted_prompt)
     if output:
         scores = parse_json(output["output"])
@@ -262,16 +273,37 @@ def evaluate_recall(model, summary, keypoints, is_book=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt-4o-mini")
-    parser.add_argument("--data_file", type=str, default=None,
-                        help="Path to input data file (JSON format)")
-    parser.add_argument("--output_file", type=str, default=None,
-                        help="Path to output metrics file (defaults to data_file + '_summ_metrics.json')")
-    parser.add_argument("--results_file", type=str, default=None,
-                        help="Path to detailed results file (defaults to data_file + '_summ_results.jsonl')")
-    parser.add_argument("--input_dir", type=str, default=None,
-                        help="Directory to process all JSON files (alternative to --data_file)")
-    parser.add_argument("--task_type", type=str, choices=["lawsuit", "book"], default="book", 
-                        help="Type of summarization task")
+    parser.add_argument(
+        "--data_file",
+        type=str,
+        default=None,
+        help="Path to input data file (JSON format)",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default=None,
+        help="Path to output metrics file (defaults to data_file + '_summ_metrics.json')",
+    )
+    parser.add_argument(
+        "--results_file",
+        type=str,
+        default=None,
+        help="Path to detailed results file (defaults to data_file + '_summ_results.jsonl')",
+    )
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        default=None,
+        help="Directory to process all JSON files (alternative to --data_file)",
+    )
+    parser.add_argument(
+        "--task_type",
+        type=str,
+        choices=["lawsuit", "book"],
+        default="book",
+        help="Type of summarization task",
+    )
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--max_length", type=int, default=32000)
@@ -280,29 +312,59 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--use_batch_api", action="store_true", help="Use OpenAI batch API for cheaper processing")
-    parser.add_argument("--base_url", type=str, default=None, help="Base URL for TGI/vLLM endpoint")
-    
+    parser.add_argument(
+        "--use_batch_api",
+        action="store_true",
+        help="Use OpenAI batch API for cheaper processing",
+    )
+    parser.add_argument(
+        "--base_url", type=str, default=None, help="Base URL for TGI/vLLM endpoint"
+    )
+
     args = parser.parse_args()
-    
+
     # Determine data files to process
     data_files = []
     if args.data_file:
         data_files = [args.data_file]
     elif args.input_dir:
         data_files = glob.glob(os.path.join(args.input_dir, "*.json"))
-        data_files = [f for f in data_files if not f.endswith(('_metrics.json', '_results.jsonl', '_summ_metrics.json', '_summ_results.jsonl'))]
+        data_files = [
+            f
+            for f in data_files
+            if not f.endswith(
+                (
+                    "_metrics.json",
+                    "_results.jsonl",
+                    "_summ_metrics.json",
+                    "_summ_results.jsonl",
+                )
+            )
+        ]
     else:
         # Default: look for JSON files in current directory
         data_files = glob.glob("*.json")
-        data_files = [f for f in data_files if not f.endswith(('_metrics.json', '_results.jsonl', '_summ_metrics.json', '_summ_results.jsonl'))]
-        
+        data_files = [
+            f
+            for f in data_files
+            if not f.endswith(
+                (
+                    "_metrics.json",
+                    "_results.jsonl",
+                    "_summ_metrics.json",
+                    "_summ_results.jsonl",
+                )
+            )
+        ]
+
     if not data_files:
-        logger.error("No data files found. Please specify --data_file or --input_dir, or run in a directory with JSON files.")
+        logger.error(
+            "No data files found. Please specify --data_file or --input_dir, or run in a directory with JSON files."
+        )
         return
-    
+
     logger.info(f"Processing {len(data_files)} files: {data_files}")
-    
+
     # Initialize model
     if args.base_url:
         model = TgiVllmModel(
@@ -325,119 +387,138 @@ def main():
             do_sample=args.do_sample,
             seed=args.seed,
         )
-    
+
     # Process each data file
     is_book = args.task_type == "book"
-    
+
     for data_file in data_files:
         logger.info(f"Processing {data_file}")
-        
+
         # Set output files based on data file if not provided
         if args.output_file:
             output_file = args.output_file
         else:
-            output_file = data_file.replace('.json', '_summ_metrics.json')
-            
+            output_file = data_file.replace(".json", "_summ_metrics.json")
+
         if args.results_file:
             results_file = args.results_file
         else:
-            results_file = data_file.replace('.json', '_summ_results.jsonl')
-        
+            results_file = data_file.replace(".json", "_summ_results.jsonl")
+
         # Skip if output already exists
         if os.path.exists(output_file):
             logger.info(f"Output file {output_file} already exists, skipping...")
             continue
-        
+
         # Load data
         try:
-            with open(data_file, 'r') as f:
+            with open(data_file, "r") as f:
                 data = json.load(f)
         except Exception as e:
             logger.error(f"Error loading {data_file}: {e}")
             continue
-        
+
         # Handle different data formats
-        if isinstance(data, dict) and 'data' in data:
-            examples = data['data']
+        if isinstance(data, dict) and "data" in data:
+            examples = data["data"]
         elif isinstance(data, list):
             examples = data
         else:
             logger.error(f"Unsupported data format in {data_file}")
             continue
-        
+
         # Process examples
         results = []
-        
+
         for example in tqdm(examples, desc=f"Processing {os.path.basename(data_file)}"):
             try:
                 # Extract summary and keypoints from example
-                summary = example.get('summary', example.get('generated_output', example.get('output', '')))
-                keypoints = example.get('keypoints', example.get('key_points', []))
-                
+                summary = example.get(
+                    "summary",
+                    example.get("generated_output", example.get("output", "")),
+                )
+                keypoints = example.get("keypoints", example.get("key_points", []))
+
                 if not summary:
                     logger.warning(f"No summary found in example {len(results)}")
                     continue
-                
+
                 # Evaluate fluency
                 fluency_score = evaluate_fluency(model, summary, is_book)
-                
+
                 # Evaluate recall
                 recall_score, supported_keypoints = None, None
                 if keypoints:
-                    recall_score, supported_keypoints = evaluate_recall(model, summary, keypoints, is_book)
-                
+                    recall_score, supported_keypoints = evaluate_recall(
+                        model, summary, keypoints, is_book
+                    )
+
                 result = {
-                    'example_id': example.get('id', len(results)),
-                    'summary': summary,
-                    'keypoints': keypoints,
-                    'fluency_score': fluency_score,
-                    'recall_score': recall_score,
-                    'supported_keypoints': supported_keypoints,
-                    'original_example': example,
+                    "example_id": example.get("id", len(results)),
+                    "summary": summary,
+                    "keypoints": keypoints,
+                    "fluency_score": fluency_score,
+                    "recall_score": recall_score,
+                    "supported_keypoints": supported_keypoints,
+                    "original_example": example,
                 }
-                
+
                 results.append(result)
-                
+
             except Exception as e:
                 logger.error(f"Error processing example {len(results)}: {e}")
-                results.append({
-                    'example_id': len(results),
-                    'error': str(e),
-                    'original_example': example,
-                })
-        
+                results.append(
+                    {
+                        "example_id": len(results),
+                        "error": str(e),
+                        "original_example": example,
+                    }
+                )
+
         # Save results
-        with open(results_file, 'w') as f:
+        with open(results_file, "w") as f:
             for result in results:
-                f.write(json.dumps(result) + '\n')
-        
+                f.write(json.dumps(result) + "\n")
+
         # Compute overall metrics
-        valid_results = [r for r in results if 'error' not in r]
-        fluency_scores = [r['fluency_score'] for r in valid_results if r['fluency_score'] is not None]
-        recall_scores = [r['recall_score'] for r in valid_results if r['recall_score'] is not None]
-        
+        valid_results = [r for r in results if "error" not in r]
+        fluency_scores = [
+            r["fluency_score"] for r in valid_results if r["fluency_score"] is not None
+        ]
+        recall_scores = [
+            r["recall_score"] for r in valid_results if r["recall_score"] is not None
+        ]
+
         overall_metrics = {
-            'total_examples': len(results),
-            'valid_evaluations': len(valid_results),
-            'avg_fluency': np.mean(fluency_scores) if fluency_scores else None,
-            'avg_recall': np.mean(recall_scores) if recall_scores else None,
-            'fluency_distribution': {
-                '0': sum(1 for s in fluency_scores if s == 0),
-                '1': sum(1 for s in fluency_scores if s == 1),
-            } if fluency_scores else None,
-            'recall_statistics': {
-                'min': min(recall_scores) if recall_scores else None,
-                'max': max(recall_scores) if recall_scores else None,
-                'std': np.std(recall_scores) if recall_scores else None,
-            } if recall_scores else None,
+            "total_examples": len(results),
+            "valid_evaluations": len(valid_results),
+            "avg_fluency": np.mean(fluency_scores) if fluency_scores else None,
+            "avg_recall": np.mean(recall_scores) if recall_scores else None,
+            "fluency_distribution": {
+                "0": sum(1 for s in fluency_scores if s == 0),
+                "1": sum(1 for s in fluency_scores if s == 1),
+            }
+            if fluency_scores
+            else None,
+            "recall_statistics": {
+                "min": min(recall_scores) if recall_scores else None,
+                "max": max(recall_scores) if recall_scores else None,
+                "std": np.std(recall_scores) if recall_scores else None,
+            }
+            if recall_scores
+            else None,
         }
-        
+
         # Save overall metrics
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             json.dump(overall_metrics, f, indent=2)
-        
-        logger.info(f"Completed {data_file}. Results saved to {results_file}, metrics saved to {output_file}")
-        logger.info(f"Metrics: avg_fluency={overall_metrics.get('avg_fluency'):.3f if overall_metrics.get('avg_fluency') else 'N/A'}, avg_recall={overall_metrics.get('avg_recall'):.3f if overall_metrics.get('avg_recall') else 'N/A'}")
+
+        logger.info(
+            f"Completed {data_file}. Results saved to {results_file}, metrics saved to {output_file}"
+        )
+        logger.info(
+            f"Metrics: avg_fluency={overall_metrics.get('avg_fluency'):.3f if overall_metrics.get('avg_fluency') else 'N/A'}, avg_recall={overall_metrics.get('avg_recall'):.3f if overall_metrics.get('avg_recall') else 'N/A'}"
+        )
 
 
 if __name__ == "__main__":

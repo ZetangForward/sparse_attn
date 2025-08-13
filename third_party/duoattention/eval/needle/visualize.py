@@ -9,7 +9,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "" "--folder_path",
+    "--folder_path",
     type=str,
     default="results/LLaMA-2-7B-32K/",
     help="Path to the directory containing JSON results",
@@ -116,7 +116,7 @@ def main():
     # More aesthetics
     model_name_ = MODEL_NAME
     plt.title(
-        f'NIAH {model_name_} \n Overall Score: {df["Score"].mean():.3f}'
+        f"NIAH {model_name_} \n Overall Score: {df['Score'].mean():.3f}"
     )  # Adds a title
     plt.xlabel("Token Limit")  # X-axis label
     plt.ylabel("Depth Percent")  # Y-axis label

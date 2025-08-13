@@ -27,15 +27,38 @@ from ..cuda import convert_vertical_slash_indexes
 # )
 @triton.jit
 def _triton_mixed_sparse_attn_fwd_kernel(
-    Q, K, V, seqlens, sm_scale,
-    block_count, block_offset, column_count, column_index,
+    Q,
+    K,
+    V,
+    seqlens,
+    sm_scale,
+    block_count,
+    block_offset,
+    column_count,
+    column_index,
     Out,
-    stride_qz, stride_qh, stride_qm, stride_qk,
-    stride_kz, stride_kh, stride_kn, stride_kk,
-    stride_vz, stride_vh, stride_vn, stride_vk,
-    stride_oz, stride_oh, stride_om, stride_ok,
-    Z, H, N_CTX,
-    NUM_ROWS, NNZ_S, NNZ_V,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_ok,
+    Z,
+    H,
+    N_CTX,
+    NUM_ROWS,
+    NNZ_S,
+    NNZ_V,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -134,10 +157,10 @@ def _triton_mixed_sparse_attn_fwd_kernel(
 
 
 def _triton_mixed_sparse_attention(
-    q: torch.Tensor,          # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    k: torch.Tensor,          # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    v: torch.Tensor,          # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    seqlens: torch.Tensor,    # [BATCH, ]
+    q: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    k: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    v: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    seqlens: torch.Tensor,  # [BATCH, ]
     block_count: torch.Tensor,  # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M)]
     block_offset: torch.Tensor,  # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), NNZ_S]
     column_count: torch.Tensor,  # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M)]
@@ -154,19 +177,44 @@ def _triton_mixed_sparse_attention(
     grid = (triton.cdiv(q.shape[2], block_size_M), q.shape[0] * q.shape[1], 1)
     dtype = tl.bfloat16 if q.dtype == torch.bfloat16 else tl.float16
     _triton_mixed_sparse_attn_fwd_kernel[grid](
-        q, k, v, seqlens, sm_scale,
-        block_count, block_offset, column_count, column_index,
+        q,
+        k,
+        v,
+        seqlens,
+        sm_scale,
+        block_count,
+        block_offset,
+        column_count,
+        column_index,
         o,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        q.shape[0], q.shape[1], q.shape[2],
-        block_count.shape[-1], block_offset.shape[-1], column_index.shape[-1],
-        BLOCK_M=block_size_M, BLOCK_N=block_size_N,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        block_count.shape[-1],
+        block_offset.shape[-1],
+        column_index.shape[-1],
+        BLOCK_M=block_size_M,
+        BLOCK_N=block_size_N,
         BLOCK_DMODEL=Lk,
         dtype=dtype,
-        num_warps=4, num_stages=2,
+        num_warps=4,
+        num_stages=2,
     )
 
     return o
@@ -174,7 +222,7 @@ def _triton_mixed_sparse_attention(
 
 def vertical_slash_sparse_attention(
     query: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    key: torch.Tensor,    # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    key: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     value: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     v_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
     s_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
@@ -193,16 +241,39 @@ def vertical_slash_sparse_attention(
         key = torch.nn.functional.pad(key, [0, target_dim, 0, 0, 0, 0, 0, 0])
         value = torch.nn.functional.pad(value, [0, target_dim, 0, 0, 0, 0, 0, 0])
 
-    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
-    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    v_idx = (
+        v_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=False)[0]
+    )
+    s_idx = (
+        s_idx.to(torch.int32)
+        .reshape((batch_size, num_heads, -1))
+        .sort(dim=-1, descending=True)[0]
+    )
     seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
-    sm_scale = head_dim ** -0.5
-    block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
-        seqlens, v_idx, s_idx, context_size, block_size_M, block_size_N,
+    sm_scale = head_dim**-0.5
+    block_count, block_offset, column_count, column_index = (
+        convert_vertical_slash_indexes(
+            seqlens,
+            v_idx,
+            s_idx,
+            context_size,
+            block_size_M,
+            block_size_N,
+        )
     )
     out = _triton_mixed_sparse_attention(
-        query, key, value, seqlens,
-        block_count, block_offset, column_count, column_index,
-        sm_scale, block_size_M, block_size_N,
+        query,
+        key,
+        value,
+        seqlens,
+        block_count,
+        block_offset,
+        column_count,
+        column_index,
+        sm_scale,
+        block_size_M,
+        block_size_N,
     )
     return out[..., :context_size, :head_dim]

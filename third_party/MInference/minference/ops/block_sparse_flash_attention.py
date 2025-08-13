@@ -28,15 +28,34 @@ import triton.language as tl
 # )
 @triton.jit
 def _triton_block_sparse_attn_fwd_kernel(
-    Q, K, V, seqlens, sm_scale,
+    Q,
+    K,
+    V,
+    seqlens,
+    sm_scale,
     block_index,
     Out,
-    stride_qz, stride_qh, stride_qm, stride_qk,
-    stride_kz, stride_kh, stride_kn, stride_kk,
-    stride_vz, stride_vh, stride_vn, stride_vk,
-    stride_oz, stride_oh, stride_om, stride_ok,
-    Z, H, N_CTX,
-    NUM_ROWS, MAX_BLOCKS_PRE_ROW,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_ok,
+    Z,
+    H,
+    N_CTX,
+    NUM_ROWS,
+    MAX_BLOCKS_PRE_ROW,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -113,11 +132,11 @@ def _triton_block_sparse_attn_fwd_kernel(
 
 
 def _triton_block_sparse_attention(
-    q,                 # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    k,                 # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    v,                 # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    seqlens,           # [BATCH, ]
-    block_index,       # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), MAX_BLOCKS_PRE_ROW]
+    q,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    k,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    v,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    seqlens,  # [BATCH, ]
+    block_index,  # [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), MAX_BLOCKS_PRE_ROW]
     sm_scale,
     block_size_M=64,
     block_size_N=64,
@@ -130,45 +149,78 @@ def _triton_block_sparse_attention(
     grid = (triton.cdiv(q.shape[2], block_size_M), q.shape[0] * q.shape[1], 1)
     dtype = tl.bfloat16 if q.dtype == torch.bfloat16 else tl.float16
     _triton_block_sparse_attn_fwd_kernel[grid](
-        q, k, v, seqlens, sm_scale,
+        q,
+        k,
+        v,
+        seqlens,
+        sm_scale,
         block_index,
         o,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        q.shape[0], q.shape[1], q.shape[2],
-        block_index.shape[-2], block_index.shape[-1],
-        BLOCK_M=block_size_M, BLOCK_N=block_size_N,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        block_index.shape[-2],
+        block_index.shape[-1],
+        BLOCK_M=block_size_M,
+        BLOCK_N=block_size_N,
         BLOCK_DMODEL=Lk,
         dtype=dtype,
-        num_warps=4, num_stages=2,
+        num_warps=4,
+        num_stages=2,
     )
 
     return o
 
 
 def _build_block_index(
-    query: torch.Tensor,     # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    key: torch.Tensor,       # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    query: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    key: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     top_k: int,
     block_size_M: int = 64,
     block_size_N: int = 64,
 ):
     batch_size, num_heads, context_size, head_dim = query.shape
-    query_pool = query.reshape((batch_size, num_heads, -1, block_size_M, head_dim)).mean(dim=-2)
-    key_pool = key.reshape((batch_size, num_heads, -1, block_size_N, head_dim)).mean(dim=-2)
-    arange_M = torch.arange(query_pool.shape[-2], dtype=torch.int32, device=query.device) * block_size_M
-    arange_N = torch.arange(key_pool.shape[-2], dtype=torch.int32, device=key.device) * block_size_N
-    p_pool = torch.einsum(f'bhmk, bhnk -> bhmn', query_pool, key_pool)
-    p_pool = p_pool.where(arange_M[None, None, :, None] >= arange_N[None, None, None, :], -torch.inf)
+    query_pool = query.reshape(
+        (batch_size, num_heads, -1, block_size_M, head_dim)
+    ).mean(dim=-2)
+    key_pool = key.reshape((batch_size, num_heads, -1, block_size_N, head_dim)).mean(
+        dim=-2
+    )
+    arange_M = (
+        torch.arange(query_pool.shape[-2], dtype=torch.int32, device=query.device)
+        * block_size_M
+    )
+    arange_N = (
+        torch.arange(key_pool.shape[-2], dtype=torch.int32, device=key.device)
+        * block_size_N
+    )
+    p_pool = torch.einsum(f"bhmk, bhnk -> bhmn", query_pool, key_pool)
+    p_pool = p_pool.where(
+        arange_M[None, None, :, None] >= arange_N[None, None, None, :], -torch.inf
+    )
     top_k = min(top_k, context_size // block_size_N)
     return torch.topk(p_pool, top_k, dim=-1).indices.to(torch.int32).sort(dim=-1).values
 
 
 def block_sparse_attention(
     query: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
-    key: torch.Tensor,    # [BATCH, N_HEADS, N_CTX, D_HEAD]
+    key: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     value: torch.Tensor,  # [BATCH, N_HEADS, N_CTX, D_HEAD]
     top_k: int,
     block_size_M: int = 64,
@@ -180,7 +232,9 @@ def block_sparse_attention(
     key = torch.nn.functional.pad(key, [0, 0, 0, pad, 0, 0, 0, 0])
     value = torch.nn.functional.pad(value, [0, 0, 0, pad, 0, 0, 0, 0])
     seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
-    sm_scale = head_dim ** -0.5
+    sm_scale = head_dim**-0.5
     block_index = _build_block_index(query, key, top_k, block_size_N, block_size_N)
-    out = _triton_block_sparse_attention(query, key, value, seqlens, block_index, sm_scale, block_size_M, block_size_N)
+    out = _triton_block_sparse_attention(
+        query, key, value, seqlens, block_index, sm_scale, block_size_M, block_size_N
+    )
     return out[..., :context_size, :]

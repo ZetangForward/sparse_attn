@@ -89,7 +89,10 @@ multiturn_templates_scdq = {
         "Read the book and answer the question. Be very concise in your answer.\n\n{context}",
         "Question: {question}\nAnswer:",
     ),
-    "scbench_qa_chn": ("阅读以下书籍然后回答问题。\n\n{context}", "问题：{question}\n答案："),
+    "scbench_qa_chn": (
+        "阅读以下书籍然后回答问题。\n\n{context}",
+        "问题：{question}\n答案：",
+    ),
     "scbench_mf": "{prefix}\n\n{context}",
     "scbench_repoqa": "Based on the function description and code context, please retrieve and repeat the exact described function from the code context in a code block wrapped by ```:\n\n{context}",
     "scbench_summary": "{context}",
@@ -1341,9 +1344,7 @@ class GreedySearch:
                 logits, past_key_values = out.logits, out.past_key_values
 
             else:  # decoding
-                if (
-                    not disable_golden_context
-                ):  # if use golden context, then decoding should not update global past_kv
+                if not disable_golden_context:  # if use golden context, then decoding should not update global past_kv
                     self.global_kv_update_mode(False)
                 out = self.model(
                     input_ids=input_ids[:, -1:],
@@ -1437,9 +1438,7 @@ class GreedySearch_RetrAttn(GreedySearch):
                     logits, past_key_values = out.logits, out.past_key_values
 
             else:  # decoding
-                if (
-                    not disable_golden_context
-                ):  # if use golden context, then decoding should not update global past_kv
+                if not disable_golden_context:  # if use golden context, then decoding should not update global past_kv
                     self.global_kv_update_mode(False)
                 out = self.model(
                     input_ids=input_ids[:, -1:],
