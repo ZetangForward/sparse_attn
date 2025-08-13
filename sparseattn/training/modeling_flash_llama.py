@@ -57,8 +57,8 @@ from block_sparse_attn import block_streaming_attn_func
 
 from dataclasses import dataclass
 
-from distributed_attention import DistributedAttention
-from attention_mask import (
+from .distributed_attention import DistributedAttention
+from .attention_mask import (
     deterministic_z_from_log_alpha,
     sample_z_from_log_alpha,
     cdf_stretched_concrete,
