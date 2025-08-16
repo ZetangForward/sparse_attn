@@ -79,6 +79,9 @@ class PawLlamaConfig(LlamaConfig):
         self.toggle_type = kwargs.pop("toggle_type", "streaming")
         self.sink_size = kwargs.pop("sink_size", 128)
 
+        # TriangleMix
+        self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
+
         super().__init__(*args, **kwargs)
 
 
@@ -608,7 +611,7 @@ class LlamaAttention(nn.Module):
         self.attn_mask_log_alphas = nn.Parameter(
             torch.empty(self.num_key_value_heads, dtype=self._dtype)
         )
-        self.attn_mask_log_alphas.data.normal_(mean=4.5, std=0.01)
+        self.attn_mask_log_alphas.data.normal_(mean=4.5, std=0.01) # sigmoid(4.5) ≈ 0.989
         self.threshold_for_deterministic = None
 
         self.context_window_toggle = context_window_toggle
@@ -625,6 +628,13 @@ class LlamaAttention(nn.Module):
             self.context_window_toggle = (self.sink_blocks + self.local_blocks) * 128
         elif self.toggle_type == "local":
             pass
+        elif self.toggle_type == "triangle":
+            self.streaming_info_kwargs = {
+                "sink_block_num": self.sink_blocks,
+                "local_block_num": self.local_blocks,
+            }
+            self.context_window_toggle = (self.sink_blocks + self.local_blocks) * 128
+            self.triangle_n_last = config.triangle_n_last
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -698,7 +708,7 @@ class LlamaAttention(nn.Module):
                 return_attn_probs=False,
             )
 
-        if self.toggle_type == "streaming":
+        if self.toggle_type == "streaming" or self.toggle_type == "triangle":
             if unpadded_lengths is not None:
                 cu_seqlens, max_seqlen = unpadded_lengths
                 cw_attn_output = streaming_attn_varlen_kvpacked_func(
@@ -720,6 +730,26 @@ class LlamaAttention(nn.Module):
                     causal=True,
                     return_attn_probs=False,
                 )
+            if self.toggle_type == "triangle":
+                if unpadded_lengths is not None:
+                    cu_seqlens, _ = unpadded_lengths
+                    total = q.size(0)
+                    mask = torch.zeros(total, dtype=torch.bool, device=q.device)
+                    B = cu_seqlens.numel() - 1
+                    n_last = self.triangle_n_last
+                    for b in range(B):
+                        start = int(cu_seqlens[b].item())
+                        end = int(cu_seqlens[b + 1].item())
+                        seg_len = end - start
+                        take = min(n_last, seg_len)
+                        if take > 0:
+                            mask[end - take:end] = True
+                    cw_attn_output[mask] = attn_output[mask]
+                else:
+                    seq_len = q.size(1)
+                    take = min(getattr(self, "triangle_n_last", 0), seq_len)
+                    if take > 0:
+                        cw_attn_output[:, -take:] = attn_output[:, -take:]
 
         elif self.toggle_type == "local":
             if unpadded_lengths is not None:

@@ -1,8 +1,8 @@
-input_max_length: 131072,131072
-datasets: icl_clinic150_7050shot_balance,icl_nlu_8296shot_balance
-generation_max_length: 20,20
-test_files: ','
-demo_files: ','
+input_max_length: 131072,131072,131072
+datasets: icl_nlu_8296shot_balance,icl_clinic150_7050shot_balance,icl_nlu_8296shot_balance
+generation_max_length: 20,20,20
+test_files: ',,'
+demo_files: ',,'
 use_chat_template: false
 max_test_samples: 500
 shots: 0

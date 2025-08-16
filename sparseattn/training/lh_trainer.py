@@ -529,6 +529,40 @@ class Trainer(HFTrainer):
                 f"Target: {target_sparsity:.4f} | Sparsity: {model_sparsity:.4f}"
                 + (" | " + " | ".join(extra) if len(extra) else "")
             )
+            
+            if (
+                not return_output_and_metrics                                     
+                and getattr(self.args, "log_train_sparsity_metrics", True)
+                and self.state.global_step > 0            
+            ):
+                train_metrics = {
+                    "lm_loss": float(lm_loss.detach().item() if isinstance(lm_loss, torch.Tensor) else lm_loss),
+                    "reg_loss": float(reg_loss.detach().item() if isinstance(reg_loss, torch.Tensor) else reg_loss),
+                    "loss": float(loss.detach().item() if isinstance(loss, torch.Tensor) else loss),
+                    "target_sparsity": float(target_sparsity),
+                    "model_sparsity": float(model_sparsity),
+                    "step": self.state.global_step,
+                }
+                if isinstance(outputs, dict):
+                    for k in [
+                        "expected_model_sparsity",
+                        "lambda1",
+                        "lambda2",
+                        "expected_z_mean",
+                        "expected_z_std",
+                        "log_alpha_mean",
+                        "log_alpha_std",
+                    ]:
+                        v = outputs.get(k, None)
+                        if v is not None:
+                            if isinstance(v, torch.Tensor):
+                                v = v.detach()
+                                if v.numel() == 1:
+                                    v = v.item()
+                                else:
+                                    v = float(v.mean().item())
+                            train_metrics[k] = v
+                self.log(train_metrics)
 
         if return_output_and_metrics:
             # shifted_labels = inputs["labels"][:,1:].contiguous()

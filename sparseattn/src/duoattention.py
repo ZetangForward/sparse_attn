@@ -17,6 +17,15 @@ import types
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 
+import logging
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 
 def _get_unpad_data(padding_mask):
     seqlens_in_batch = padding_mask.sum(dim=-1, dtype=torch.int32)
