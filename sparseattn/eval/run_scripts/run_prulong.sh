@@ -6,7 +6,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-GPUS=(3)
+GPUS=(5)
 NUM_GPUS=${#GPUS[@]}
 
 export OUTLINES_CACHE_DIR="/data/qqt/project/PruLong-main/tmp/outlines"
@@ -17,24 +17,19 @@ PROJECT_DIR="/data/qqt/project/SparseAttn/sparseattn/eval"
 cd "$PROJECT_DIR" || { echo "❌ Project directory not found!"; exit 1; }
 
 # 模型配置
-MODEL="/data/qqt/project/PruLong-main/prulong/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.064k_wfrozen"
+MODEL="/data/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0test_disable_linear_regularization_wfrozen"
 SPARSITY=0.7
 PREFILL=32768
 
 # 所有任务列表
 TASKS=(
-    "longproc_addon/configs/html_to_tsv.yaml"
     "longproc_addon/configs/travel_planning.yaml"
-    "configs/recall.yaml"
-    "configs/rerank.yaml"
-    "configs/rag.yaml"
-    "configs/icl.yaml"
-    "configs/longqa.yaml"
-    "configs/summ.yaml"
 )
 
+OUTPUT_LOGS_DIR="joblog-prulong-test-prefill"
+
 # 输出和日志目录
-mkdir -p outputs joblog-prulong-64k
+mkdir -p outputs "$OUTPUT_LOGS_DIR"
 
 # ============================================================================
 # 全局变量：记录启动的 worker PIDs
@@ -101,9 +96,9 @@ worker() {
 
         TASK_NAME=$(basename "$TASK_PATH" .yaml)
         MODEL_NAME=$(basename "$MODEL")
-        OUT_DIR="outputs/${MODEL_NAME}/outputs_sp${SPARSITY}_pf${PREFILL}_tg"
+        OUT_DIR="outputs/${MODEL_NAME}/outputs_sp${SPARSITY}_pf_${OUTPUT_LOGS_DIR}${PREFILL}_tg"
         COMPLETED_FLAG="$OUT_DIR/.${TASK_NAME}.completed"
-        LOGFILE="./joblog-prulong-64k/${TASK_NAME}_gpu${gpu_id}.log"
+        LOGFILE="./${OUTPUT_LOGS_DIR}/${TASK_NAME}_gpu${gpu_id}.log"
 
         mkdir -p "$OUT_DIR"
 

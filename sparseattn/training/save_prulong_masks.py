@@ -6,6 +6,7 @@ import torch
 import argparse
 
 from modeling_flash_llama import PawLlamaForCausalLM, get_mask
+from modeling_flash_qwen import PawQwen3ForCausalLM
 
 
 def parse_args():
@@ -30,7 +31,17 @@ def parse_args():
 def main():
     args = parse_args()
 
-    model = PawLlamaForCausalLM.from_pretrained(args.checkpoint)
+    # Try to load as Qwen model first, then fallback to Llama
+    if "llama" in args.checkpoint.lower():
+        model = PawLlamaForCausalLM.from_pretrained(args.checkpoint)
+    elif "qwen" in args.checkpoint.lower():
+        model = PawQwen3ForCausalLM.from_pretrained(args.checkpoint)
+    else:
+        raise ValueError(
+            f"Model checkpoint {args.checkpoint} does not contain. "
+            "Please provide a valid model checkpoint."
+        )
+
     if args.sparsity is not None:
         print("Set to", model.round_masks_for_sparsity(args.sparsity))
         threshold = 0.0

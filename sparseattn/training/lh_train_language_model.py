@@ -14,6 +14,7 @@ from transformers import (
 )
 
 from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
+from .modeling_flash_qwen import PawQwen3ForCausalLM, PawQwen3Config
 from .lh_trainer import Trainer
 from .dataset import build_dataset, DataCollator, DataArguments
 from .dataset import logger as dataset_logger
@@ -97,16 +98,34 @@ def main():
         revision=script_args.model_revision,
         use_auth_token=True if script_args.use_auth_token else None,
     )
-    config = PawLlamaConfig.from_pretrained(
-        script_args.config_name or script_args.model_name_or_path,
-        cache_dir=script_args.cache_dir,
-        revision=script_args.model_revision,
-        use_auth_token=True if script_args.use_auth_token else None,
-        toggle_type=training_args.toggle_type,
-        local_window_size=training_args.context_window_if_toggled,
-        sink_size=training_args.sink_size,
-        disable_linear_regularization_term=training_args.disable_linear_regularization_term,
-    )
+    # Determine model type and load appropriate config
+    if "qwen" in script_args.model_name_or_path.lower():
+        config = PawQwen3Config.from_pretrained(
+            script_args.config_name or script_args.model_name_or_path,
+            cache_dir=script_args.cache_dir,
+            revision=script_args.model_revision,
+            use_auth_token=True if script_args.use_auth_token else None,
+            toggle_type=training_args.toggle_type,
+            local_window_size=training_args.context_window_if_toggled,
+            sink_size=training_args.sink_size,
+            disable_linear_regularization_term=training_args.disable_linear_regularization_term,
+        )
+    elif "llama" in script_args.model_name_or_path.lower():
+        config = PawLlamaConfig.from_pretrained(
+            script_args.config_name or script_args.model_name_or_path,
+            cache_dir=script_args.cache_dir,
+            revision=script_args.model_revision,
+            use_auth_token=True if script_args.use_auth_token else None,
+            toggle_type=training_args.toggle_type,
+            local_window_size=training_args.context_window_if_toggled,
+            sink_size=training_args.sink_size,
+            disable_linear_regularization_term=training_args.disable_linear_regularization_term,
+        )
+    else:
+        raise ValueError(
+            f"Model name {script_args.model_name_or_path} does not contain. "
+            "Please provide a valid model name."
+        )
     if script_args.config_overrides:
         logger.info(f"Overriding config: {script_args.config_overrides}")
         config.update_from_string(script_args.config_overrides)
@@ -120,19 +139,42 @@ def main():
     config.pad_token_id = 0
 
     if script_args.model_name_or_path:
-        model = PawLlamaForCausalLM.from_pretrained(
-            script_args.model_name_or_path,
-            from_tf=bool(".ckpt" in script_args.model_name_or_path),
-            config=config,
-            cache_dir=script_args.cache_dir,
-            revision=script_args.model_revision,
-            use_auth_token=True if script_args.use_auth_token else None,
-        )
+        # Determine model type and load appropriate model
+        if "qwen" in script_args.model_name_or_path.lower():
+            model = PawQwen3ForCausalLM.from_pretrained(
+                script_args.model_name_or_path,
+                from_tf=bool(".ckpt" in script_args.model_name_or_path),
+                config=config,
+                cache_dir=script_args.cache_dir,
+                revision=script_args.model_revision,
+                use_auth_token=True if script_args.use_auth_token else None,
+            )
+        elif "llama" in script_args.model_name_or_path.lower():
+            model = PawLlamaForCausalLM.from_pretrained(
+                script_args.model_name_or_path,
+                from_tf=bool(".ckpt" in script_args.model_name_or_path),
+                config=config,
+                cache_dir=script_args.cache_dir,
+                revision=script_args.model_revision,
+                use_auth_token=True if script_args.use_auth_token else None,
+            )
+        else:
+            raise ValueError(
+                f"Model name {script_args.model_name_or_path} does not contain. "
+                "Please provide a valid model name."
+            )
     else:
         logger.warning(f"Initializing new PawLlamaForCausalLM from scratch")
-        model = PawLlamaForCausalLM(
-            config,
-        )
+        # Determine model type and initialize appropriate model
+        if "qwen" in script_args.model_name_or_path.lower():
+            model = PawQwen3ForCausalLM(config)
+        elif "llama" in script_args.model_name_or_path.lower():
+            model = PawLlamaForCausalLM(config)
+        else:
+            raise ValueError(
+                f"Model name {script_args.model_name_or_path} does not contain. "
+                "Please provide a valid model name."
+            )
 
     # Last time with the Edge Pruning classes, we needed to reset the log alphas if loading from an HF checkpoint
     model.reset_masks()

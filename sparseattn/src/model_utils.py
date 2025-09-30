@@ -1030,10 +1030,10 @@ class HFModel(LLM):
             attn_heads, sparsity = sparsify_attention_heads(
                 attn_heads, sparsity=duoattn_sparsity
             )
-            
+
             logger.warning(f"True sparsity: {sparsity}")
             logger.warning(f"Sparse attention heads: {attn_heads.shape}")
-            
+
             enable_duo_attention_eval(
                 self.model,
                 attn_heads,

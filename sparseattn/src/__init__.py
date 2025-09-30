@@ -14,10 +14,12 @@ from .Xattention import Xattention_prefill
 from .Flexprefill import Flexprefill_prefill
 from .Minference import Minference_prefill
 from .Fullprefill import Full_prefill
+from .model_utils import load_LLM
 
 __all__ = [
     "Xattention_prefill",
     "Flexprefill_prefill",
     "Minference_prefill",
     "Full_prefill",
+    "load_LLM",
 ]

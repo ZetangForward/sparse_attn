@@ -1,5 +1,5 @@
 # Model and training configuration
-model=${MODEL:-"/data/hf_models/Meta-Llama-3.1-8B-Instruct"}
+model=${MODEL:-"/data/hf_models/Qwen3-8B-Instruct-Scaling-Data-s1"}
 bsz=${BSZ:-16}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
@@ -18,26 +18,26 @@ gc=${GC:-"1"}
 
 # PruLong-specific arguments
 max_toks=${MAX_TOKS:-65536}
-start_head_sparsity=${START_HEAD_SPARSITY:-0.1}
+start_head_sparsity=${START_HEAD_SPARSITY:-0.0}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.7}
 mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
 reg_learning_rate=${REG_LEARNING_RATE:-1.0}
 sparsity_warmup_ratio=${SPARSITY_WARMUP_RATIO:-0.8}
-disable_linear_reg_term=${DISABLE_LINEAR_REG_TERM:-false}
+disable_linear_reg_term=${DISABLE_LINEAR_REG_TERM:-true}
 context_window_if_toggled=${CONTEXT_WINDOW_IF_TOGGLED:-1024}
 freeze_weights=${FREEZE_WEIGHTS:-true}
 freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
 # Streaming configuration
-toggle_type=${TOGGLE_TYPE:-"streaming"}
+toggle_type=${TOGGLE_TYPE:-"triangle"}
 sink_size=${SINK_SIZE:-128}
 
 # Dataset configuration
 dataset=${DATASET:-"/data/qqt/project/PruLong-main/prulong/datasets/sample_data"}
 
 # Create run name
-extra_name="test_disable_linear_regularization"
+extra_name="test_triangle"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
