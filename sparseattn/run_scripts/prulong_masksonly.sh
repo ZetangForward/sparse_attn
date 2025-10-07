@@ -1,5 +1,5 @@
 # Model and training configuration
-model=${MODEL:-"/data/hf_models/Qwen3-8B-Instruct-Scaling-Data-s1"}
+model=${MODEL:-"/data/hf_models/Meta-Llama-3.1-8B-Instruct"}
 bsz=${BSZ:-16}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
@@ -17,8 +17,8 @@ fsdp=${FSDP:-"1"}
 gc=${GC:-"1"}
 
 # PruLong-specific arguments
-max_toks=${MAX_TOKS:-65536}
-start_head_sparsity=${START_HEAD_SPARSITY:-0.0}
+max_toks=${MAX_TOKS:-32768}
+start_head_sparsity=${START_HEAD_SPARSITY:-0.1}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.7}
 mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
 reg_learning_rate=${REG_LEARNING_RATE:-1.0}
@@ -30,14 +30,14 @@ freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
 # Streaming configuration
-toggle_type=${TOGGLE_TYPE:-"triangle"}
+toggle_type=${TOGGLE_TYPE:-"streaming"}
 sink_size=${SINK_SIZE:-128}
 
 # Dataset configuration
 dataset=${DATASET:-"/data/qqt/project/PruLong-main/prulong/datasets/sample_data"}
 
 # Create run name
-extra_name="test_triangle"
+extra_name="test_streaming_layer_decay_middlestart_32k"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
@@ -178,4 +178,4 @@ base_arguments+=( $@ )
 
 echo "Command: ${header} ${base_arguments[@]}"
 ${header} "${base_arguments[@]}" 2>&1 | tee -a $out_dir/log.out \
-    && [ -f $out_dir/config.json ] && python training.save_prulong_masks.py --checkpoint $out_dir --out_path $out_dir/masks_sp${end_head_sparsity}.tsv --sparsity $end_head_sparsity 
+    && [ -f $out_dir/config.json ] && python -m training.save_prulong_masks --checkpoint $out_dir --out_path $out_dir/masks_sp${end_head_sparsity}.tsv --sparsity $end_head_sparsity 

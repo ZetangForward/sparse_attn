@@ -5,8 +5,8 @@ import json
 import torch
 import argparse
 
-from modeling_flash_llama import PawLlamaForCausalLM, get_mask
-from modeling_flash_qwen import PawQwen3ForCausalLM
+from .modeling_flash_llama import PawLlamaForCausalLM, get_mask
+from .modeling_flash_qwen import PawQwen3ForCausalLM
 
 
 def parse_args():
