@@ -82,6 +82,15 @@ class PawLlamaConfig(LlamaConfig):
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
 
+        # Layer-wise sparsity control
+        self.enable_layerwise_sparsity = kwargs.pop("enable_layerwise_sparsity", False)
+
+        self.layerwise_sparsity_schedule = kwargs.pop("layerwise_sparsity_schedule", "high-low-high")
+        self.layerwise_sparsity_min_ratio = kwargs.pop("layerwise_sparsity_min_ratio", 0.5)
+        self.layerwise_sparsity_max_ratio = kwargs.pop("layerwise_sparsity_max_ratio", 1.0)
+        self.layerwise_sparsity_power = kwargs.pop("layerwise_sparsity_power", 1.0)
+        self.layerwise_sparsity_weight = kwargs.pop("layerwise_sparsity_weight", 1.0)
+
         super().__init__(*args, **kwargs)
 
 
@@ -988,7 +997,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states,
         )
 
-        if output_attentions:
+        if output_attentions:     
             outputs += (self_attn_weights,)
 
         if use_cache:
@@ -1033,6 +1042,10 @@ class BaseModelOutputWithPastAndSparsity(ModelOutput):
     expected_z_std: Optional[torch.FloatTensor] = None
     log_alpha_mean: Optional[torch.FloatTensor] = None
     log_alpha_std: Optional[torch.FloatTensor] = None
+    # Layer-wise sparsity diagnostics
+    layerwise_model_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_target_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_sparsity_loss: Optional[torch.FloatTensor] = None  # scalar
 
 
 class LlamaModel(LlamaPreTrainedModel):
@@ -1138,6 +1151,7 @@ class LlamaModel(LlamaPreTrainedModel):
         else:
             value_1 = -10.0
             value_2 = 10.0
+        # 修复循环：需要枚举 self.layers
         for l, layer in enumerate(self.layers):
             value = value_1 if l % (width_1 + width_2) < width_1 else value_2
             layer.fill_masks_with_value(value)
@@ -1244,6 +1258,7 @@ class LlamaModel(LlamaPreTrainedModel):
         next_decoder_cache = () if use_cache else None
 
         z_sum = 0
+        layer_z_sums = []  # 收集每层 z_sum 以计算逐层稀疏度
 
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
@@ -1280,6 +1295,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
             z_layer_sum, hidden_states = layer_outputs[0], layer_outputs[1]
             z_sum = z_sum + z_layer_sum
+            layer_z_sums.append(z_layer_sum)
 
             if use_cache:
                 next_decoder_cache += (layer_outputs[3 if output_attentions else 2],)
@@ -1308,7 +1324,24 @@ class LlamaModel(LlamaPreTrainedModel):
             dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
             z_sum = sum(z_sums)
 
+            gathered_layer_z_sums = []
+            for z_l in layer_z_sums:
+                tmp = [
+                    torch.zeros_like(z_l)
+                    for _ in range(dist.get_world_size(seq_parallel_group))
+                ]
+                dist.all_gather(tmp, z_l, group=seq_parallel_group)
+                gathered_layer_z_sums.append(sum(tmp))
+            layer_z_sums = gathered_layer_z_sums
+
         model_sparsity = 1 - (z_sum / self.total_num_heads)
+
+        layerwise_model_sparsity = None
+        layerwise_target = None
+        layerwise_loss = None
+        if len(layer_z_sums) > 0:
+            per_layer_heads = self.config.num_attention_heads
+            layerwise_model_sparsity = 1.0 - torch.stack(layer_z_sums) / per_layer_heads  # (num_layers,)
 
         if target_sparsity is None:
             z_loss = None
@@ -1318,6 +1351,44 @@ class LlamaModel(LlamaPreTrainedModel):
                 + self.sparsity_lambda_2.reshape([])
                 * (model_sparsity - target_sparsity) ** 2
             )
+
+        if (
+            target_sparsity is not None
+            and self.config.enable_layerwise_sparsity
+            and layerwise_model_sparsity is not None
+        ):
+            L = layerwise_model_sparsity.numel()
+            device = layerwise_model_sparsity.device
+            idxs = torch.arange(L, device=device, dtype=torch.float32)
+            denom = max(L - 1, 1)
+            x = torch.sin(torch.pi * (idxs / denom))
+            x = x.pow(float(self.config.layerwise_sparsity_power))
+
+            # 根据 schedule 选择曲线方向：
+            # - "low-high-low": 中间更稀疏（默认实现）
+            # - "high-low-high": 中间更稠密（保留更多 full-head）
+            min_r = float(self.config.layerwise_sparsity_min_ratio)
+            max_r = float(self.config.layerwise_sparsity_max_ratio)
+            sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")
+            if sched == "high-low-high":
+                # 中间层稀疏度更低：两端用更高比例，中间用更低比例
+                ratios = max_r - (max_r - min_r) * x
+            else:
+                # 默认：中间层稀疏度更高
+                ratios = min_r + (max_r - min_r) * x
+
+            layerwise_target = torch.clamp(
+                ratios * float(target_sparsity), min=0.0, max=1.0
+            )
+
+            diffs = layerwise_model_sparsity - layerwise_target
+            per_layer_loss = (
+                self.sparsity_lambda_1.reshape([]) * diffs
+                + self.sparsity_lambda_2.reshape([]) * (diffs ** 2)
+            )
+            layerwise_loss = float(self.config.layerwise_sparsity_weight) * per_layer_loss.mean()
+
+            z_loss = layerwise_loss if z_loss is None else (z_loss + layerwise_loss)
 
         # Diagnostics: compute expected sparsity (no sampling) and stats over masks
         with torch.no_grad():
@@ -1377,7 +1448,6 @@ class LlamaModel(LlamaPreTrainedModel):
                 log_alpha_std = torch.tensor(float("nan"), device=hidden_states.device)
 
         if not return_dict:
-            # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)
             return tuple(
                 v
                 for v in [
@@ -1395,6 +1465,9 @@ class LlamaModel(LlamaPreTrainedModel):
                     expected_z_std,
                     log_alpha_mean,
                     log_alpha_std,
+                    layerwise_model_sparsity,
+                    layerwise_target,
+                    layerwise_loss,
                 ]
                 if v is not None
             )
@@ -1413,6 +1486,9 @@ class LlamaModel(LlamaPreTrainedModel):
             expected_z_std=expected_z_std,
             log_alpha_mean=log_alpha_mean,
             log_alpha_std=log_alpha_std,
+            layerwise_model_sparsity=layerwise_model_sparsity,
+            layerwise_target_sparsity=layerwise_target,
+            layerwise_sparsity_loss=layerwise_loss,
         )
 
 
@@ -1434,6 +1510,10 @@ class CausalLMOutputWithPastAndSparsity(ModelOutput):
     expected_z_std: Optional[torch.FloatTensor] = None
     log_alpha_mean: Optional[torch.FloatTensor] = None
     log_alpha_std: Optional[torch.FloatTensor] = None
+    # Layer-wise sparsity diagnostics
+    layerwise_model_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_target_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_sparsity_loss: Optional[torch.FloatTensor] = None  # scalar
 
 
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
@@ -1708,6 +1788,9 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
             expected_z_std=outputs.expected_z_std,
             log_alpha_mean=outputs.log_alpha_mean,
             log_alpha_std=outputs.log_alpha_std,
+            layerwise_model_sparsity=outputs.layerwise_model_sparsity,
+            layerwise_target_sparsity=outputs.layerwise_target_sparsity,
+            layerwise_sparsity_loss=outputs.layerwise_sparsity_loss,
         )
 
     def prepare_inputs_for_generation(

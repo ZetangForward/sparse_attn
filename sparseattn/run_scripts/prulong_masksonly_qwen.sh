@@ -1,5 +1,5 @@
 # Model and training configuration
-model=${MODEL:-"/data/hf_models/Meta-Llama-3.1-8B-Instruct"}
+model=${MODEL:-"/data/hf_models/Qwen3-4B"}
 bsz=${BSZ:-16}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
@@ -33,19 +33,11 @@ warmup_type=${WARMUP_TYPE:-"linear"}
 toggle_type=${TOGGLE_TYPE:-"streaming"}
 sink_size=${SINK_SIZE:-128}
 
-# Layer-wise sparsity configuration
-enable_layerwise_sparsity=${ENABLE_LAYERWISE_SPARSITY:-true}
-layerwise_sparsity_schedule=${LAYERWISE_SPARSITY_SCHEDULE:-"high-low-high"}
-layerwise_sparsity_min_ratio=${LAYERWISE_SPARSITY_MIN_RATIO:-0.5}
-layerwise_sparsity_max_ratio=${LAYERWISE_SPARSITY_MAX_RATIO:-1.0}
-layerwise_sparsity_power=${LAYERWISE_SPARSITY_POWER:-1.0}
-layerwise_sparsity_weight=${LAYERWISE_SPARSITY_WEIGHT:-1.0}
-
 # Dataset configuration
 dataset=${DATASET:-"/data/qqt/project/PruLong-main/prulong/datasets/sample_data"}
 
 # Create run name
-extra_name="test_streaming_32k_layer-decay"
+extra_name="qwen_streaming_32k"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
@@ -168,14 +160,6 @@ base_arguments=(
     # Streaming configuration
     --toggle_type $toggle_type
     --sink_size $sink_size
-
-    # layer decay configuration
-    --enable_layerwise_sparsity $enable_layerwise_sparsity
-    --layerwise_sparsity_schedule $layerwise_sparsity_schedule
-    --layerwise_sparsity_min_ratio $layerwise_sparsity_min_ratio
-    --layerwise_sparsity_max_ratio $layerwise_sparsity_max_ratio
-    --layerwise_sparsity_power $layerwise_sparsity_power
-    --layerwise_sparsity_weight $layerwise_sparsity_weight
 )
 
 # FSDP configuration

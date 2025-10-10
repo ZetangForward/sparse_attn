@@ -97,6 +97,7 @@ def main():
         use_fast=script_args.use_fast_tokenizer,
         revision=script_args.model_revision,
         use_auth_token=True if script_args.use_auth_token else None,
+        enable_thinking=True if script_args.use_thinking else False,
     )
     # Determine model type and load appropriate config
     if "qwen" in script_args.model_name_or_path.lower():

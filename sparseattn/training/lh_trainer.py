@@ -525,7 +525,7 @@ class Trainer(HFTrainer):
                 extra.append(f"logα: {float(la_mean):.3f}±{float(la_std):.3f}")
 
             logger.info(
-                f"@ {self.state.global_step} | Loss: {loss:.4f} | LM: {lm_loss:.4f} | Reg: {reg_loss:.4f} | "
+                f"@ {self.state.global_step} | Loss: {loss.item():.4f} | LM: {lm_loss.item():.4f} | Reg: {reg_loss.item():.4f} | "
                 f"Target: {target_sparsity:.4f} | Sparsity: {model_sparsity:.4f}"
                 + (" | " + " | ".join(extra) if len(extra) else "")
             )

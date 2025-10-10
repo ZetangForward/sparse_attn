@@ -71,6 +71,15 @@ class ScriptArguments:
             )
         },
     )
+    use_thinking: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Will use the thinking mode (necessary to use this script "
+                "with qwen models)."
+            )
+        },
+    )
     should_log_loss: bool = field(
         default=False,
         metadata={"help": "Whether to log loss components during training"},
@@ -188,4 +197,30 @@ class TrainingArguments(HfTrainingArguments):
         metadata={
             "help": "Number of sink tokens (will be rounded up to a multiple of 128)."
         },
+    )
+    
+    # Layer-wise sparsity
+    enable_layerwise_sparsity: bool = field(
+        default=False,
+        metadata={"help": "Whether to enable layer-wise sparsity."},
+    )
+    layerwise_sparsity_schedule: str = field(
+        default="high-low-high",
+        metadata={"help": "The schedule for layer-wise sparsity. Options: 'high-low-high', 'low-high-low'"},
+    )
+    layerwise_sparsity_min_ratio: float = field(
+        default=0.5,
+        metadata={"help": "The minimum ratio of layer-wise sparsity to global sparsity."},
+    )
+    layerwise_sparsity_max_ratio: float = field(
+        default=1.0,
+        metadata={"help": "The maximum ratio of layer-wise sparsity to global sparsity."},
+    )
+    layerwise_sparsity_power: float = field(
+        default=1.0,
+        metadata={"help": "The power to raise the layer index when computing layer-wise sparsity."},
+    )
+    layerwise_sparsity_weight: float = field(
+        default=1.0,
+        metadata={"help": "The weight of the layer-wise sparsity loss term."},
     )

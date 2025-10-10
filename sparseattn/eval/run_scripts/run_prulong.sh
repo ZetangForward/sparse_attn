@@ -6,7 +6,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-GPUS=(5)
+GPUS=(0 1 2 3 4 5 6 7)
 NUM_GPUS=${#GPUS[@]}
 
 export OUTLINES_CACHE_DIR="/data/qqt/project/PruLong-main/tmp/outlines"
@@ -17,16 +17,24 @@ PROJECT_DIR="/data/qqt/project/SparseAttn/sparseattn/eval"
 cd "$PROJECT_DIR" || { echo "❌ Project directory not found!"; exit 1; }
 
 # 模型配置
-MODEL="/data/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0test_disable_linear_regularization_wfrozen"
+MODEL="/data/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0test_streaming_32k_layer-decay_wfrozen"
 SPARSITY=0.7
 PREFILL=32768
 
 # 所有任务列表
 TASKS=(
+    "longproc_addon/configs/html_to_tsv.yaml"
+    "configs/sub_icl.yaml"
+    "configs/icl.yaml"
+    "configs/recall.yaml"
+    "configs/rerank.yaml"
+    "configs/rag.yaml"
+    "configs/longqa.yaml"
+    "configs/summ.yaml"
     "longproc_addon/configs/travel_planning.yaml"
 )
 
-OUTPUT_LOGS_DIR="joblog-prulong-test-prefill"
+OUTPUT_LOGS_DIR="joblog-prulong-test-streaming-32k-layer-decay"
 
 # 输出和日志目录
 mkdir -p outputs "$OUTPUT_LOGS_DIR"
@@ -45,7 +53,6 @@ cleanup_gpu() {
     local pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits -i $gpu_id 2>/dev/null | xargs 2>/dev/null) || true
     if [ -n "$pids" ] && [ "$pids" != " " ]; then
         for pid in $pids; do
-            # 尽量判断是否为 python 进程
             if ps -p $pid --no-headers -o comm= 2>/dev/null | grep -q "python"; then
                 echo "💀 Killing Python process on GPU $gpu_id: PID $pid"
                 kill -9 $pid 2>/dev/null || true
