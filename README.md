@@ -119,7 +119,7 @@ git clone https://github.com/qqtang-code/SparseAttn.git
 cd SparseAttn
 
 # Install dependencies
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 -f https://mirrors.aliyun.com/pytorch-wheels/cu124
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 -f https://mirrors.aliyun.com/pytorch-wheels/cu124
 pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.5/
 git clone https://gitee.com/codingQQT/Block-Sparse-Attention.git
 cd Block-Sparse-Attention && CUDA_HOME=/usr/local/cuda-12.4/ python setup.py install

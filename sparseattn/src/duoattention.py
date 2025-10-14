@@ -610,7 +610,6 @@ from .utils import apply_rope_inplace, enable_flashinfer_rmsnorm
 
 from tensor_parallel.pretrained_model import TensorParallelPreTrainedModel
 from flash_attn import flash_attn_func, flash_attn_with_kvcache
-from duo_attn.ulysses import UlyssesAttention
 
 
 def llama_duo_attention_forward_two_way(

@@ -12,6 +12,7 @@ eval/RULER/scripts/data/synthetic/json/*json
 eval/RULER/__pycache__/
 *.jsonl
 *.json
+*.mds
 eval/RULER/.vscode/
 *.out
 *.html
