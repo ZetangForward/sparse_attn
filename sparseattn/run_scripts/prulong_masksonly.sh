@@ -42,7 +42,7 @@ layerwise_sparsity_power=${LAYERWISE_SPARSITY_POWER:-1.0}
 layerwise_sparsity_weight=${LAYERWISE_SPARSITY_WEIGHT:-1.0}
 
 # Dataset configuration
-dataset=${DATASET:-"/data/qqt/project/PruLong-main/prulong/datasets/sample_data"}
+dataset=${DATASET:-"/data/lcm_lab/qqt/project/SparseAttn/sparseattn/data"}
 
 # Create run name
 extra_name="test_streaming_32k_layer-decay"

@@ -13,11 +13,11 @@ export OUTLINES_CACHE_DIR="/data/qqt/project/PruLong-main/tmp/outlines"
 export HF_ENDPOINT=https://hf-mirror.com
 
 # 项目路径
-PROJECT_DIR="/data/qqt/project/SparseAttn/sparseattn/eval"
+PROJECT_DIR="/data/lcm_lab/qqt/project/SparseAttn/sparseattn/eval"
 cd "$PROJECT_DIR" || { echo "❌ Project directory not found!"; exit 1; }
 
 # 模型配置
-MODEL="/data/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0test_streaming_32k_layer-decay_wfrozen"
+MODEL="/data/lcm_lab/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0test_streaming_32k_layer-decay_wfrozen"
 SPARSITY=0.7
 PREFILL=32768
 
