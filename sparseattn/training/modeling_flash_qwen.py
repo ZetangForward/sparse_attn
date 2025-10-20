@@ -82,6 +82,21 @@ class PawQwen3Config(Qwen3Config):
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
 
+        # Layer-wise sparsity control
+        self.enable_layerwise_sparsity = kwargs.pop("enable_layerwise_sparsity", False)
+
+        self.layerwise_sparsity_schedule = kwargs.pop(
+            "layerwise_sparsity_schedule", "high-low-high"
+        )
+        self.layerwise_sparsity_min_ratio = kwargs.pop(
+            "layerwise_sparsity_min_ratio", 0.5
+        )
+        self.layerwise_sparsity_max_ratio = kwargs.pop(
+            "layerwise_sparsity_max_ratio", 1.0
+        )
+        self.layerwise_sparsity_power = kwargs.pop("layerwise_sparsity_power", 1.0)
+        self.layerwise_sparsity_weight = kwargs.pop("layerwise_sparsity_weight", 1.0)
+
         super().__init__(*args, **kwargs)
 
 
@@ -617,11 +632,6 @@ class Qwen3Attention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
-            raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads})."
-            )
         self.q_proj = nn.Linear(
             self.hidden_size, self.num_heads * self.head_dim, bias=False
         )
@@ -851,18 +861,14 @@ class Qwen3Attention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        q_len, h_size = hidden_states.size(-2), hidden_states.size(-1)
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
-
-        q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], self.num_key_value_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], self.num_key_value_heads, self.head_dim)
+        q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
+        k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
+        v = self.v_proj(hidden_states).view(hidden_shape)
 
         has_layer_past = past_key_value is not None
-
         if has_layer_past:
             past_kv = past_key_value[0]
             past_len = past_key_value[1]
@@ -883,7 +889,8 @@ class Qwen3Attention(nn.Module):
             q, k = self.rotary_emb(q, k, past_len)
 
         kv = torch.stack([k, v], -3)
-        kv = repeat_kv(kv, self.num_key_value_groups)
+        if self.num_key_value_groups > 1:
+            kv = kv.repeat_interleave(self.num_key_value_groups, dim=-2)
 
         # Cache QKV values
         if has_layer_past:
@@ -936,8 +943,21 @@ class Qwen3Attention(nn.Module):
             attention_func = self.interpolated_attention
             kwargs = {}
 
+        # if unpadded_lengths is not None:
+        #     # varlen: packed format (total_tokens, num_heads, head_dim) and (total_tokens, 2, num_heads, head_dim)
+        #     q_packed = q.reshape(-1, self.num_heads, self.head_dim)
+        #     kv_packed = kv.reshape(-1, 2, self.num_heads, self.head_dim)
+        #     attn_output = attention_func(q_packed, kv_packed, unpadded_lengths, z, **kwargs)
+        # else:
+        #     # non-varlen: keep (batch, seqlen, num_heads, head_dim) and (batch, seqlen, 2, num_heads, head_dim)
+        #     # attention_func (flash_attn_kvpacked_func) expects 4D/5D in this branch
+        #     q_packed = q  # shape: (batch, seqlen, num_heads, head_dim)
+        #     kv_packed = kv  # shape: (batch, seqlen, 2, num_heads, head_dim)
+        #     attn_output = attention_func(q_packed, kv_packed, unpadded_lengths, z, **kwargs)
         attn_output = attention_func(q, kv, unpadded_lengths, z, **kwargs)
-        attn_output = attn_output.reshape(*attn_output.shape[:-2], h_size)
+        attn_output = attn_output.reshape(
+            *attn_output.shape[:-2], self.num_heads * self.head_dim
+        )
         attn_output = self.o_proj(attn_output)
 
         attn_weights = None
@@ -1086,6 +1106,10 @@ class BaseModelOutputWithPastAndSparsity(ModelOutput):
     expected_z_std: Optional[torch.FloatTensor] = None
     log_alpha_mean: Optional[torch.FloatTensor] = None
     log_alpha_std: Optional[torch.FloatTensor] = None
+    # Layer-wise sparsity diagnostics
+    layerwise_model_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_target_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_sparsity_loss: Optional[torch.FloatTensor] = None  # scalar
 
 
 class Qwen3Model(Qwen3PreTrainedModel):
@@ -1253,6 +1277,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
         target_sparsity: Optional[float] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
+        if not self.training and use_cache:
+            compute_sparsity = False
+        else:
+            compute_sparsity = True
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1298,15 +1326,18 @@ class Qwen3Model(Qwen3PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
 
-        z_sum = 0
+        z_sum = 0 if compute_sparsity else None
+
+        layer_z_sums = []  # 收集每层 z_sum 以计算逐层稀疏度
 
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = (
-                past_key_values[idx] if past_key_values is not None else None
-            )
+            if past_key_values is not None and len(past_key_values) > idx:
+                past_key_value = past_key_values[idx]
+            else:
+                past_key_value = None
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = torch.utils.checkpoint.checkpoint(
@@ -1334,7 +1365,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 )
 
             z_layer_sum, hidden_states = layer_outputs[0], layer_outputs[1]
-            z_sum = z_sum + z_layer_sum
+            if compute_sparsity:
+                z_sum = z_sum + z_layer_sum
+            layer_z_sums.append(z_layer_sum)
 
             if use_cache:
                 next_decoder_cache += (layer_outputs[3 if output_attentions else 2],)
@@ -1349,30 +1382,98 @@ class Qwen3Model(Qwen3PreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
+        if compute_sparsity:
+            if (
+                seq_parallel_group is not None
+                and dist.is_initialized()
+                and dist.get_world_size(seq_parallel_group) > 1
+            ):
+                # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
+                z_sums = [
+                    torch.zeros_like(z_sum)
+                    for _ in range(dist.get_world_size(seq_parallel_group))
+                ]
+                dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
+                z_sum = sum(z_sums)
+
+                gathered_layer_z_sums = []
+                for z_l in layer_z_sums:
+                    tmp = [
+                        torch.zeros_like(z_l)
+                        for _ in range(dist.get_world_size(seq_parallel_group))
+                    ]
+                    dist.all_gather(tmp, z_l, group=seq_parallel_group)
+                    gathered_layer_z_sums.append(sum(tmp))
+                layer_z_sums = gathered_layer_z_sums
+
+            model_sparsity = 1 - (z_sum / self.total_num_heads)
+        else:
+            model_sparsity = None
+            z_loss = None
+
+        if compute_sparsity:
+            layerwise_model_sparsity = None
+            layerwise_target = None
+            layerwise_loss = None
+            if len(layer_z_sums) > 0:
+                per_layer_heads = self.config.num_attention_heads
+                layerwise_model_sparsity = (
+                    1.0 - torch.stack(layer_z_sums) / per_layer_heads
+                )  # (num_layers,)
+
+            if target_sparsity is None:
+                z_loss = None
+            else:
+                z_loss = (
+                    self.sparsity_lambda_1.reshape([])
+                    * (model_sparsity - target_sparsity)
+                    + self.sparsity_lambda_2.reshape([])
+                    * (model_sparsity - target_sparsity) ** 2
+                )
+        else:
+            layerwise_model_sparsity = None
+            layerwise_target = None
+            layerwise_loss = None
 
         if (
-            seq_parallel_group is not None
-            and dist.is_initialized()
-            and dist.get_world_size(seq_parallel_group) > 1
+            target_sparsity is not None
+            and self.config.enable_layerwise_sparsity
+            and layerwise_model_sparsity is not None
+            and compute_sparsity
         ):
-            # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
-            z_sums = [
-                torch.zeros_like(z_sum)
-                for _ in range(dist.get_world_size(seq_parallel_group))
-            ]
-            dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
-            z_sum = sum(z_sums)
+            L = layerwise_model_sparsity.numel()
+            device = layerwise_model_sparsity.device
+            idxs = torch.arange(L, device=device, dtype=torch.float32)
+            denom = max(L - 1, 1)
+            x = torch.sin(torch.pi * (idxs / denom))
+            x = x.pow(float(self.config.layerwise_sparsity_power))
 
-        model_sparsity = 1 - (z_sum / self.total_num_heads)
+            # 根据 schedule 选择曲线方向：
+            # - "low-high-low": 中间更稀疏（默认实现）
+            # - "high-low-high": 中间更稠密（保留更多 full-head）
+            min_r = float(self.config.layerwise_sparsity_min_ratio)
+            max_r = float(self.config.layerwise_sparsity_max_ratio)
+            sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")
+            if sched == "high-low-high":
+                # 中间层稀疏度更低：两端用更高比例，中间用更低比例
+                ratios = max_r - (max_r - min_r) * x
+            else:
+                # 默认：中间层稀疏度更高
+                ratios = min_r + (max_r - min_r) * x
 
-        if target_sparsity is None:
-            z_loss = None
-        else:
-            z_loss = (
-                self.sparsity_lambda_1.reshape([]) * (model_sparsity - target_sparsity)
-                + self.sparsity_lambda_2.reshape([])
-                * (model_sparsity - target_sparsity) ** 2
+            layerwise_target = torch.clamp(
+                ratios * float(target_sparsity), min=0.0, max=1.0
             )
+
+            diffs = layerwise_model_sparsity - layerwise_target
+            per_layer_loss = self.sparsity_lambda_1.reshape(
+                []
+            ) * diffs + self.sparsity_lambda_2.reshape([]) * (diffs**2)
+            layerwise_loss = (
+                float(self.config.layerwise_sparsity_weight) * per_layer_loss.mean()
+            )
+
+            z_loss = layerwise_loss
 
         # Diagnostics: compute expected sparsity (no sampling) and stats over masks
         with torch.no_grad():
@@ -1450,6 +1551,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     expected_z_std,
                     log_alpha_mean,
                     log_alpha_std,
+                    layerwise_model_sparsity,
+                    layerwise_target,
+                    layerwise_loss,
                 ]
                 if v is not None
             )
@@ -1468,6 +1572,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
             expected_z_std=expected_z_std,
             log_alpha_mean=log_alpha_mean,
             log_alpha_std=log_alpha_std,
+            layerwise_model_sparsity=layerwise_model_sparsity,
+            layerwise_target_sparsity=layerwise_target,
+            layerwise_sparsity_loss=layerwise_loss,
         )
 
 
@@ -1489,6 +1596,10 @@ class CausalLMOutputWithPastAndSparsity(ModelOutput):
     expected_z_std: Optional[torch.FloatTensor] = None
     log_alpha_mean: Optional[torch.FloatTensor] = None
     log_alpha_std: Optional[torch.FloatTensor] = None
+    # Layer-wise sparsity diagnostics
+    layerwise_model_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_target_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_sparsity_loss: Optional[torch.FloatTensor] = None  # scalar
 
 
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
@@ -1765,6 +1876,9 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             expected_z_std=outputs.expected_z_std,
             log_alpha_mean=outputs.log_alpha_mean,
             log_alpha_std=outputs.log_alpha_std,
+            layerwise_model_sparsity=outputs.layerwise_model_sparsity,
+            layerwise_target_sparsity=outputs.layerwise_target_sparsity,
+            layerwise_sparsity_loss=outputs.layerwise_sparsity_loss,
         )
 
     def prepare_inputs_for_generation(

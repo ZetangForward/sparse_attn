@@ -3,9 +3,9 @@
 <div align="center">
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
-![PyTorch](https://img.shields.io/badge/pytorch-2.0%2B-red.svg)
-![CUDA](https://img.shields.io/badge/CUDA-11.8%2B-green.svg)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![PyTorch](https://img.shields.io/badge/pytorch-2.6%2B-red.svg)
+![CUDA](https://img.shields.io/badge/CUDA-12.4%2B-green.svg)
 
 **高性能稀疏注意力机制库 - 为大规模语言模型提供高效的注意力计算**
 

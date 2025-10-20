@@ -992,18 +992,96 @@ class HFModel(LLM):
         self.tokenizer.padding_side = "left"
 
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-        if "rope_theta" in kwargs and kwargs["rope_theta"] is not None:
-            logger.info(f"Override rope theta to {kwargs['rope_theta']}")
-            config.rope_theta = kwargs["rope_theta"]
+        if "sparseattn" in kwargs and kwargs["sparseattn"]:
+            logger.warning(
+                "sparseattn is enabled. Loading custom sparse attention model..."
+            )
+            is_llama = any(
+                "llama" in arch.lower() for arch in getattr(config, "architectures", [])
+            )
+            is_qwen = any(
+                "qwen" in arch.lower() for arch in getattr(config, "architectures", [])
+            )
+            is_phi = any(
+                "phi" in arch.lower() for arch in getattr(config, "architectures", [])
+            )
+            if is_llama:
+                from sparseattn.training.modeling_flash_llama import (
+                    PawLlamaForCausalLM,
+                    PawLlamaConfig,
+                )
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            config=config,
-            torch_dtype=kwargs.get("torch_dtype", torch.bfloat16),
-            device_map="auto",
-            trust_remote_code=True,
-            **model_kwargs,
-        )
+                CustomModelClass = PawLlamaForCausalLM
+                CustomConfigClass = PawLlamaConfig
+                logger.info("Detected LLaMA architecture. Using PawLlamaForCausalLM.")
+            elif is_qwen:
+                from sparseattn.training.modeling_flash_qwen import (
+                    PawQwen3ForCausalLM,
+                    PawQwen3Config,
+                )
+
+                CustomModelClass = PawQwen3ForCausalLM
+                CustomConfigClass = PawQwen3Config
+                logger.info("Detected Qwen architecture. Using PawQwen3ForCausalLM.")
+            elif is_phi:
+                from sparseattn.training.modeling_flash_phi import (
+                    PawPhi3ForCausalLM,
+                    PawPhi3Config,
+                )
+
+                CustomModelClass = PawPhi3ForCausalLM
+                CustomConfigClass = PawPhi3Config
+                logger.info("Detected Phi architecture. Using PawPhi3ForCausalLM.")
+            else:
+                raise ValueError(
+                    f"Unsupported architecture for sparseattn: {config.architectures}. "
+                    "Only LLaMA and Qwen are supported."
+                )
+            AutoModelForCausalLM.register(CustomConfigClass, CustomModelClass)
+            if "rope_theta" in kwargs and kwargs["rope_theta"] is not None:
+                logger.info(f"Override rope theta to {kwargs['rope_theta']}")
+                config.rope_theta = kwargs["rope_theta"]
+            self.model = CustomModelClass.from_pretrained(
+                model_name,
+                config=config,
+                torch_dtype=kwargs.get("torch_dtype", torch.bfloat16),
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            if (
+                hasattr(config, "suggested_threshold")
+                and config.suggested_threshold is not None
+            ):
+                threshold = config.suggested_threshold
+                logger.info(
+                    f"Using suggested_threshold={threshold} for deterministic sparse attention"
+                )
+            else:
+                threshold = 0.5
+                logger.warning(
+                    "No suggested_threshold found. Using default threshold=0.5."
+                )
+            self.model.set_threshold_for_deterministic(threshold)
+            self.model.eval()
+
+            self.chunk_prefilling = kwargs["duoattn_chunk_prefilling"]
+            if self.chunk_prefilling is not None:
+                logger.warning(
+                    f"Using chunk prefilling (size={self.chunk_prefilling}) for DuoAttention!"
+                )
+        else:
+            if "rope_theta" in kwargs and kwargs["rope_theta"] is not None:
+                logger.info(f"Override rope theta to {kwargs['rope_theta']}")
+                config.rope_theta = kwargs["rope_theta"]
+
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                config=config,
+                torch_dtype=kwargs.get("torch_dtype", torch.bfloat16),
+                device_map="auto",
+                trust_remote_code=True,
+                **model_kwargs,
+            )
 
         self.special_settings = {}
         if "duoattn" in kwargs and kwargs["duoattn"] is not None:
@@ -1544,6 +1622,10 @@ def load_LLM(args):
             kwargs["torch_dtype"] = torch.float32
         if args.rope_theta is not None:
             kwargs["rope_theta"] = args.rope_theta
+        print(f"=========args=========={args}")
+        if args.sparseattn is not None:
+            kwargs["sparseattn"] = args.sparseattn
+            kwargs["duoattn_chunk_prefilling"] = args.duoattn_chunk_prefilling
 
         if args.duoattn is not None:
             kwargs["duoattn"] = args.duoattn

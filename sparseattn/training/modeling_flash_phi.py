@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch LLaMA model."""
+"""PyTorch Phi model."""
 
 from typing import List, Optional, Tuple, Union, Any
 
@@ -38,9 +38,10 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging, ModelOutput, LossKwargs
-from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.phi3.configuration_phi3 import Phi3Config
 from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.integrations import use_kernel_forward_from_hub
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
@@ -67,7 +68,7 @@ from .attention_mask import (
 logger = logging.get_logger(__name__)
 
 
-class PawLlamaConfig(LlamaConfig):
+class PawPhi3Config(Phi3Config):
     def __init__(self, *args, **kwargs):
         self.local_window_size = kwargs.pop("local_window_size", 1024)
         self.disable_linear_regularization_term = kwargs.pop(
@@ -96,8 +97,6 @@ class PawLlamaConfig(LlamaConfig):
         )
         self.layerwise_sparsity_power = kwargs.pop("layerwise_sparsity_power", 1.0)
         self.layerwise_sparsity_weight = kwargs.pop("layerwise_sparsity_weight", 1.0)
-
-        self.erank_analysis_path = kwargs.pop("erank_analysis_path", None)
 
         super().__init__(*args, **kwargs)
 
@@ -237,21 +236,25 @@ def rmsnorm_func(hidden_states, weight, variance_epsilon):
     return (weight * hidden_states).to(input_dtype)
 
 
-class LlamaRMSNorm(nn.Module):
+@use_kernel_forward_from_hub("RMSNorm")
+class Phi3RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
-        LlamaRMSNorm is equivalent to T5LayerNorm
+        Phi3RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.register_buffer(
-            "variance_epsilon",
-            torch.tensor(eps),
-            persistent=False,
-        )
+        self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        return rmsnorm_func(hidden_states, self.weight, self.variance_epsilon)
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
 class FlashRotaryEmbedding(torch.nn.Module):
@@ -422,7 +425,7 @@ class FlashRotaryEmbedding(torch.nn.Module):
             assert False
 
 
-class LlamaRotaryEmbedding(nn.Module):
+class Phi3RotaryEmbedding(nn.Module):
     def __init__(
         self,
         dim=None,
@@ -432,7 +435,7 @@ class LlamaRotaryEmbedding(nn.Module):
         scaling_factor=1.0,
         rope_type="default",
         interleaved=False,
-        config: Optional[PawLlamaConfig] = None,
+        config: Optional[PawPhi3Config] = None,
     ):
         super().__init__()
         self.rope_kwargs = {}
@@ -547,37 +550,88 @@ class LlamaRotaryEmbedding(nn.Module):
         )
 
 
-class LlamaMLP(nn.Module):
+class Phi3MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        self.config = config
+        self.gate_up_proj = nn.Linear(
+            config.hidden_size, 2 * config.intermediate_size, bias=False
+        )
+        self.down_proj = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias=False
+        )
+        self.activation_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden_states: torch.FloatTensor) -> torch.FloatTensor:
+        up_states = self.gate_up_proj(hidden_states)
+
+        gate, up_states = up_states.chunk(2, dim=-1)
+        up_states = up_states * self.activation_fn(gate)
+
+        return self.down_proj(up_states)
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 @torch.jit.script
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    final_shape = list(hidden_states.shape[:-2]) + [-1] + [hidden_states.shape[-1]]
-    expand_shape = [-1] * (len(hidden_states.shape) - 1) + [n_rep] + [-1]
-    hidden_states = hidden_states.unsqueeze(-2).expand(expand_shape)
-    return hidden_states.reshape(final_shape)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class LlamaAttention(nn.Module):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    q_embed = torch.cat([(q_rot * cos) + (rotate_half(q_rot) * sin), q_pass], dim=-1)
+    k_embed = torch.cat([(k_rot * cos) + (rotate_half(k_rot) * sin), k_pass], dim=-1)
+    return q_embed, k_embed
+
+
+class Phi3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
-        config: PawLlamaConfig,
+        config: PawPhi3Config,
         context_window_toggle: Optional[int] = 1024,
     ):
         """
@@ -587,30 +641,26 @@ class LlamaAttention(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_heads = getattr(
-            config, "num_key_value_heads", self.num_heads
+        self.head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
         )
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.num_key_value_groups = (
+            config.num_attention_heads // config.num_key_value_heads
+        )
+        self.num_key_value_heads = config.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
-            raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads})."
-            )
-        self.q_proj = nn.Linear(
-            self.hidden_size, self.num_heads * self.head_dim, bias=False
-        )
-        self.k_proj = nn.Linear(
-            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
-        )
-        self.v_proj = nn.Linear(
-            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
+
+        op_size = config.num_attention_heads * self.head_dim + 2 * (
+            config.num_key_value_heads * self.head_dim
         )
         self.o_proj = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=False
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=False
         )
+        self.qkv_proj = nn.Linear(config.hidden_size, op_size, bias=False)
 
         self.register_buffer(
             "norm_factor",
@@ -620,7 +670,7 @@ class LlamaAttention(nn.Module):
             persistent=False,
         )
 
-        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+        self.rotary_emb = Phi3RotaryEmbedding(config=self.config)
 
         self.distributed_attn_func = DistributedAttention(self.interpolated_attention)
 
@@ -822,15 +872,18 @@ class LlamaAttention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        q_len, h_size = hidden_states.size(-2), hidden_states.size(-1)
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.config.num_attention_heads * self.head_dim
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.num_key_value_heads * self.head_dim]
+        v = qkv[..., query_pos + self.num_key_value_heads * self.head_dim :]
 
-        q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], self.num_key_value_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], self.num_key_value_heads, self.head_dim)
+        query_states = query_states.view(hidden_shape)
+        key_states = key_states.view(hidden_shape)
+        value_states = value_states.view(hidden_shape)
 
         has_layer_past = past_key_value is not None
 
@@ -908,7 +961,7 @@ class LlamaAttention(nn.Module):
             kwargs = {}
 
         attn_output = attention_func(q, kv, unpadded_lengths, z, **kwargs)
-        attn_output = attn_output.reshape(*attn_output.shape[:-2], h_size)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
 
         attn_weights = None
@@ -916,22 +969,24 @@ class LlamaAttention(nn.Module):
         return z.sum(), attn_output, attn_weights, past_key_value
 
 
-class LlamaDecoderLayer(nn.Module):
+class Phi3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PawLlamaConfig,
+        config: PawPhi3Config,
         context_window_toggle: Optional[int] = 4096,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(
+        self.self_attn = Phi3Attention(
             config=config, context_window_toggle=context_window_toggle
         )
-        self.mlp = LlamaMLP(config)
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(
+        self.mlp = Phi3MLP(config)
+        self.input_layernorm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Phi3RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.resid_attn_dropout = nn.Dropout(config.resid_pdrop)
+        self.resid_mlp_dropout = nn.Dropout(config.resid_pdrop)
         self._fsdp_wrap = True
 
     @torch.no_grad()
@@ -992,13 +1047,13 @@ class LlamaDecoderLayer(nn.Module):
             unpadded_lengths=unpadded_lengths,
             seq_parallel_group=seq_parallel_group,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = residual + self.resid_attn_dropout(hidden_states)
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = residual + self.resid_mlp_dropout(hidden_states)
 
         outputs = (
             z_sum,
@@ -1014,11 +1069,11 @@ class LlamaDecoderLayer(nn.Module):
         return outputs
 
 
-class LlamaPreTrainedModel(PreTrainedModel):
-    config_class = PawLlamaConfig
+class Phi3PreTrainedModel(PreTrainedModel):
+    config_class = PawPhi3Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["LlamaDecoderLayer"]
+    _no_split_modules = ["Phi3DecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
 
     def _init_weights(self, module):
@@ -1056,17 +1111,17 @@ class BaseModelOutputWithPastAndSparsity(ModelOutput):
     layerwise_sparsity_loss: Optional[torch.FloatTensor] = None  # scalar
 
 
-class LlamaModel(LlamaPreTrainedModel):
+class Phi3Model(Phi3PreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Phi3DecoderLayer`]
 
     Args:
-        config: PawLlamaConfig
+        config: PawPhi3Config
     """
 
     def __init__(
         self,
-        config: PawLlamaConfig,
+        config: PawPhi3Config,
     ):
         super().__init__(config)
         context_window_toggle = config.local_window_size
@@ -1080,11 +1135,11 @@ class LlamaModel(LlamaPreTrainedModel):
         )
         self.layers = nn.ModuleList(
             [
-                LlamaDecoderLayer(config, context_window_toggle=context_window_toggle)
+                Phi3DecoderLayer(config, context_window_toggle=context_window_toggle)
                 for _ in range(config.num_hidden_layers)
             ]
         )
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
 
         self.total_num_heads = config.num_attention_heads * config.num_hidden_layers
@@ -1103,20 +1158,8 @@ class LlamaModel(LlamaPreTrainedModel):
         if config.suggested_sparsity is not None:
             self.round_masks_for_sparsity(config.suggested_sparsity)
 
-        self._erank_cache = {}
         # Initialize weights and apply final processing
         self.post_init()
-
-    @torch.no_grad()
-    def _get_avg_erank(self, path: str) -> torch.Tensor:
-        key = os.path.abspath(path)
-        if key in self._erank_cache:
-            return self._erank_cache[key]
-        erank_res = torch.load(key, map_location="cpu")
-        print(f"Loaded e-rank results from {key}: {erank_res}")
-        avg_erank = erank_res["avg_erank"]
-        self._erank_cache[key] = avg_erank
-        return avg_erank
 
     @torch.no_grad()
     def set_threshold_for_deterministic(self, threshold_for_deterministic):
@@ -1171,7 +1214,8 @@ class LlamaModel(LlamaPreTrainedModel):
         else:
             value_1 = -10.0
             value_2 = 10.0
-        for l, layer in range(len(self.layers)):
+
+        for l, layer in enumerate(self.layers):
             value = value_1 if l % (width_1 + width_2) < width_1 else value_2
             layer.fill_masks_with_value(value)
 
@@ -1230,7 +1274,6 @@ class LlamaModel(LlamaPreTrainedModel):
         unpadded_lengths: Optional[Tuple[torch.Tensor]] = None,
         seq_parallel_group: Optional[Any] = None,
         target_sparsity: Optional[float] = None,
-        erank_analysis_path: Optional[str] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if not self.training and use_cache:
             compute_sparsity = False
@@ -1386,6 +1429,7 @@ class LlamaModel(LlamaPreTrainedModel):
             layerwise_model_sparsity = None
             layerwise_target = None
             layerwise_loss = None
+
         if (
             target_sparsity is not None
             and self.config.enable_layerwise_sparsity
@@ -1393,32 +1437,6 @@ class LlamaModel(LlamaPreTrainedModel):
         ):
             L = layerwise_model_sparsity.numel()
             device = layerwise_model_sparsity.device
-            
-            # path = erank_analysis_path or getattr(self.config, "erank_analysis_path", None)
-            # if path is None:
-            #     raise ValueError("erank_analysis_path not provided. Please pass the effective rank analysis file path via the forward argument or set config.erank_analysis_path.")
-
-            # avg_erank = self._get_avg_erank(path)  # [L, H] on CPU
-            # E = avg_erank.mean(dim=1).to(device)  # [L] 每层平均有效秩
-            
-            # assert E.numel() == L, f"Mismatch: got {E.numel()} layers from erank but model has {L}"
-            
-            # E_norm = (E - E.min()) / (E.max() - E.min() + 1e-8)
-            # inv_E = 1.0 / (E_norm + 1e-3)  # 有效秩高 -> 权重小
-            # w = inv_E
-            
-            # layerwise_target = (w / w.mean()) * target_sparsity  # scale to keep mean ~ target
-            # layerwise_target = torch.clamp(layerwise_target, 0.0, 1.0)
-            
-            # # debug
-            # # if not hasattr(self, "_printed_sparsity_once"):
-            # #     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            # #         print("Layerwise target sparsity allocation:")
-            # #         for i, s in enumerate(layerwise_target.tolist()):
-            # #             print(f"  Layer {i:02d}: sparsity = {s:.4f}, erank_norm = {E_norm[i]:.4f}")
-            # #         print(f"Global mean sparsity = {layerwise_target.mean().item():.4f}")
-            # #     self._printed_sparsity_once = True
-            
             idxs = torch.arange(L, device=device, dtype=torch.float32)
             denom = max(L - 1, 1)
             x = torch.sin(torch.pi * (idxs / denom))
@@ -1431,8 +1449,10 @@ class LlamaModel(LlamaPreTrainedModel):
             max_r = float(self.config.layerwise_sparsity_max_ratio)
             sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")
             if sched == "high-low-high":
+                # 中间层稀疏度更低：两端用更高比例，中间用更低比例
                 ratios = max_r - (max_r - min_r) * x
             else:
+                # 默认：中间层稀疏度更高
                 ratios = min_r + (max_r - min_r) * x
 
             layerwise_target = torch.clamp(
@@ -1440,14 +1460,14 @@ class LlamaModel(LlamaPreTrainedModel):
             )
 
             diffs = layerwise_model_sparsity - layerwise_target
-            
-            per_layer_loss = (
-                self.sparsity_lambda_1.reshape([]) * diffs
-                + self.sparsity_lambda_2.reshape([]) * (diffs ** 2)
+            per_layer_loss = self.sparsity_lambda_1.reshape(
+                []
+            ) * diffs + self.sparsity_lambda_2.reshape([]) * (diffs**2)
+            layerwise_loss = (
+                float(self.config.layerwise_sparsity_weight) * per_layer_loss.mean()
             )
-            layerwise_loss = float(self.config.layerwise_sparsity_weight) * per_layer_loss.mean()
 
-            z_loss = layerwise_loss 
+            z_loss = layerwise_loss if z_loss is None else (z_loss + layerwise_loss)
 
         # Diagnostics: compute expected sparsity (no sampling) and stats over masks
         with torch.no_grad():
@@ -1578,7 +1598,7 @@ class CausalLMOutputWithPastAndSparsity(ModelOutput):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class PawLlamaForCausalLM(LlamaPreTrainedModel):
+class PawPhi3ForCausalLM(Phi3PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(
@@ -1586,7 +1606,7 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         config,
     ):
         super().__init__(config)
-        self.model = LlamaModel(
+        self.model = Phi3Model(
             config,
         )
         self.vocab_size = config.vocab_size
@@ -1677,7 +1697,6 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         seq_parallel_group: Optional[Any] = None,
         target_sparsity: Optional[float] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        erank_analysis_path: Optional[str] = None,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1692,9 +1711,9 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, LlamaForCausalLM
+        >>> from transformers import AutoTokenizer, Phi3ForCausalLM
 
-        >>> model = LlamaForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = Phi3ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -1778,7 +1797,6 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
                     unpadded_lengths=unpadded_lengths,
                     seq_parallel_group=seq_parallel_group,
                     target_sparsity=target_sparsity,
-                    erank_analysis_path=erank_analysis_path,
                 )
         else:
             outputs = self.model(
@@ -1794,7 +1812,6 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
                 unpadded_lengths=unpadded_lengths,
                 seq_parallel_group=seq_parallel_group,
                 target_sparsity=target_sparsity,
-                erank_analysis_path=erank_analysis_path,
             )
 
         hidden_states = outputs[0]
@@ -1880,11 +1897,20 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         input_ids,
         past_key_values=None,
         attention_mask=None,
+        cache_position=None,
         inputs_embeds=None,
         **kwargs,
     ):
         if past_key_values:
             input_ids = input_ids[:, -1:]
+        if (
+            past_key_values
+            and self.config.rope_scaling
+            and input_ids.shape[1] >= self.config.original_max_position_embeddings + 1
+        ):
+            past_length = cache_position[0]
+            if past_length <= self.config.original_max_position_embeddings:
+                past_key_values = None
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:

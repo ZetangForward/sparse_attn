@@ -25,8 +25,10 @@ def combine(items):
 
     return {
         "input_ids": np.concatenate([item["input_ids"] for item in items]),
-        "indices": np.concatenate([item["indices"] + offset for offset, item in zip(offsets, items)]),
-        "domain": items[0].get("domain", "")
+        "indices": np.concatenate(
+            [item["indices"] + offset for offset, item in zip(offsets, items)]
+        ),
+        "domain": items[0].get("domain", ""),
     }
 
 
@@ -36,7 +38,7 @@ def pack_fn(data, indices, process_id: int, multiple: int, seed: int):
     indices = np.random.permutation(len(data))
 
     for i in range(0, len(indices), multiple):
-        items = [data[j] for j in indices[i:i + multiple]]
+        items = [data[j] for j in indices[i : i + multiple]]
         if len(items) == multiple:
             yield combine(items)
 
@@ -59,10 +61,12 @@ def main():
     N = len(dataset)
     print(f"Loaded dataset with {N} samples")
 
-    process(dataset,
-            partial(pack_fn, multiple=args.multiple, seed=args.seed),
-            args.output,
-            args.process_options)
+    process(
+        dataset,
+        partial(pack_fn, multiple=args.multiple, seed=args.seed),
+        args.output,
+        args.process_options,
+    )
 
 
 if __name__ == "__main__":

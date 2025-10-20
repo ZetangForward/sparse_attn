@@ -29,7 +29,6 @@ beautifulsoup4==4.13.4
 blake3==1.0.5
 bleach==6.2.0
 blobfile==3.0.0
-block_sparse_attn==0.0.1
 boto3==1.39.7
 botocore==1.39.7
 Brotli==1.1.0
@@ -63,7 +62,6 @@ dnspython==2.7.0
 docker-pycreds==0.4.0
 docopt==0.6.2
 docstring_parser==0.16
--e git+https://gitee.com/codingQQT/duo-attention.git@fe93c314ae87306ef6629dc16713250b4718ffe7#egg=duo_attn
 einops==0.8.1
 email_validator==2.2.0
 executing==2.2.0
@@ -73,7 +71,6 @@ fastapi-cloud-cli==0.1.5
 fastjsonschema==2.21.1
 fastrlock==0.8.3
 filelock==3.18.0
-flash-attn==2.6.3
 flashinfer-python==0.2.8
 fonttools==4.59.0
 fqdn==1.5.1
@@ -147,7 +144,6 @@ MarkupSafe==3.0.2
 matplotlib==3.10.3
 matplotlib-inline==0.1.7
 mdurl==0.1.2
--e git+https://gitee.com/codingQQT/SparseAttn.git@6c3904ecc0287d9276b11c13038f78f96c77159d#egg=minference&subdirectory=third_party/MInference
 mistral_common==1.8.3
 mistune==3.1.3
 modelscope==1.28.1
@@ -283,7 +279,6 @@ smmap==5.0.2
 sniffio==1.3.1
 soundfile==0.13.1
 soupsieve==2.7
--e git+https://gitee.com/codingQQT/SparseAttn.git@6c3904ecc0287d9276b11c13038f78f96c77159d#egg=sparseattn
 stack-data==0.6.3
 starlette==0.47.2
 swanboard==0.1.8b1
