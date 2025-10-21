@@ -17,7 +17,8 @@ from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
 from .modeling_flash_qwen import PawQwen3ForCausalLM, PawQwen3Config
 from .modeling_flash_phi import PawPhi3ForCausalLM, PawPhi3Config
 from .lh_trainer import Trainer
-from .dataset import build_dataset, DataCollator, DataArguments
+# from .dataset import build_dataset, DataCollator, DataArguments
+from .dataset_batch import build_dataset, PackingDataCollator, DataArguments
 from .dataset import logger as dataset_logger
 from .script_arguments import ScriptArguments, TrainingArguments
 
@@ -254,14 +255,31 @@ def main():
 
     # load_datasets
     if training_args.do_train:
+        # train_dataset = build_dataset(
+        #     script_args.tokenized_mds_train, training_args, data_args, is_training=True
+        # )
         train_dataset = build_dataset(
-            script_args.tokenized_mds_train, training_args, data_args, is_training=True
+            script_args.tokenized_mds_train,
+            tokenizer=tokenizer,
+            data_args=data_args,
+            is_training=True,
         )
 
+
     if training_args.do_eval:
+        # eval_dataset = {
+        #     x.split("/")[-1]: build_dataset(
+        #         [x], training_args, data_args, is_training=False
+        #     )
+        #     for x in script_args.tokenized_mds_validation
+        # }
         eval_dataset = {
             x.split("/")[-1]: build_dataset(
-                [x], training_args, data_args, is_training=False
+                [x],
+                tokenizer=tokenizer,
+                data_args=data_args,
+                training_args=training_args,
+                is_training=False,
             )
             for x in script_args.tokenized_mds_validation
         }
@@ -269,12 +287,17 @@ def main():
     if training_args.do_predict:
         test_dataset = {
             x.split("/")[-1]: build_dataset(
-                [x], training_args, data_args, is_training=False
+                [x],
+                tokenizer=tokenizer,
+                data_args=data_args,
+                training_args=training_args,
+                is_training=False,
             )
             for x in script_args.tokenized_mds_test
         }
 
-    data_collator = DataCollator(tokenizer, data_args)
+    # data_collator = DataCollator(tokenizer, data_args)
+    data_collator = PackingDataCollator(tokenizer, data_args)
     assert training_args.max_steps is not None, "max_steps must be set!"
 
     # Initialize our Trainer

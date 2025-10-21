@@ -1424,9 +1424,6 @@ class LlamaModel(LlamaPreTrainedModel):
             x = torch.sin(torch.pi * (idxs / denom))
             x = x.pow(float(self.config.layerwise_sparsity_power))
 
-            # 根据 schedule 选择曲线方向：
-            # - "low-high-low": 中间更稀疏（默认实现）
-            # - "high-low-high": 中间更稠密（保留更多 full-head）
             min_r = float(self.config.layerwise_sparsity_min_ratio)
             max_r = float(self.config.layerwise_sparsity_max_ratio)
             sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")

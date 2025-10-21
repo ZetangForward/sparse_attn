@@ -421,6 +421,10 @@ class Trainer(HFTrainer):
         """
         inputs = self.get_sequence_parallel_inputs(inputs)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step)
+        # attn_mask = inputs["attention_mask"]
+        # valid_tokens = attn_mask.sum(dim=1)
+        # print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+        #     f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
 
         try:
             outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
@@ -572,6 +576,28 @@ class Trainer(HFTrainer):
                                 else:
                                     v = float(v.mean().item())
                             train_metrics[k] = v
+                if isinstance(outputs, dict):
+                    if "layerwise_model_sparsity" in outputs and outputs["layerwise_model_sparsity"] is not None:
+                        lms = outputs["layerwise_model_sparsity"]
+                        if isinstance(lms, torch.Tensor):
+                            lms = lms.detach().cpu().float()
+                            for i, s in enumerate(lms):
+                                train_metrics[f"layer_{i}/sparsity"] = float(s)
+
+                    if "layerwise_target_sparsity" in outputs and outputs["layerwise_target_sparsity"] is not None:
+                        lt = outputs["layerwise_target_sparsity"]
+                        if isinstance(lt, torch.Tensor):
+                            lt = lt.detach().cpu().float()
+                            for i, t in enumerate(lt):
+                                train_metrics[f"layer_{i}/target"] = float(t)
+
+                    if "layerwise_model_sparsity" in outputs and "layerwise_target" in outputs:
+                        lms = outputs["layerwise_model_sparsity"]
+                        lt = outputs["layerwise_target"]
+                        if lms is not None and lt is not None:
+                            diff = (lms - lt).detach().cpu().float()
+                            for i, d in enumerate(diff):
+                                train_metrics[f"layer_{i}/sparsity_diff"] = float(d)
                 self.log(train_metrics)
 
         if return_output_and_metrics:
@@ -609,6 +635,7 @@ class Trainer(HFTrainer):
                     "expected_z_std",
                     "log_alpha_mean",
                     "log_alpha_std",
+                    ""
                 ]:
                     if k in outputs and outputs[k] is not None:
                         metrics[k] = outputs[k]
@@ -1258,9 +1285,13 @@ class Trainer(HFTrainer):
         Because streaming handles the distributed data parallel by itself, we don't need special data loader.
         The plainest data loader is enough.
         """
+        from .dataset_batch import StreamingParquetIterable
+        if not isinstance(self.train_dataset, StreamingParquetIterable):
+            return super().get_train_dataloader()
+        
         if not self.args.streaming_dataset:
             return super().get_train_dataloader()
-
+        
         logger.warning("Use streaming dataloader for train")
 
         if self.train_dataset is None:
@@ -1332,6 +1363,21 @@ class Trainer(HFTrainer):
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         run_dir = self._get_output_dir(trial=trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
+        
+        if (
+            isinstance(self.train_dataset, StreamingParquetIterable)
+            and self.state.is_world_process_zero
+        ):
+            num_samples = (
+                self.state.global_step
+                * self.args.train_batch_size
+                * self.args.world_size
+                * self.args.gradient_accumulation_steps
+            )
+            dataset_state_dict = self.train_dataset.state_dict(num_samples)
+            logger.warning(f"Save streaming dataset state: {dataset_state_dict}")
+            with open(os.path.join(output_dir, "streaming_dataset_state.json"), "w") as f:
+                json.dump(dataset_state_dict, f)
 
         # Save streaming dataset state
         if (
@@ -1434,7 +1480,14 @@ class Trainer(HFTrainer):
             logger.warning(
                 f"Resume streaming dataset state from {checkpoint}: {dataset_state_dict}"
             )
-            self.train_dataset.load_state_dict(dataset_state_dict)
+            if hasattr(self.train_dataset, "load_state_dict"):
+                self.train_dataset.load_state_dict(dataset_state_dict)
+                logger.warning("✅ Successfully resumed StreamingParquetIterable state.")
+            elif isinstance(self.train_dataset, PrepackedDataset):
+                logger.info("PrepackedDataset detected — no streaming state to resume.")
+            else:
+                logger.warning("⚠️ Dataset does not support state_dict loading, skipping resume.")
+
 
     # Override the original train() to handle the case
     # when resuming from a checkpoint but no trainer_state is there
