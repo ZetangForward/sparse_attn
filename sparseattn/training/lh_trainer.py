@@ -25,6 +25,8 @@ from functools import partial
 import math
 import gc
 
+from .dataset_batch import StreamingParquetIterable
+
 from datasets import Dataset
 import transformers
 from transformers import Trainer as HFTrainer
@@ -421,10 +423,10 @@ class Trainer(HFTrainer):
         """
         inputs = self.get_sequence_parallel_inputs(inputs)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step)
-        # attn_mask = inputs["attention_mask"]
-        # valid_tokens = attn_mask.sum(dim=1)
-        # print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
-        #     f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
+        attn_mask = inputs["attention_mask"]
+        valid_tokens = attn_mask.sum(dim=1)
+        print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+            f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
 
         try:
             outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
@@ -440,6 +442,8 @@ class Trainer(HFTrainer):
             raise e
 
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+        if outputs["loss"] is None:
+            breakpoint()
 
         if getattr(self.args, "token_scaled_loss", False):
             seq_parallel_world_size = (
@@ -1285,7 +1289,6 @@ class Trainer(HFTrainer):
         Because streaming handles the distributed data parallel by itself, we don't need special data loader.
         The plainest data loader is enough.
         """
-        from .dataset_batch import StreamingParquetIterable
         if not isinstance(self.train_dataset, StreamingParquetIterable):
             return super().get_train_dataloader()
         

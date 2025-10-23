@@ -133,14 +133,11 @@ class PrepackedDataset(Dataset):
 
 
 class PackingDataCollator:
-    """Collator that packs variable-length sequences into fixed-length batches.
+    """Collator that packs variable-length sequences into fixed-length batches safely.
 
-    If dataset is PrepackedDataset, the collator will simply pad to `max_seq_len`.
-    Otherwise, it will pack all provided sequences across the incoming `features` list.
-
-    Efficiency notes:
-    - Minimizes repeated tensor constructions by building tensors once.
-    - Uses list-of-lists manipulation in python, should be fine when DataLoader uses multiple workers.
+    - Limits total tokens per batch to per_device_max_tokens to avoid NaN.
+    - Masks first token of each new chunk to prevent cross-chunk leakage.
+    - Works for prepacked datasets and streaming datasets.
     """
 
     def __init__(self, tokenizer, data_args: DataArguments, max_seq_len: int = 32768):
@@ -149,42 +146,49 @@ class PackingDataCollator:
         self.max_seq_len = max_seq_len
         assert self.max_seq_len > 0
 
-    def _pack_sequences(self, all_input_ids: List[List[int]]) -> (List[List[int]], List[List[int]]):
+    def _pack_sequences(self, all_input_ids: list) -> (list, list):
         packed_input_ids = []
         packed_labels = []
         current_seq = []
         current_labels = []
 
-        for seq in all_input_ids:
-            # If a single seq exceeds max length, truncate it first
-            if len(seq) > self.max_seq_len:
-                seq = seq[: self.max_seq_len]
+        max_tokens_per_pack = self.data_args.per_device_max_tokens or self.max_seq_len
 
-            # If appending would overflow, flush current pack
-            if len(current_seq) + len(seq) > self.max_seq_len:
-                if current_seq:
+        for seq in all_input_ids:
+            # truncate sequence if longer than max_seq_len
+            if len(seq) > self.max_seq_len:
+                seq = seq[:self.max_seq_len]
+
+            seq_idx = 0
+            while seq_idx < len(seq):
+                remaining_tokens = max_tokens_per_pack - len(current_seq)
+                if remaining_tokens <= 0:
+                    # flush current pack
                     packed_input_ids.append(current_seq)
                     packed_labels.append(current_labels)
-                current_seq = []
-                current_labels = []
+                    current_seq = []
+                    current_labels = []
+                    remaining_tokens = max_tokens_per_pack
 
-            # Append seq to current pack
-            # We mask the first token of original seq to prevent learning the continuation across chunks
-            labels = seq.copy()
-            # If we are appending to an empty pack, mask its first token because it follows no previous token
-            if not current_seq:
-                labels[0] = -100
-            # If not empty pack, we want to allow continuity (i.e., predict next token across seq boundary)
-            # This is a design choice — we choose to allow continuity to maximize packing efficiency.
-            current_seq.extend(seq)
-            current_labels.extend(labels)
+                take_len = min(len(seq) - seq_idx, remaining_tokens)
+                chunk = seq[seq_idx:seq_idx + take_len]
+                # create labels
+                labels = chunk.copy()
+                # mask first token of new chunk if current_seq is empty
+                if not current_seq:
+                    labels[0] = -100
 
-            # If exactly full, flush immediately
-            if len(current_seq) == self.max_seq_len:
-                packed_input_ids.append(current_seq)
-                packed_labels.append(current_labels)
-                current_seq = []
-                current_labels = []
+                current_seq.extend(chunk)
+                current_labels.extend(labels)
+
+                seq_idx += take_len
+
+                # flush if exactly full
+                if len(current_seq) == max_tokens_per_pack:
+                    packed_input_ids.append(current_seq)
+                    packed_labels.append(current_labels)
+                    current_seq = []
+                    current_labels = []
 
         if current_seq:
             packed_input_ids.append(current_seq)
@@ -192,17 +196,16 @@ class PackingDataCollator:
 
         return packed_input_ids, packed_labels
 
-    def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
-        # Gather all sequences from features
-        all_input_ids: List[List[int]] = []
+    def __call__(self, features: list) -> dict:
+        # gather all sequences
+        all_input_ids = []
         for f in features:
             if "input_ids_chunks" in f:
-                all_input_ids.extend(f["input_ids_chunks"])  # extend with each chunk
+                all_input_ids.extend(f["input_ids_chunks"])
             else:
                 all_input_ids.append(f["input_ids"])
 
-        # If dataset was prepacked already (each feature is already fixed length), just pad/convert
-        # We'll detect that by checking if every sequence has length == max_seq_len
+        # detect prepacked
         prepacked = all(len(x) == self.max_seq_len for x in all_input_ids) if all_input_ids else False
 
         if prepacked:
@@ -210,13 +213,12 @@ class PackingDataCollator:
             packed_labels = []
             for seq in packed_input_ids:
                 lab = seq.copy()
-                # mask first token because it's start-of-sequence
                 lab[0] = -100
                 packed_labels.append(lab)
         else:
             packed_input_ids, packed_labels = self._pack_sequences(all_input_ids)
 
-        # Now pad to max_seq_len and convert to tensors in one go
+        # pad to max_seq_len
         batch_size = len(packed_input_ids)
         input_ids_tensor = torch.full((batch_size, self.max_seq_len), self.tokenizer.pad_token_id, dtype=torch.long)
         labels_tensor = torch.full((batch_size, self.max_seq_len), -100, dtype=torch.long)
@@ -321,7 +323,7 @@ def build_dataset(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    data_args = DataArguments(subsplit_length=1024, per_device_max_tokens=2048, prepack=False, streaming=False)
+    data_args = DataArguments(subsplit_length=1024, per_device_max_tokens=32768, prepack=False, streaming=False)
     dataset = build_dataset(["/data/public_data/long_data_collection"], data_args=data_args, is_training=True,model_name_or_path="/data/hf_models/Qwen3-4B")
 
     # Example: use DataLoader

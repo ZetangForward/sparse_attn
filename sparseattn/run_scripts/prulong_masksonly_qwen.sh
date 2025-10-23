@@ -44,7 +44,7 @@ erank_analysis_path=${ERANK_ANALYSIS_PATH:-"/data/lcm_lab/qqt/project/SparseAttn
 
 # Dataset configuration
 # dataset=${DATASET:-"/data/lcm_lab/qqt/project/SparseAttn/sparseattn/data"}
-dataset=${DATASET:-"/data/public_data/long_data_collection"}
+dataset=${DATASET:-"/data/public_data/long_data_collection_pre_filter"}
 
 # Create run name
 extra_name="qwen_streaming_32k_layer_decay_test_only_layer_sparsity_new_debug"
@@ -112,7 +112,7 @@ export LOGIT_BLOCK_SIZE=2048
 
 # Training arguments
 base_arguments=(
-    --report_to swanlab
+    --report_to tensorboard
     --do_train
 
     --model_name $model

@@ -1279,10 +1279,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         erank_analysis_path: Optional[str] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        if not self.training and use_cache:
-            compute_sparsity = False
-        else:
-            compute_sparsity = True
+        compute_sparsity = self.training
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1467,14 +1464,15 @@ class Qwen3Model(Qwen3PreTrainedModel):
             assert E.numel() == L, f"Mismatch: got {E.numel()} layers from erank but model has {L}"
             
             E_norm = (E - E.min()) / (E.max() - E.min() + 1e-8)
-            inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5  # 平滑差异
+            inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5 
             w = inv_E
             
-            layerwise_target = (w / w.sum()) * target_sparsity
+            L = layerwise_model_sparsity.numel()
+            layerwise_target = (w / w.sum()) * (target_sparsity * L)
             layerwise_target = torch.clamp(layerwise_target, 0.0, 1.0)
             s = layerwise_target.sum()
             if s > 0:
-                layerwise_target = layerwise_target / s * target_sparsity
+                layerwise_target = layerwise_target / s * (target_sparsity * L)
 
             diffs = layerwise_model_sparsity - layerwise_target
             def is_main_process():
@@ -1495,8 +1493,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 float(self.config.layerwise_sparsity_weight) * per_layer_loss.mean()
             )
 
-            z_loss = layerwise_loss if z_loss is None else (z_loss + layerwise_loss)
-
+            # z_loss = layerwise_loss if z_loss is None else (z_loss + layerwise_loss)
+            z_loss = layerwise_loss
 
         if not return_dict:
             # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)
@@ -1625,6 +1623,8 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         return self.model
 
     def compute_loss(self, hidden_states, labels):
+        if (labels != -100).sum() == 0:
+            return torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
         logits = self.lm_head(hidden_states)
         if len(logits.shape) > 2:
             logits = logits.transpose(-1, -2)
@@ -1698,7 +1698,6 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
         if seq_lengths is not None:
             if inputs_embeds is not None:
                 assert len(inputs_embeds.shape) == 2, (
@@ -1789,7 +1788,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
                     )
                 else:
                     loss = sum(
-                        ((label_block != -100).sum() / num_valid_labels)
+                        ((label_block != -100).sum() / max(num_valid_labels.item(), 1))
                         * torch.utils.checkpoint.checkpoint(
                             self.compute_loss,
                             hidden_state_block,
@@ -1807,11 +1806,9 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         else:
             logits = self.lm_head(hidden_states)
             loss = None
-
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-
         return CausalLMOutputWithPastAndSparsity(
             loss=loss,
             logits=logits,

@@ -4,7 +4,7 @@ bsz=${BSZ:-16}
 seq=${SEQ:-4}
 lr=${LR:-1e-5}
 steps=${STEPS:-250}
-save_steps=${SAVE:-250}
+save_steps=${SAVE:-50}
 warmup=${WARMUP:-0.1}
 suffix=${SUFFIX:-""}
 overrides=${OVERRIDES:-""}
@@ -18,6 +18,7 @@ gc=${GC:-"1"}
 
 # PruLong-specific arguments
 max_toks=${MAX_TOKS:-32768}
+# max_toks=${MAX_TOKS:-256}
 start_head_sparsity=${START_HEAD_SPARSITY:-0.0}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.7}
 mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
@@ -44,10 +45,10 @@ erank_analysis_path=${ERANK_ANALYSIS_PATH:-"/data/lcm_lab/qqt/project/SparseAttn
 
 # Dataset configuration
 # dataset=${DATASET:-"/data/lcm_lab/qqt/project/SparseAttn/sparseattn/data"}
-dataset=${DATASET:-"/data/public_data/long_data_collection"}
+dataset=${DATASET:-"/data/public_data/long_data_collection_pre_filter"}
 
 # Create run name
-extra_name="qwen_streaming_32k_layer_decay_test_only_layer_sparsity_new_debug"
+extra_name="qwen_streaming_32k_only_layer_decay_layer_sparsity_new_10_23"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
