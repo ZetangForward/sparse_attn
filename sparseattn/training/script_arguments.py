@@ -198,6 +198,13 @@ class TrainingArguments(HfTrainingArguments):
             "help": "Number of sink tokens (will be rounded up to a multiple of 128)."
         },
     )
+    
+    topk_k: int = field(
+        default=2048,
+        metadata={
+            "help": "The k value for top-k toggling."
+        },
+    )
 
     # Layer-wise sparsity
     enable_layerwise_sparsity: bool = field(

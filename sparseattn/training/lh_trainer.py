@@ -423,10 +423,10 @@ class Trainer(HFTrainer):
         """
         inputs = self.get_sequence_parallel_inputs(inputs)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step)
-        attn_mask = inputs["attention_mask"]
-        valid_tokens = attn_mask.sum(dim=1)
-        print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
-            f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
+        # attn_mask = inputs["attention_mask"]
+        # valid_tokens = attn_mask.sum(dim=1)
+        # print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+        #     f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
 
         try:
             outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)

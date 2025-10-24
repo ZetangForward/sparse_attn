@@ -46,6 +46,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from flash_attn import flash_attn_kvpacked_func, flash_attn_varlen_kvpacked_func
 from flash_attn.bert_padding import unpad_input, pad_input
+import math
 
 try:
     from flash_attn.layers.rotary import apply_rotary_emb_func
@@ -98,6 +99,9 @@ class PawQwen3Config(Qwen3Config):
         self.layerwise_sparsity_weight = kwargs.pop("layerwise_sparsity_weight", 1.0)
         
         self.erank_analysis_path = kwargs.pop("erank_analysis_path", None)
+
+        # 新增：top-k 注意力的超参（每个 query 仅保留前 k 个 key）
+        self.topk_k = kwargs.pop("topk_k", 32)
 
         super().__init__(*args, **kwargs)
 
@@ -695,6 +699,10 @@ class Qwen3Attention(nn.Module):
             }
             self.context_window_toggle = (self.sink_blocks + self.local_blocks) * 128
             self.triangle_n_last = config.triangle_n_last
+        elif self.toggle_type == "topk":
+            self.topk_k = int(getattr(config, "topk_k", 2048))
+            self.topk_q_chunk = int(os.environ.get("TOPK_Q_CHUNK", 128))
+            self.topk_k_chunk = int(os.environ.get("TOPK_K_CHUNK", 4096))
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -740,6 +748,179 @@ class Qwen3Attention(nn.Module):
             .transpose(1, 2)
             .contiguous()
         )
+
+    def _topk_attn_nonvarlen(self, q: torch.Tensor, kv: torch.Tensor, k_top: int) -> torch.Tensor:
+        """
+        q: [B, S, H, D]
+        kv: [B, S, 2, H, D]
+        return: [B, S, H, D]
+        """
+        B, S, H, D = q.shape
+        k = kv[:, :, 0, :, :]  # [B, S, H, D]
+        v = kv[:, :, 1, :, :]  # [B, S, H, D]
+
+        # [B, H, S, D]
+        q_bhsd = q.permute(0, 2, 1, 3).contiguous()
+        k_bhsd = k.permute(0, 2, 1, 3).contiguous()
+        v_bhsd = v.permute(0, 2, 1, 3).contiguous()
+
+        out_bhsd = torch.zeros(B, H, S, D, dtype=q.dtype, device=q.device)
+
+        K_keep = min(int(k_top), S)
+        q_chunk = max(int(getattr(self, "topk_q_chunk", 4096)), 1)
+        k_chunk = max(int(getattr(self, "topk_k_chunk", 4096)), 1)
+
+        scale = (1.0 / self.norm_factor).to(dtype=q.dtype)
+
+        # 新增：预先构建 batch/head 索引用于高级索引
+        b_idx = torch.arange(B, device=q.device).view(B, 1, 1, 1)
+        h_idx = torch.arange(H, device=q.device).view(1, H, 1, 1)
+
+        for qs in range(0, S, q_chunk):
+            qe = min(qs + q_chunk, S)
+            QB = qe - qs
+
+            q_blk = q_bhsd[:, :, qs:qe, :]  # [B, H, QB, D]
+            # 运行中的 top-k（值与全局索引）
+            run_vals = torch.full(
+                (B, H, QB, K_keep), float("-inf"), dtype=q.dtype, device=q.device
+            )
+            run_idx = torch.zeros(
+                (B, H, QB, K_keep), dtype=torch.long, device=q.device
+            )
+
+            # 预先准备 query 的绝对位置
+            q_pos = torch.arange(qs, qe, device=q.device)  # [QB]
+
+            for ks in range(0, S, k_chunk):
+                ke = min(ks + k_chunk, S)
+                KB = ke - ks
+
+                k_blk = k_bhsd[:, :, ks:ke, :]  # [B, H, KB, D]
+
+                # 分块分数 [B, H, QB, KB]
+                scores_blk = torch.matmul(q_blk, k_blk.transpose(-1, -2)) * scale
+
+                # 因果掩码：仅允许 key_pos <= q_pos
+                k_pos = torch.arange(ks, ke, device=q.device)  # [KB]
+                causal_mask = k_pos.unsqueeze(0) > q_pos.unsqueeze(1)  # [QB, KB]
+                scores_blk = scores_blk.masked_fill(
+                    causal_mask.view(1, 1, QB, KB), float("-inf")
+                )
+                
+                # 在当前 key 分块内取局部 top-k，然后与运行中的 top-k 合并
+                k_this = min(K_keep, KB)
+                blk_topv, blk_topi_local = torch.topk(scores_blk, k=k_this, dim=-1, largest=True, sorted=False)
+                blk_topi = blk_topi_local + ks  # 转全局 key 索引
+
+                # 合并（拼接后再取 top-k）
+                cat_vals = torch.cat([run_vals, blk_topv], dim=-1)       # [B, H, QB, K_keep + k_this]
+                cat_idx = torch.cat([run_idx, blk_topi], dim=-1)         # [B, H, QB, K_keep + k_this]
+                run_vals, pick = torch.topk(cat_vals, k=K_keep, dim=-1, largest=True, sorted=False)
+                run_idx = cat_idx.gather(-1, pick)
+
+                del scores_blk, blk_topv, blk_topi_local, blk_topi, cat_vals, cat_idx, pick
+
+            # 计算注意力并聚合 V
+            attn_probs = torch.softmax(run_vals, dim=-1)  # [B, H, QB, K_keep]
+            v_topk = v_bhsd[b_idx, h_idx, run_idx, :]     # [B, H, QB, K_keep, D]
+            out_blk = (attn_probs.unsqueeze(-1) * v_topk).sum(dim=-2)  # [B, H, QB, D]
+            out_bhsd[:, :, qs:qe, :] = out_blk
+
+            del run_vals, run_idx, q_blk, out_blk, attn_probs, v_topk
+
+        out = out_bhsd.permute(0, 2, 1, 3).contiguous()  # [B, S, H, D]
+        return out
+
+    def _topk_attn_varlen(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        k_top: int,
+    ) -> torch.Tensor:
+        """
+        q: [T, H, D]
+        kv: [T, 2, H, D]
+        cu_seqlens: [B+1]
+        return: [T, H, D]
+        """
+        T, H, D = q.shape
+        out = torch.zeros_like(q)
+        k_all = kv[:, 0, :, :]  # [T, H, D]
+        v_all = kv[:, 1, :, :]  # [T, H, D]
+
+        q_chunk = max(int(getattr(self, "topk_q_chunk", 128)), 1)
+        k_chunk = max(int(getattr(self, "topk_k_chunk", 4096)), 1)
+        scale = (1.0 / self.norm_factor).to(dtype=q.dtype)
+
+        h_idx_full = torch.arange(H, device=q.device).view(H, 1, 1)
+
+        B = cu_seqlens.numel() - 1
+        for b in range(B):
+            s = int(cu_seqlens[b].item())
+            e = int(cu_seqlens[b + 1].item())
+            L = e - s
+            if L <= 0:
+                continue
+            q_b = q[s:e, :, :]       # [L, H, D]
+            k_b = k_all[s:e, :, :]   # [L, H, D]
+            v_b = v_all[s:e, :, :]   # [L, H, D]
+
+            # -> [H, L, D]
+            q_hld = q_b.permute(1, 0, 2).contiguous()
+            k_hld = k_b.permute(1, 0, 2).contiguous()
+            v_hld = v_b.permute(1, 0, 2).contiguous()
+
+            out_hld = torch.zeros(H, L, D, dtype=q.dtype, device=q.device)
+
+            K_keep = min(int(k_top), L)
+
+            for qs in range(0, L, q_chunk):
+                qe = min(qs + q_chunk, L)
+                QB = qe - qs
+
+                q_blk = q_hld[:, qs:qe, :]  # [H, QB, D]
+
+                run_vals = torch.full(
+                    (H, QB, K_keep), float("-inf"), dtype=q.dtype, device=q.device
+                )
+                run_idx = torch.zeros((H, QB, K_keep), dtype=torch.long, device=q.device)
+
+                q_pos = torch.arange(qs, qe, device=q.device)  # [QB]
+
+                for ks in range(0, L, k_chunk):
+                    ke = min(ks + k_chunk, L)
+                    KB = ke - ks
+                    
+                    k_blk = k_hld[:, ks:ke, :]  # [H, KB, D]
+                    scores_blk = torch.matmul(q_blk, k_blk.transpose(-1, -2)) * scale  # [H, QB, KB]
+
+                    k_pos = torch.arange(ks, ke, device=q.device)
+                    causal_mask = k_pos.unsqueeze(0) > q_pos.unsqueeze(1)  # [QB, KB]
+                    scores_blk = scores_blk.masked_fill(causal_mask.view(1, QB, KB), float("-inf"))
+
+                    k_this = min(K_keep, KB)
+                    blk_topv, blk_topi_local = torch.topk(scores_blk, k=k_this, dim=-1, largest=True, sorted=False)
+                    blk_topi = blk_topi_local + ks
+
+                    cat_vals = torch.cat([run_vals, blk_topv], dim=-1)   # [H, QB, K_keep + k_this]
+                    cat_idx = torch.cat([run_idx, blk_topi], dim=-1)     # [H, QB, K_keep + k_this]
+                    run_vals, pick = torch.topk(cat_vals, k=K_keep, dim=-1, largest=True, sorted=False)
+                    run_idx = cat_idx.gather(-1, pick)
+
+                    del scores_blk, blk_topv, blk_topi_local, blk_topi, cat_vals, cat_idx, pick
+
+                attn_probs = torch.softmax(run_vals, dim=-1)  # [H, QB, K_keep]
+                v_topk = v_hld[h_idx_full, run_idx, :]        # [H, QB, K_keep, D]
+                out_blk = (attn_probs.unsqueeze(-1) * v_topk).sum(dim=-2)  # [H, QB, D]
+                out_hld[:, qs:qe, :] = out_blk
+
+                del run_vals, run_idx, q_blk, out_blk, attn_probs, v_topk
+
+            out[s:e, :, :] = out_hld.permute(1, 0, 2).contiguous()
+
+        return out
 
     def interpolated_attention(self, q, kv, unpadded_lengths, z):
         if unpadded_lengths is not None:
@@ -839,6 +1020,12 @@ class Qwen3Attention(nn.Module):
                     return_attn_probs=False,
                     window_size=(self.context_window_toggle - 1, 0),
                 )
+        elif self.toggle_type == "topk":
+            if unpadded_lengths is not None:
+                cu_seqlens, _ = unpadded_lengths
+                cw_attn_output = self._topk_attn_varlen(q, kv, cu_seqlens, self.topk_k)  # [T, H, D]
+            else:
+                cw_attn_output = self._topk_attn_nonvarlen(q, kv, self.topk_k)  # [B, S, H, D]
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -951,7 +1138,97 @@ class Qwen3Attention(nn.Module):
         )
         attn_output = self.o_proj(attn_output)
 
-        attn_weights = None
+        if not output_attentions:
+            attn_weights = None
+        else:
+            attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+
+            # ---- begin patch ----
+            if attention_mask is not None:
+                # attn_scores: (B, H, Lq, Lk)
+                B, H, Lq, Lk = attn_scores.shape
+
+                mask = attention_mask
+
+                # If mask is bool or int 0/1 token mask, convert to float additive mask:
+                # aim to produce add_mask shaped (B, 1, 1, Lk) or (B, 1, Lq, Lk) that can add to attn_scores.
+                def to_additive(m):
+                    # if already additive (float and contains very negative values), keep it
+                    if m.dtype.is_floating_point and (m.min() < -1e3 or m.max() > 1e3):
+                        return m
+                    # else assume it's 0/1 or boolean (1 means keep token), convert:
+                    m = m.float()
+                    # make 1 -> keep (0), 0 -> mask out by adding -1e9
+                    return (1.0 - m) * -1e9
+
+                # Normalize dims
+                if mask.dim() == 1:
+                    # unlikely, treat as (L,) -> key-dim
+                    mask = mask.unsqueeze(0)
+
+                if mask.dim() == 2:
+                    # (B, L) — probably key-length or full seq-length
+                    if mask.size(0) != B:
+                        # maybe shape (total_seq_len, ) or wrong batch; try to align last L
+                        mask = mask.unsqueeze(0).expand(B, -1)
+                    if mask.size(1) == Lk:
+                        mask = mask[:, None, None, :]        # (B,1,1,Lk)
+                    elif mask.size(1) == Lq:
+                        # mask provided for queries; expand to keys by repeating last tokens
+                        # create (B,1,Lq,Lk) by repeating across key dim
+                        mask_q = mask[:, None, :, None]     # (B,1,Lq,1)
+                        mask = mask_q.expand(-1, -1, Lq, Lk)[:, :, :, -Lk:]  # keep last Lk if needed
+                    else:
+                        # fallback: take last Lk positions (sequence may be longer)
+                        mask = mask[:, None, None, -Lk:]
+
+                elif mask.dim() == 3:
+                    # (B, 1, L) or (B, L, 1) or (B, Lq, Lk)
+                    if mask.size(0) != B:
+                        mask = mask.unsqueeze(0).expand(B, -1, -1)
+                    if mask.size(2) == Lk and mask.size(1) == 1:
+                        mask = mask[:, :, None, :]           # (B,1,1,Lk)
+                    elif mask.size(1) == Lq and mask.size(2) == 1:
+                        # (B, Lq, 1) -> make (B,1,Lq,Lk)
+                        mask = mask[:, None, :, :].expand(-1, -1, Lq, Lk)
+                    elif mask.size(1) == Lq and mask.size(2) == Lk:
+                        mask = mask[:, None, :, :]           # already (B, Lq, Lk)
+                    else:
+                        # general fallback: align last Lk
+                        mask = mask[..., -Lk:]
+                        if mask.dim() == 3:
+                            # try to get to (B,1,1,Lk)
+                            mask = mask[:, 0:1, None, :]
+
+                elif mask.dim() == 4:
+                    # assume already (B, 1, 1, Lk) or (B, 1, Lq, Lk)
+                    if mask.size(0) != B:
+                        mask = mask.unsqueeze(0).expand(B, -1, -1, -1)
+                    # If last dim doesn't match Lk, take last Lk tokens
+                    if mask.size(-1) != Lk:
+                        mask = mask[..., -Lk:]
+
+                else:
+                    # unknown shape: try to slice last Lk and reshape
+                    mask = mask.reshape(B, -1)[..., -Lk:]
+                    mask = mask[:, None, None, :]
+
+                # Now mask should have last dim Lk (or shape (B,1,Lq,Lk)), convert to additive
+                add_mask = to_additive(mask)
+
+                # If add_mask shape is (B,1,1,Lk) -> broadcasts to (B,H,Lq,Lk)
+                # If add_mask shape is (B,1,Lq,Lk) -> ok as well
+                # Final check: try broadcasting; if fails, try taking last Lk along last axis
+                try:
+                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(attn_scores.device)
+                except Exception as e:
+                    # last-resort: align by slicing key-dim
+                    add_mask = add_mask[..., -Lk:]
+                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(attn_scores.device)
+            # ---- end patch ----
+
+                
+            attn_weights = torch.softmax(attn_scores, dim=-1)
 
         return z.sum(), attn_output, attn_weights, past_key_value
 
@@ -1435,44 +1712,42 @@ class Qwen3Model(Qwen3PreTrainedModel):
         ):
             L = layerwise_model_sparsity.numel()
             device = layerwise_model_sparsity.device
-            # old
-            # idxs = torch.arange(L, device=device, dtype=torch.float32)
-            # denom = max(L - 1, 1)
-            # x = torch.sin(torch.pi * (idxs / denom))
-            # x = x.pow(float(self.config.layerwise_sparsity_power))
-
-            # min_r = float(self.config.layerwise_sparsity_min_ratio)
-            # max_r = float(self.config.layerwise_sparsity_max_ratio)
-            # sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")
-            # if sched == "high-low-high":
-            #     ratios = max_r - (max_r - min_r) * x
-            # else:
-            #     ratios = min_r + (max_r - min_r) * x
-
-            # layerwise_target = torch.clamp(
-            #     ratios * float(target_sparsity), min=0.0, max=1.0
-            # )
             
             # new
             path = erank_analysis_path or getattr(self.config, "erank_analysis_path", None)
             if path is None:
-                raise ValueError("erank_analysis_path not provided. Please pass the effective rank analysis file path via the forward argument or set config.erank_analysis_path.")
+                idxs = torch.arange(L, device=device, dtype=torch.float32)
+                denom = max(L - 1, 1)
+                x = torch.sin(torch.pi * (idxs / denom))
+                x = x.pow(float(self.config.layerwise_sparsity_power))
 
-            avg_erank = self._get_avg_erank(path)  # [L, H] on CPU
-            E = avg_erank.mean(dim=1).to(device)  # [L] 每层平均有效秩
-            
-            assert E.numel() == L, f"Mismatch: got {E.numel()} layers from erank but model has {L}"
-            
-            E_norm = (E - E.min()) / (E.max() - E.min() + 1e-8)
-            inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5 
-            w = inv_E
-            
-            L = layerwise_model_sparsity.numel()
-            layerwise_target = (w / w.sum()) * (target_sparsity * L)
-            layerwise_target = torch.clamp(layerwise_target, 0.0, 1.0)
-            s = layerwise_target.sum()
-            if s > 0:
-                layerwise_target = layerwise_target / s * (target_sparsity * L)
+                min_r = float(self.config.layerwise_sparsity_min_ratio)
+                max_r = float(self.config.layerwise_sparsity_max_ratio)
+                sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")
+                if sched == "high-low-high":
+                    ratios = max_r - (max_r - min_r) * x
+                else:
+                    ratios = min_r + (max_r - min_r) * x
+
+                layerwise_target = torch.clamp(
+                    ratios * float(target_sparsity), min=0.0, max=1.0
+                )
+            else:
+                avg_erank = self._get_avg_erank(path)  # [L, H] on CPU
+                E = avg_erank.mean(dim=1).to(device)  # [L] 每层平均有效秩
+                
+                assert E.numel() == L, f"Mismatch: got {E.numel()} layers from erank but model has {L}"
+                
+                E_norm = (E - E.min()) / (E.max() - E.min() + 1e-8)
+                inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5 
+                w = inv_E
+                
+                L = layerwise_model_sparsity.numel()
+                layerwise_target = (w / w.sum()) * (target_sparsity * L)
+                layerwise_target = torch.clamp(layerwise_target, 0.0, 1.0)
+                s = layerwise_target.sum()
+                if s > 0:
+                    layerwise_target = layerwise_target / s * (target_sparsity * L)
 
             diffs = layerwise_model_sparsity - layerwise_target
             def is_main_process():
@@ -1625,6 +1900,10 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
     def compute_loss(self, hidden_states, labels):
         if (labels != -100).sum() == 0:
             return torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
+        min_len = min(hidden_states.size(0), labels.size(0))
+        hidden_states = hidden_states[:min_len]
+        labels = labels[:min_len]
+
         logits = self.lm_head(hidden_states)
         if len(logits.shape) > 2:
             logits = logits.transpose(-1, -2)
