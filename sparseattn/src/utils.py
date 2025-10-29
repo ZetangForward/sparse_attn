@@ -657,6 +657,15 @@ def enable_duo_attention_eval(
             sink_size,
             recent_size,
         )
+    elif "qwen" in model.config.model_type:
+        from .duoattention import enable_qwen_duo_attention_eval
+
+        enable_qwen_duo_attention_eval(
+            model,
+            full_attention_heads,
+            sink_size,
+            recent_size,
+        )
     else:
         raise ValueError(f"Model type {model.config.model_type} not supported")
 
