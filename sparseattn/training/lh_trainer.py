@@ -581,21 +581,30 @@ class Trainer(HFTrainer):
                                     v = float(v.mean().item())
                             train_metrics[k] = v
                 if isinstance(outputs, dict):
-                    if "layerwise_model_sparsity" in outputs and outputs["layerwise_model_sparsity"] is not None:
+                    if (
+                        "layerwise_model_sparsity" in outputs
+                        and outputs["layerwise_model_sparsity"] is not None
+                    ):
                         lms = outputs["layerwise_model_sparsity"]
                         if isinstance(lms, torch.Tensor):
                             lms = lms.detach().cpu().float()
                             for i, s in enumerate(lms):
                                 train_metrics[f"layer_{i}/sparsity"] = float(s)
 
-                    if "layerwise_target_sparsity" in outputs and outputs["layerwise_target_sparsity"] is not None:
+                    if (
+                        "layerwise_target_sparsity" in outputs
+                        and outputs["layerwise_target_sparsity"] is not None
+                    ):
                         lt = outputs["layerwise_target_sparsity"]
                         if isinstance(lt, torch.Tensor):
                             lt = lt.detach().cpu().float()
                             for i, t in enumerate(lt):
                                 train_metrics[f"layer_{i}/target"] = float(t)
 
-                    if "layerwise_model_sparsity" in outputs and "layerwise_target" in outputs:
+                    if (
+                        "layerwise_model_sparsity" in outputs
+                        and "layerwise_target" in outputs
+                    ):
                         lms = outputs["layerwise_model_sparsity"]
                         lt = outputs["layerwise_target"]
                         if lms is not None and lt is not None:
@@ -639,7 +648,7 @@ class Trainer(HFTrainer):
                     "expected_z_std",
                     "log_alpha_mean",
                     "log_alpha_std",
-                    ""
+                    "",
                 ]:
                     if k in outputs and outputs[k] is not None:
                         metrics[k] = outputs[k]
@@ -1291,10 +1300,10 @@ class Trainer(HFTrainer):
         """
         if not isinstance(self.train_dataset, StreamingParquetIterable):
             return super().get_train_dataloader()
-        
+
         if not self.args.streaming_dataset:
             return super().get_train_dataloader()
-        
+
         logger.warning("Use streaming dataloader for train")
 
         if self.train_dataset is None:
@@ -1366,7 +1375,7 @@ class Trainer(HFTrainer):
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         run_dir = self._get_output_dir(trial=trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
-        
+
         if (
             isinstance(self.train_dataset, StreamingParquetIterable)
             and self.state.is_world_process_zero
@@ -1379,7 +1388,9 @@ class Trainer(HFTrainer):
             )
             dataset_state_dict = self.train_dataset.state_dict(num_samples)
             logger.warning(f"Save streaming dataset state: {dataset_state_dict}")
-            with open(os.path.join(output_dir, "streaming_dataset_state.json"), "w") as f:
+            with open(
+                os.path.join(output_dir, "streaming_dataset_state.json"), "w"
+            ) as f:
                 json.dump(dataset_state_dict, f)
 
         # Save streaming dataset state
@@ -1485,12 +1496,15 @@ class Trainer(HFTrainer):
             )
             if hasattr(self.train_dataset, "load_state_dict"):
                 self.train_dataset.load_state_dict(dataset_state_dict)
-                logger.warning("✅ Successfully resumed StreamingParquetIterable state.")
+                logger.warning(
+                    "✅ Successfully resumed StreamingParquetIterable state."
+                )
             elif isinstance(self.train_dataset, PrepackedDataset):
                 logger.info("PrepackedDataset detected — no streaming state to resume.")
             else:
-                logger.warning("⚠️ Dataset does not support state_dict loading, skipping resume.")
-
+                logger.warning(
+                    "⚠️ Dataset does not support state_dict loading, skipping resume."
+                )
 
     # Override the original train() to handle the case
     # when resuming from a checkpoint but no trainer_state is there

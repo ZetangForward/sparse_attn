@@ -97,7 +97,7 @@ def build_dataset_for_debug(paths, data_args: DataArguments):
 torch.set_grad_enabled(False)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-MODEL_NAME = "/data/hf_models/Meta-Llama-3.1-8B-Instruct"
+MODEL_NAME = "/data/hf_models/Qwen3-4B"
 DATA_PATH = "/data/lcm_lab/qqt/project/SparseAttn/sparseattn/data"
 MAX_LEN = 1024 * 12
 NUM_SAMPLES = 500
@@ -111,9 +111,9 @@ _USE_SVD_LOW_RANK = True
 
 
 def _eigvals_from_cov_on_cpu(cov_cpu):
-    eigvals = torch.linalg.eigvalsh(cov_cpu)  
+    eigvals = torch.linalg.eigvalsh(cov_cpu)
     eigvals = torch.clamp(eigvals, min=0.0)
-    eigvals = torch.flip(eigvals, dims=[0])  
+    eigvals = torch.flip(eigvals, dims=[0])
     return eigvals
 
 
@@ -158,14 +158,13 @@ def compute_truncated_erank(
             Q32 = Q_head.float()
             u, s, v = torch.linalg.svd(Q32, full_matrices=False)
 
-            eigvals = s**2 
+            eigvals = s**2
             eigvals = eigvals[:fixed_k].cpu()
             s_sum = float(eigvals.sum().item()) + EPS
             p = eigvals / s_sum
             Hk = -(p * (p + EPS).log()).sum().item()
             erank_k = math.exp(Hk)
             return erank_k
-
 
         if seq_len > max_sampled_tokens:
             idx = torch.linspace(
@@ -377,7 +376,7 @@ def main():
             "layer_boundaries": layer_group_boundaries,
             "retrieval_layers": candidate_retrieval_layers,
         },
-        "erank_analysis_llama_results.pt",
+        "erank_analysis_qwen_results.pt",
     )
     print("Results saved to erank_analysis_results.pt")
 

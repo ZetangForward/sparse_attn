@@ -30,8 +30,14 @@ class DataArguments:
     subsplit_length: Optional[int] = field(default=None)
     per_device_max_tokens: int = field(default=32768)
     apply_instruct_masks: bool = field(default=False)
-    prepack: bool = field(default=False, metadata={"help": "Pre-pack dataset offline into fixed-length examples"})
-    streaming: bool = field(default=False, metadata={"help": "Use streaming dataset (no full in-memory load)"})
+    prepack: bool = field(
+        default=False,
+        metadata={"help": "Pre-pack dataset offline into fixed-length examples"},
+    )
+    streaming: bool = field(
+        default=False,
+        metadata={"help": "Use streaming dataset (no full in-memory load)"},
+    )
 
 
 class ParquetDataset(Dataset):
@@ -61,7 +67,9 @@ class ParquetDataset(Dataset):
         item = self.raw_dataset[idx]
         text = item.get("context") or item.get("text") or item.get("content")
         if text is None:
-            raise KeyError("dataset item must contain one of 'context','text','content'")
+            raise KeyError(
+                "dataset item must contain one of 'context','text','content'"
+            )
 
         tokenized = self.tokenizer(
             text,
@@ -88,7 +96,13 @@ class StreamingParquetIterable(IterableDataset):
     Yields the same example shapes as ParquetDataset.
     """
 
-    def __init__(self, dataset_iterable, tokenizer, data_args: DataArguments, max_seq_len: int = 32768):
+    def __init__(
+        self,
+        dataset_iterable,
+        tokenizer,
+        data_args: DataArguments,
+        max_seq_len: int = 32768,
+    ):
         self.dataset_iterable = dataset_iterable
         self.tokenizer = tokenizer
         self.data_args = data_args
@@ -102,9 +116,16 @@ class StreamingParquetIterable(IterableDataset):
             tokenized = self.tokenizer(text, truncation=True, add_special_tokens=True)
             input_ids = tokenized["input_ids"]
 
-            if self.data_args.subsplit_length is not None and not self.data_args.single_seq:
+            if (
+                self.data_args.subsplit_length is not None
+                and not self.data_args.single_seq
+            ):
                 L = self.data_args.subsplit_length
-                chunks = [input_ids[i : i + L] for i in range(0, len(input_ids), L) if len(input_ids[i:i+L]) > 0]
+                chunks = [
+                    input_ids[i : i + L]
+                    for i in range(0, len(input_ids), L)
+                    if len(input_ids[i : i + L]) > 0
+                ]
                 yield {"input_ids_chunks": chunks}
             else:
                 yield {"input_ids": input_ids}
@@ -116,7 +137,9 @@ class PrepackedDataset(Dataset):
     This is the most efficient option for training: collator becomes trivial.
     """
 
-    def __init__(self, packed_input_ids: List[List[int]], tokenizer, max_seq_len: int = 4096):
+    def __init__(
+        self, packed_input_ids: List[List[int]], tokenizer, max_seq_len: int = 4096
+    ):
         self.packed_input_ids = packed_input_ids
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -157,7 +180,7 @@ class PackingDataCollator:
         for seq in all_input_ids:
             # truncate sequence if longer than max_seq_len
             if len(seq) > self.max_seq_len:
-                seq = seq[:self.max_seq_len]
+                seq = seq[: self.max_seq_len]
 
             seq_idx = 0
             while seq_idx < len(seq):
@@ -171,7 +194,7 @@ class PackingDataCollator:
                     remaining_tokens = max_tokens_per_pack
 
                 take_len = min(len(seq) - seq_idx, remaining_tokens)
-                chunk = seq[seq_idx:seq_idx + take_len]
+                chunk = seq[seq_idx : seq_idx + take_len]
                 # create labels
                 labels = chunk.copy()
                 # mask first token of new chunk if current_seq is empty
@@ -206,7 +229,11 @@ class PackingDataCollator:
                 all_input_ids.append(f["input_ids"])
 
         # detect prepacked
-        prepacked = all(len(x) == self.max_seq_len for x in all_input_ids) if all_input_ids else False
+        prepacked = (
+            all(len(x) == self.max_seq_len for x in all_input_ids)
+            if all_input_ids
+            else False
+        )
 
         if prepacked:
             packed_input_ids = all_input_ids
@@ -220,8 +247,14 @@ class PackingDataCollator:
 
         # pad to max_seq_len
         batch_size = len(packed_input_ids)
-        input_ids_tensor = torch.full((batch_size, self.max_seq_len), self.tokenizer.pad_token_id, dtype=torch.long)
-        labels_tensor = torch.full((batch_size, self.max_seq_len), -100, dtype=torch.long)
+        input_ids_tensor = torch.full(
+            (batch_size, self.max_seq_len),
+            self.tokenizer.pad_token_id,
+            dtype=torch.long,
+        )
+        labels_tensor = torch.full(
+            (batch_size, self.max_seq_len), -100, dtype=torch.long
+        )
         attention_mask = torch.zeros((batch_size, self.max_seq_len), dtype=torch.long)
 
         for i, (inp, lab) in enumerate(zip(packed_input_ids, packed_labels)):
@@ -272,24 +305,36 @@ def build_dataset(
     logger.info(f"Loading {len(parquet_files)} parquet files")
     # Tokenizer
     if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path, use_fast=True, trust_remote_code=True
+        )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # Determine max_seq_len
-    max_seq_len = int(data_args.per_device_max_tokens) if data_args.per_device_max_tokens else 32768
+    max_seq_len = (
+        int(data_args.per_device_max_tokens)
+        if data_args.per_device_max_tokens
+        else 32768
+    )
     if max_seq_len > 1_000_000:
         max_seq_len = 4096
 
     # Load dataset
     if data_args.streaming:
-        ds = load_dataset("parquet", data_files=parquet_files, split="train", streaming=True)
-        return StreamingParquetIterable(ds, tokenizer, data_args, max_seq_len=max_seq_len)
+        ds = load_dataset(
+            "parquet", data_files=parquet_files, split="train", streaming=True
+        )
+        return StreamingParquetIterable(
+            ds, tokenizer, data_args, max_seq_len=max_seq_len
+        )
 
     raw_dataset = load_dataset("parquet", data_files=parquet_files, split="train")
 
     if data_args.prepack:
-        logger.info("Prepacking dataset into fixed-length sequences. This may take time but speeds up training.")
+        logger.info(
+            "Prepacking dataset into fixed-length sequences. This may take time but speeds up training."
+        )
         # Extract all tokenized sequences
         all_input_ids = []
         for item in raw_dataset:
@@ -309,11 +354,19 @@ def build_dataset(
 
         collator = PackingDataCollator(tokenizer, data_args, max_seq_len=max_seq_len)
         packed_input_ids, _ = collator._pack_sequences(all_input_ids)
-        logger.info(f"Prepacked into {len(packed_input_ids)} examples of max len {max_seq_len}")
+        logger.info(
+            f"Prepacked into {len(packed_input_ids)} examples of max len {max_seq_len}"
+        )
         return PrepackedDataset(packed_input_ids, tokenizer, max_seq_len)
 
     # Default: random-access dataset
-    return ParquetDataset(raw_dataset=raw_dataset, tokenizer=tokenizer, data_args=data_args, max_seq_len=max_seq_len, is_training=is_training)
+    return ParquetDataset(
+        raw_dataset=raw_dataset,
+        tokenizer=tokenizer,
+        data_args=data_args,
+        max_seq_len=max_seq_len,
+        is_training=is_training,
+    )
 
 
 # -----------------------
@@ -323,18 +376,38 @@ def build_dataset(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    data_args = DataArguments(subsplit_length=1024, per_device_max_tokens=32768, prepack=False, streaming=False)
-    dataset = build_dataset(["/data/public_data/long_data_collection"], data_args=data_args, is_training=True,model_name_or_path="/data/hf_models/Qwen3-4B")
+    data_args = DataArguments(
+        subsplit_length=1024,
+        per_device_max_tokens=32768,
+        prepack=False,
+        streaming=False,
+    )
+    dataset = build_dataset(
+        ["/data/public_data/long_data_collection"],
+        data_args=data_args,
+        is_training=True,
+        model_name_or_path="/data/hf_models/Qwen3-4B",
+    )
 
     # Example: use DataLoader
     from torch.utils.data import DataLoader
 
-    tokenizer = AutoTokenizer.from_pretrained("/data/hf_models/Qwen3-4B", use_fast=True, trust_remote_code=True)
-    collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
+    tokenizer = AutoTokenizer.from_pretrained(
+        "/data/hf_models/Qwen3-4B", use_fast=True, trust_remote_code=True
+    )
+    collator = PackingDataCollator(
+        tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens
+    )
 
-    loader = DataLoader(dataset, batch_size=8, collate_fn=collator, num_workers=4, pin_memory=True)
+    loader = DataLoader(
+        dataset, batch_size=8, collate_fn=collator, num_workers=4, pin_memory=True
+    )
 
     for batch in loader:
         # batch contains tensors ready to feed model
-        print(batch["input_ids"].shape, batch["labels"].shape, batch["attention_mask"].shape)
+        print(
+            batch["input_ids"].shape,
+            batch["labels"].shape,
+            batch["attention_mask"].shape,
+        )
         break

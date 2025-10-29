@@ -53,7 +53,7 @@ def load_sparse_model(model_path):
 
 
 def main():
-    model_path = "/data/lcm_lab/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Meta-Llama-3.1-8B-Instruct_bsz16_steps1000_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0test_streaming_32k_layer-decay-new_wfrozen"
+    model_path = "/data/lcm_lab/qqt/project/SparseAttn/sparseattn/checkpoints/masksonly_Qwen3-4B_bsz16_steps250_lr1e-5_warmup0.1_sp0.7_cw1024_mlr1.0_rlr1.0qwen_streaming_32k_layer_decay_layer_sparsity_new_10_23_wfrozen"
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

@@ -1,10 +1,10 @@
 # Model and training configuration
-model=${MODEL:-"/data/hf_models/Qwen3-4B"}
+model=${MODEL:-"/data/hf_models/Meta-Llama-3.1-8B-Instruct"}
 bsz=${BSZ:-16}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
 steps=${STEPS:-1000}
-save_steps=${SAVE:-50}
+save_steps=${SAVE:-500}
 warmup=${WARMUP:-0.1}
 suffix=${SUFFIX:-""}
 overrides=${OVERRIDES:-""}
@@ -25,18 +25,19 @@ mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
 reg_learning_rate=${REG_LEARNING_RATE:-1.0}
 sparsity_warmup_ratio=${SPARSITY_WARMUP_RATIO:-0.8}
 disable_linear_reg_term=${DISABLE_LINEAR_REG_TERM:-false}
-context_window_if_toggled=${CONTEXT_WINDOW_IF_TOGGLED:-1024}
+# topk
+context_window_if_toggled=${CONTEXT_WINDOW_IF_TOGGLED:-2048}
 freeze_weights=${FREEZE_WEIGHTS:-true}
 freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
 # Streaming configuration
-toggle_type=${TOGGLE_TYPE:-"streaming"}
+toggle_type=${TOGGLE_TYPE:-"xattn"}
 sink_size=${SINK_SIZE:-128}
 topk_k=${TOPK_K:-2048}
 
 # Layer-wise sparsity configuration
-enable_layerwise_sparsity=${ENABLE_LAYERWISE_SPARSITY:-false}
+enable_layerwise_sparsity=${ENABLE_LAYERWISE_SPARSITY:-true}
 layerwise_sparsity_schedule=${LAYERWISE_SPARSITY_SCHEDULE:-"high-low-high"}
 layerwise_sparsity_min_ratio=${LAYERWISE_SPARSITY_MIN_RATIO:-0.5}
 layerwise_sparsity_max_ratio=${LAYERWISE_SPARSITY_MAX_RATIO:-1.0}
@@ -49,7 +50,7 @@ erank_analysis_path="/"
 dataset=${DATASET:-"/data/public_data/long_data_collection_pre_filter"}
 
 # Create run name
-extra_name="qwen_streaming_32k_prulong-sp_0.7"
+extra_name="llama_streaming_32k_layer-wise-sp_topk_debug"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
@@ -69,7 +70,7 @@ if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
 else
     num_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 fi
-num_gpus=${NUM_GPUS_PER_NODE:-$num_gpus}
+num_gpus=1
 
 num_nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | wc -l)
 if [ $num_nodes == 0 ]; then

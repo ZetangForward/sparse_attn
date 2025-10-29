@@ -17,6 +17,7 @@ from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
 from .modeling_flash_qwen import PawQwen3ForCausalLM, PawQwen3Config
 from .modeling_flash_phi import PawPhi3ForCausalLM, PawPhi3Config
 from .lh_trainer import Trainer
+
 # from .dataset import build_dataset, DataCollator, DataArguments
 from .dataset_batch import build_dataset, PackingDataCollator, DataArguments
 from .dataset import logger as dataset_logger
@@ -114,7 +115,9 @@ def main():
             topk_k=training_args.topk_k,
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
-            erank_analysis_path=training_args.erank_analysis_path,
+            erank_analysis_path=training_args.erank_analysis_path
+            if hasattr(training_args, "erank_analysis_path")
+            else None,
         )
     elif "llama" in script_args.model_name_or_path.lower():
         config = PawLlamaConfig.from_pretrained(
@@ -128,7 +131,9 @@ def main():
             topk_k=training_args.topk_k,
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
-            erank_analysis_path=training_args.erank_analysis_path,
+            erank_analysis_path=training_args.erank_analysis_path
+            if hasattr(training_args, "erank_analysis_path")
+            else None,
         )
     elif "phi" in script_args.model_name_or_path.lower():
         config = PawPhi3Config.from_pretrained(
@@ -142,7 +147,9 @@ def main():
             topk_k=training_args.topk_k,
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
-            erank_analysis_path=training_args.erank_analysis_path,
+            erank_analysis_path=training_args.erank_analysis_path
+            if hasattr(training_args, "erank_analysis_path")
+            else None,
         )
     else:
         raise ValueError(
@@ -267,7 +274,6 @@ def main():
             data_args=data_args,
             is_training=True,
         )
-
 
     if training_args.do_eval:
         # eval_dataset = {

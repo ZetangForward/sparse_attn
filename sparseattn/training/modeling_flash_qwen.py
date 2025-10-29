@@ -97,7 +97,7 @@ class PawQwen3Config(Qwen3Config):
         )
         self.layerwise_sparsity_power = kwargs.pop("layerwise_sparsity_power", 1.0)
         self.layerwise_sparsity_weight = kwargs.pop("layerwise_sparsity_weight", 1.0)
-        
+
         self.erank_analysis_path = kwargs.pop("erank_analysis_path", None)
 
         # 新增：top-k 注意力的超参（每个 query 仅保留前 k 个 key）
@@ -749,7 +749,9 @@ class Qwen3Attention(nn.Module):
             .contiguous()
         )
 
-    def _topk_attn_nonvarlen(self, q: torch.Tensor, kv: torch.Tensor, k_top: int) -> torch.Tensor:
+    def _topk_attn_nonvarlen(
+        self, q: torch.Tensor, kv: torch.Tensor, k_top: int
+    ) -> torch.Tensor:
         """
         q: [B, S, H, D]
         kv: [B, S, 2, H, D]
@@ -785,9 +787,7 @@ class Qwen3Attention(nn.Module):
             run_vals = torch.full(
                 (B, H, QB, K_keep), float("-inf"), dtype=q.dtype, device=q.device
             )
-            run_idx = torch.zeros(
-                (B, H, QB, K_keep), dtype=torch.long, device=q.device
-            )
+            run_idx = torch.zeros((B, H, QB, K_keep), dtype=torch.long, device=q.device)
 
             # 预先准备 query 的绝对位置
             q_pos = torch.arange(qs, qe, device=q.device)  # [QB]
@@ -807,23 +807,39 @@ class Qwen3Attention(nn.Module):
                 scores_blk = scores_blk.masked_fill(
                     causal_mask.view(1, 1, QB, KB), float("-inf")
                 )
-                
+
                 # 在当前 key 分块内取局部 top-k，然后与运行中的 top-k 合并
                 k_this = min(K_keep, KB)
-                blk_topv, blk_topi_local = torch.topk(scores_blk, k=k_this, dim=-1, largest=True, sorted=False)
+                blk_topv, blk_topi_local = torch.topk(
+                    scores_blk, k=k_this, dim=-1, largest=True, sorted=False
+                )
                 blk_topi = blk_topi_local + ks  # 转全局 key 索引
 
                 # 合并（拼接后再取 top-k）
-                cat_vals = torch.cat([run_vals, blk_topv], dim=-1)       # [B, H, QB, K_keep + k_this]
-                cat_idx = torch.cat([run_idx, blk_topi], dim=-1)         # [B, H, QB, K_keep + k_this]
-                run_vals, pick = torch.topk(cat_vals, k=K_keep, dim=-1, largest=True, sorted=False)
+                cat_vals = torch.cat(
+                    [run_vals, blk_topv], dim=-1
+                )  # [B, H, QB, K_keep + k_this]
+                cat_idx = torch.cat(
+                    [run_idx, blk_topi], dim=-1
+                )  # [B, H, QB, K_keep + k_this]
+                run_vals, pick = torch.topk(
+                    cat_vals, k=K_keep, dim=-1, largest=True, sorted=False
+                )
                 run_idx = cat_idx.gather(-1, pick)
 
-                del scores_blk, blk_topv, blk_topi_local, blk_topi, cat_vals, cat_idx, pick
+                del (
+                    scores_blk,
+                    blk_topv,
+                    blk_topi_local,
+                    blk_topi,
+                    cat_vals,
+                    cat_idx,
+                    pick,
+                )
 
             # 计算注意力并聚合 V
             attn_probs = torch.softmax(run_vals, dim=-1)  # [B, H, QB, K_keep]
-            v_topk = v_bhsd[b_idx, h_idx, run_idx, :]     # [B, H, QB, K_keep, D]
+            v_topk = v_bhsd[b_idx, h_idx, run_idx, :]  # [B, H, QB, K_keep, D]
             out_blk = (attn_probs.unsqueeze(-1) * v_topk).sum(dim=-2)  # [B, H, QB, D]
             out_bhsd[:, :, qs:qe, :] = out_blk
 
@@ -863,9 +879,9 @@ class Qwen3Attention(nn.Module):
             L = e - s
             if L <= 0:
                 continue
-            q_b = q[s:e, :, :]       # [L, H, D]
-            k_b = k_all[s:e, :, :]   # [L, H, D]
-            v_b = v_all[s:e, :, :]   # [L, H, D]
+            q_b = q[s:e, :, :]  # [L, H, D]
+            k_b = k_all[s:e, :, :]  # [L, H, D]
+            v_b = v_all[s:e, :, :]  # [L, H, D]
 
             # -> [H, L, D]
             q_hld = q_b.permute(1, 0, 2).contiguous()
@@ -885,34 +901,56 @@ class Qwen3Attention(nn.Module):
                 run_vals = torch.full(
                     (H, QB, K_keep), float("-inf"), dtype=q.dtype, device=q.device
                 )
-                run_idx = torch.zeros((H, QB, K_keep), dtype=torch.long, device=q.device)
+                run_idx = torch.zeros(
+                    (H, QB, K_keep), dtype=torch.long, device=q.device
+                )
 
                 q_pos = torch.arange(qs, qe, device=q.device)  # [QB]
 
                 for ks in range(0, L, k_chunk):
                     ke = min(ks + k_chunk, L)
                     KB = ke - ks
-                    
+
                     k_blk = k_hld[:, ks:ke, :]  # [H, KB, D]
-                    scores_blk = torch.matmul(q_blk, k_blk.transpose(-1, -2)) * scale  # [H, QB, KB]
+                    scores_blk = (
+                        torch.matmul(q_blk, k_blk.transpose(-1, -2)) * scale
+                    )  # [H, QB, KB]
 
                     k_pos = torch.arange(ks, ke, device=q.device)
                     causal_mask = k_pos.unsqueeze(0) > q_pos.unsqueeze(1)  # [QB, KB]
-                    scores_blk = scores_blk.masked_fill(causal_mask.view(1, QB, KB), float("-inf"))
+                    scores_blk = scores_blk.masked_fill(
+                        causal_mask.view(1, QB, KB), float("-inf")
+                    )
 
                     k_this = min(K_keep, KB)
-                    blk_topv, blk_topi_local = torch.topk(scores_blk, k=k_this, dim=-1, largest=True, sorted=False)
+                    blk_topv, blk_topi_local = torch.topk(
+                        scores_blk, k=k_this, dim=-1, largest=True, sorted=False
+                    )
                     blk_topi = blk_topi_local + ks
 
-                    cat_vals = torch.cat([run_vals, blk_topv], dim=-1)   # [H, QB, K_keep + k_this]
-                    cat_idx = torch.cat([run_idx, blk_topi], dim=-1)     # [H, QB, K_keep + k_this]
-                    run_vals, pick = torch.topk(cat_vals, k=K_keep, dim=-1, largest=True, sorted=False)
+                    cat_vals = torch.cat(
+                        [run_vals, blk_topv], dim=-1
+                    )  # [H, QB, K_keep + k_this]
+                    cat_idx = torch.cat(
+                        [run_idx, blk_topi], dim=-1
+                    )  # [H, QB, K_keep + k_this]
+                    run_vals, pick = torch.topk(
+                        cat_vals, k=K_keep, dim=-1, largest=True, sorted=False
+                    )
                     run_idx = cat_idx.gather(-1, pick)
 
-                    del scores_blk, blk_topv, blk_topi_local, blk_topi, cat_vals, cat_idx, pick
+                    del (
+                        scores_blk,
+                        blk_topv,
+                        blk_topi_local,
+                        blk_topi,
+                        cat_vals,
+                        cat_idx,
+                        pick,
+                    )
 
                 attn_probs = torch.softmax(run_vals, dim=-1)  # [H, QB, K_keep]
-                v_topk = v_hld[h_idx_full, run_idx, :]        # [H, QB, K_keep, D]
+                v_topk = v_hld[h_idx_full, run_idx, :]  # [H, QB, K_keep, D]
                 out_blk = (attn_probs.unsqueeze(-1) * v_topk).sum(dim=-2)  # [H, QB, D]
                 out_hld[:, qs:qe, :] = out_blk
 
@@ -1021,11 +1059,70 @@ class Qwen3Attention(nn.Module):
                     window_size=(self.context_window_toggle - 1, 0),
                 )
         elif self.toggle_type == "topk":
+            topk = getattr(self, "topk", 32)
+            scale = 1.0 / self.norm_factor
+
+            def topk_attention(q, kv, cu_seqlens=None, max_seqlen=None):
+                # kv: (total_k, 2, nheads_k, D)
+                k, v = kv[:, 0], kv[:, 1]
+                total_q, nheads, D = q.shape
+
+                if cu_seqlens is not None:
+                    B = cu_seqlens.numel() - 1
+                    outs = []
+                    for b in range(B):
+                        q_b = q[cu_seqlens[b] : cu_seqlens[b + 1]]  # (Lq, nheads, D)
+                        k_b = k[cu_seqlens[b] : cu_seqlens[b + 1]]  # (Lk, nheads_k, D)
+                        v_b = v[cu_seqlens[b] : cu_seqlens[b + 1]]
+
+                        # 支持 MQA / GQA
+                        if k_b.size(1) < q_b.size(1):
+                            repeat_factor = q_b.size(1) // k_b.size(1)
+                            k_b = k_b.repeat_interleave(repeat_factor, dim=1)
+                            v_b = v_b.repeat_interleave(repeat_factor, dim=1)
+
+                        # 注意力分数 (Lq, Lk, nheads)
+                        scores = torch.einsum("ihd,jhd->ijh", q_b * scale, k_b)
+
+                        # causal mask
+                        causal_mask = torch.tril(torch.ones_like(scores[..., 0]))
+                        scores = scores * causal_mask.unsqueeze(-1) + (
+                            1 - causal_mask.unsqueeze(-1)
+                        ) * (-1e9)
+
+                        topk_vals, topk_idx = torch.topk(scores, k=topk, dim=1)
+                        mask = torch.full_like(scores, float("-inf"))
+                        mask.scatter_(1, topk_idx, topk_vals)
+                        attn_probs = torch.softmax(mask, dim=1)
+
+                        out_b = torch.einsum("ijh,jhd->ihd", attn_probs, v_b)
+                        outs.append(out_b)
+
+                    return torch.cat(outs, dim=0)
+                else:
+                    # 非 varlen：假设 q=(B, L, nH, D)
+                    B, L, nH, D = q.shape
+                    k, v = kv[:, 0], kv[:, 1]
+                    # k,v:(B,L,nH,D)
+                    scores = torch.einsum("blhd,bmhd->bhlm", q * scale, k)
+                    causal_mask = torch.tril(torch.ones(L, L, device=q.device))
+                    scores = scores * causal_mask.unsqueeze(0).unsqueeze(0) + (
+                        1 - causal_mask.unsqueeze(0).unsqueeze(0)
+                    ) * (-1e9)
+
+                    topk_vals, topk_idx = torch.topk(scores, k=topk, dim=-1)
+                    mask = torch.full_like(scores, float("-inf"))
+                    mask.scatter_(-1, topk_idx, topk_vals)
+                    attn_probs = torch.softmax(mask, dim=-1)
+                    out = torch.einsum("bhlm,bmhd->blhd", attn_probs, v)
+                    return out
+
             if unpadded_lengths is not None:
-                cu_seqlens, _ = unpadded_lengths
-                cw_attn_output = self._topk_attn_varlen(q, kv, cu_seqlens, self.topk_k)  # [T, H, D]
+                cu_seqlens, max_seqlen = unpadded_lengths
+                cw_attn_output = topk_attention(q, kv, cu_seqlens, max_seqlen)
             else:
-                cw_attn_output = self._topk_attn_nonvarlen(q, kv, self.topk_k)  # [B, S, H, D]
+                cw_attn_output = topk_attention(q, kv)
+
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -1141,7 +1238,9 @@ class Qwen3Attention(nn.Module):
         if not output_attentions:
             attn_weights = None
         else:
-            attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+            attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(
+                self.head_dim
+            )
 
             # ---- begin patch ----
             if attention_mask is not None:
@@ -1172,12 +1271,14 @@ class Qwen3Attention(nn.Module):
                         # maybe shape (total_seq_len, ) or wrong batch; try to align last L
                         mask = mask.unsqueeze(0).expand(B, -1)
                     if mask.size(1) == Lk:
-                        mask = mask[:, None, None, :]        # (B,1,1,Lk)
+                        mask = mask[:, None, None, :]  # (B,1,1,Lk)
                     elif mask.size(1) == Lq:
                         # mask provided for queries; expand to keys by repeating last tokens
                         # create (B,1,Lq,Lk) by repeating across key dim
-                        mask_q = mask[:, None, :, None]     # (B,1,Lq,1)
-                        mask = mask_q.expand(-1, -1, Lq, Lk)[:, :, :, -Lk:]  # keep last Lk if needed
+                        mask_q = mask[:, None, :, None]  # (B,1,Lq,1)
+                        mask = mask_q.expand(-1, -1, Lq, Lk)[
+                            :, :, :, -Lk:
+                        ]  # keep last Lk if needed
                     else:
                         # fallback: take last Lk positions (sequence may be longer)
                         mask = mask[:, None, None, -Lk:]
@@ -1187,12 +1288,12 @@ class Qwen3Attention(nn.Module):
                     if mask.size(0) != B:
                         mask = mask.unsqueeze(0).expand(B, -1, -1)
                     if mask.size(2) == Lk and mask.size(1) == 1:
-                        mask = mask[:, :, None, :]           # (B,1,1,Lk)
+                        mask = mask[:, :, None, :]  # (B,1,1,Lk)
                     elif mask.size(1) == Lq and mask.size(2) == 1:
                         # (B, Lq, 1) -> make (B,1,Lq,Lk)
                         mask = mask[:, None, :, :].expand(-1, -1, Lq, Lk)
                     elif mask.size(1) == Lq and mask.size(2) == Lk:
-                        mask = mask[:, None, :, :]           # already (B, Lq, Lk)
+                        mask = mask[:, None, :, :]  # already (B, Lq, Lk)
                     else:
                         # general fallback: align last Lk
                         mask = mask[..., -Lk:]
@@ -1220,14 +1321,17 @@ class Qwen3Attention(nn.Module):
                 # If add_mask shape is (B,1,Lq,Lk) -> ok as well
                 # Final check: try broadcasting; if fails, try taking last Lk along last axis
                 try:
-                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(attn_scores.device)
+                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(
+                        attn_scores.device
+                    )
                 except Exception as e:
                     # last-resort: align by slicing key-dim
                     add_mask = add_mask[..., -Lk:]
-                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(attn_scores.device)
+                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(
+                        attn_scores.device
+                    )
             # ---- end patch ----
 
-                
             attn_weights = torch.softmax(attn_scores, dim=-1)
 
         return z.sum(), attn_output, attn_weights, past_key_value
@@ -1476,7 +1580,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         m = (l + r) / 2
 
         self.config.suggested_threshold = m
-    
+
     @torch.no_grad()
     def _get_avg_erank(self, path: str) -> torch.Tensor:
         key = os.path.abspath(path)
@@ -1487,7 +1591,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         avg_erank = erank_res["avg_erank"]
         self._erank_cache[key] = avg_erank
         return avg_erank
-    
+
     @torch.no_grad()
     def reset_masks_with_stripe_pattern(self, width_1, width_2, start_with_keep=True):
         if start_with_keep:
@@ -1665,13 +1769,15 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 and dist.get_world_size(seq_parallel_group) > 1
             ):
                 # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
-                
+
                 dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
 
                 if self.config.enable_layerwise_sparsity and len(layer_z_sums) > 0:
                     layer_z_sums_tensor = torch.stack(layer_z_sums)  # (num_layers,)
                     dist.all_reduce(
-                        layer_z_sums_tensor, op=dist.ReduceOp.SUM, group=seq_parallel_group
+                        layer_z_sums_tensor,
+                        op=dist.ReduceOp.SUM,
+                        group=seq_parallel_group,
                     )
                     layer_z_sums = list(layer_z_sums_tensor.unbind(0))
 
@@ -1712,10 +1818,12 @@ class Qwen3Model(Qwen3PreTrainedModel):
         ):
             L = layerwise_model_sparsity.numel()
             device = layerwise_model_sparsity.device
-            
+
             # new
-            path = erank_analysis_path or getattr(self.config, "erank_analysis_path", None)
-            if path is None:
+            path = erank_analysis_path or getattr(
+                self.config, "erank_analysis_path", None
+            )
+            if not path.endswith(".pt"):
                 idxs = torch.arange(L, device=device, dtype=torch.float32)
                 denom = max(L - 1, 1)
                 x = torch.sin(torch.pi * (idxs / denom))
@@ -1723,7 +1831,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
                 min_r = float(self.config.layerwise_sparsity_min_ratio)
                 max_r = float(self.config.layerwise_sparsity_max_ratio)
-                sched = getattr(self.config, "layerwise_sparsity_schedule", "low-high-low")
+                sched = getattr(
+                    self.config, "layerwise_sparsity_schedule", "low-high-low"
+                )
                 if sched == "high-low-high":
                     ratios = max_r - (max_r - min_r) * x
                 else:
@@ -1735,13 +1845,15 @@ class Qwen3Model(Qwen3PreTrainedModel):
             else:
                 avg_erank = self._get_avg_erank(path)  # [L, H] on CPU
                 E = avg_erank.mean(dim=1).to(device)  # [L] 每层平均有效秩
-                
-                assert E.numel() == L, f"Mismatch: got {E.numel()} layers from erank but model has {L}"
-                
+
+                assert E.numel() == L, (
+                    f"Mismatch: got {E.numel()} layers from erank but model has {L}"
+                )
+
                 E_norm = (E - E.min()) / (E.max() - E.min() + 1e-8)
-                inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5 
+                inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5
                 w = inv_E
-                
+
                 L = layerwise_model_sparsity.numel()
                 layerwise_target = (w / w.sum()) * (target_sparsity * L)
                 layerwise_target = torch.clamp(layerwise_target, 0.0, 1.0)
@@ -1750,17 +1862,19 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     layerwise_target = layerwise_target / s * (target_sparsity * L)
 
             diffs = layerwise_model_sparsity - layerwise_target
+
             def is_main_process():
                 if not dist.is_available() or not dist.is_initialized():
                     return True
                 return dist.get_rank() == 0
+
             # if is_main_process():
             #     print("============debug layerwise sparsity loss computation============")
             #     print("debug layerwise_model_sparsity:", layerwise_model_sparsity)
             #     print("debug layerwise_target:", layerwise_target)
             #     print("debug diffs:", diffs)
             #     print("============debug layerwise sparsity loss computation============")
-            
+
             per_layer_loss = self.sparsity_lambda_1.reshape(
                 []
             ) * diffs + self.sparsity_lambda_2.reshape([]) * (diffs**2)
@@ -1899,7 +2013,9 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
 
     def compute_loss(self, hidden_states, labels):
         if (labels != -100).sum() == 0:
-            return torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
+            return torch.tensor(
+                0.0, device=hidden_states.device, dtype=hidden_states.dtype
+            )
         min_len = min(hidden_states.size(0), labels.size(0))
         hidden_states = hidden_states[:min_len]
         labels = labels[:min_len]

@@ -198,12 +198,10 @@ class TrainingArguments(HfTrainingArguments):
             "help": "Number of sink tokens (will be rounded up to a multiple of 128)."
         },
     )
-    
+
     topk_k: int = field(
         default=2048,
-        metadata={
-            "help": "The k value for top-k toggling."
-        },
+        metadata={"help": "The k value for top-k toggling."},
     )
 
     # Layer-wise sparsity
@@ -241,7 +239,5 @@ class TrainingArguments(HfTrainingArguments):
     )
     erank_analysis_path: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Path to the effective rank analysis results file."
-        },
+        metadata={"help": "Path to the effective rank analysis results file."},
     )
