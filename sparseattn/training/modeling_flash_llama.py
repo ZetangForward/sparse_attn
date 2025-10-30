@@ -662,8 +662,12 @@ class LlamaAttention(nn.Module):
             )
         elif self.toggle_type == "xattn":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
-
-            self.head_indices = self.num_heads // self.num_key_value_heads
+            self.streaming_info_kwargs = {
+                "sink_block_num": self.sink_blocks,
+                "local_block_num": self.local_blocks,
+            }
+            # self.head_indices = self.num_heads // self.num_key_value_heads
+            self.head_indices = self.num_heads
             self.xattn_flash_attn_func = xattn_flash_attn_func
             self.granularity = 128
             self.xattn_params = {
@@ -676,8 +680,8 @@ class LlamaAttention(nn.Module):
                 "use_triton": True,
                 "causal": True,
                 "kdb": 1,
-                "keep_sink": False,
-                "keep_recent": False,
+                "keep_sink": True,
+                "keep_recent": True,
             }
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
@@ -1134,22 +1138,48 @@ class LlamaAttention(nn.Module):
                         dim=3
                     )  # [B, H, T, D]
                     cw_attn_output = out_bhtd.permute(0, 2, 1, 3)  # [B, T, H, D]
-        elif self.toggle_type == "xattn":
-            if q.dim() == 3:
-                q = q.unsqueeze(0)
-                k = k.unsqueeze(0)
-                v = v.unsqueeze(0)
-            k = repeat_kv(k, self.num_key_value_groups)
-            v = repeat_kv(v, self.num_key_value_groups)
-            cw_attn_output = self.xattn_flash_attn_func(
-                q,
-                k,
-                v,
-                self.head_indices,
-                self.xattn_params,
-                self.granularity,
-            )
+        elif self.toggle_type == "xattn":  
+            if not self.training :
+                _, seq_len, _, _ = q.size()         
+            if self.training or seq_len != 1:
+                if q.dim() == 3:
+                    q = q.unsqueeze(0)
+                    k = k.unsqueeze(0)
+                    v = v.unsqueeze(0)
+                cw_attn_output = self.xattn_flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    self.head_indices,
+                    self.xattn_params,
+                    self.granularity,
+                )
+            else:
+                if unpadded_lengths is not None:
+                    # varlen, ignore padding tokens, efficient for large batch with many paddings
+                    cu_seqlens, max_seqlen = unpadded_lengths
 
+                    cw_attn_output, _, attn_probs = flash_attn_varlen_kvpacked_func(
+                        q,
+                        kv,
+                        cu_seqlens,
+                        cu_seqlens,
+                        max_seqlen,
+                        max_seqlen,
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / self.norm_factor,
+                        causal=True,
+                        return_attn_probs=True,
+                    )
+                else:
+                    cw_attn_output, _, attn_probs = flash_attn_kvpacked_func(
+                        q,
+                        kv,
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / self.norm_factor,
+                        causal=True,
+                        return_attn_probs=True,
+                    )
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -1174,15 +1204,12 @@ class LlamaAttention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        q_len, h_size = hidden_states.size(-2), hidden_states.size(-1)
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
-
-        q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], self.num_key_value_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], self.num_key_value_heads, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape)
+        k = self.k_proj(hidden_states).view(hidden_shape)
+        v = self.v_proj(hidden_states).view(hidden_shape)
 
         has_layer_past = past_key_value is not None
 
@@ -1259,9 +1286,9 @@ class LlamaAttention(nn.Module):
             kwargs = {}
 
         attn_output = attention_func(q, kv, k, v, unpadded_lengths, z, **kwargs)
-        if unpadded_lengths is not None:
+        if k.dim() == 3:
             attn_output = attn_output.squeeze(0)
-        attn_output = attn_output.reshape(*attn_output.shape[:-2], h_size)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
 
         attn_weights = None

@@ -169,7 +169,12 @@ def xattn_estimate(
 ) -> torch.Tensor:
     batch_size, num_kv_head, k_len, head_dim = key_states.shape
     batch_size, num_q_head, q_len, head_dim = query_states.shape
-    assert num_q_head == num_kv_head
+
+    # Support GQA: expand k/v to match q heads
+    if num_q_head != num_kv_head:
+        assert num_q_head % num_kv_head == 0, "num_q_head must be divisible by num_kv_head for GQA"
+        key_states = torch.repeat_interleave(key_states, num_q_head // num_kv_head, dim=1)
+        num_kv_head = num_q_head  # now they match
 
     k_num_to_pad = ((k_len + chunk_size - 1) // chunk_size) * chunk_size - k_len
     q_num_to_pad = ((q_len + chunk_size - 1) // chunk_size) * chunk_size - q_len
@@ -561,7 +566,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_backward", action="store_true", help="Test backward pass"
     )
-    parser.add_argument("--seq_len", type=int, default=32768, help="Sequence length")
+    parser.add_argument("--seq_len", type=int, default=32767, help="Sequence length")
     args = parser.parse_args()
 
     ATOL, RTOL = 1e-2, 1e-2
@@ -637,7 +642,6 @@ if __name__ == "__main__":
     else:
         q_ref, k_ref, v_ref = q, k, v
     print(f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
-    breakpoint()
     out = xattn_flash_attn_func(
         q,
         k,
@@ -663,6 +667,7 @@ if __name__ == "__main__":
 
             print("-" * 60)
             if not torch.allclose(out_chunk, ref_out_chunk, atol=ATOL, rtol=RTOL):
+                breakpoint()
                 print(f"Forward Output mismatch at chunk {i}:")
                 print(f"Forward out_chunk: {out_chunk}")
                 print(f"Forward ref_out_chunk: {ref_out_chunk}")
