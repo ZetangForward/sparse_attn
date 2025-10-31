@@ -669,7 +669,7 @@ class LlamaAttention(nn.Module):
             # self.head_indices = self.num_heads // self.num_key_value_heads
             self.head_indices = self.num_heads
             self.xattn_flash_attn_func = xattn_flash_attn_func
-            self.granularity = 128
+            self.granularity = int(getattr(config, "block_size", 64))
             self.xattn_params = {
                 "stride": 16,
                 "norm": 1,
@@ -734,7 +734,7 @@ class LlamaAttention(nn.Module):
         self, q: torch.Tensor, kv: torch.Tensor, k_top: int
     ) -> torch.Tensor:
         """
-        q: [B, T, H, D], kv: [B, S, 2, H, D]，仅保留每个查询位置 Top-K 的键，使用分块计算避免显存爆炸。
+        q: [B, T, H, D], kv: [B, S, 2, H, D]，
         returns: [B, T, H, D]
         """
         bsz, tq, heads, dim = q.size()
@@ -1139,6 +1139,13 @@ class LlamaAttention(nn.Module):
                     )  # [B, H, T, D]
                     cw_attn_output = out_bhtd.permute(0, 2, 1, 3)  # [B, T, H, D]
         elif self.toggle_type == "xattn":  
+            # breakpoint()
+            # def set_pdb_trace(rank: int = None):
+            #     import pdb
+            #     import sys
+            #     sys.stdin = open(0)  
+            #     pdb.set_trace()
+            # set_pdb_trace(0)
             if not self.training :
                 _, seq_len, _, _ = q.size()         
             if self.training or seq_len != 1:
@@ -1146,14 +1153,30 @@ class LlamaAttention(nn.Module):
                     q = q.unsqueeze(0)
                     k = k.unsqueeze(0)
                     v = v.unsqueeze(0)
-                cw_attn_output = self.xattn_flash_attn_func(
+                # cw_attn_output = self.xattn_flash_attn_func(
+                #     q,
+                #     k,
+                #     v,
+                #     self.head_indices,
+                #     self.xattn_params,
+                #     self.granularity,
+                # )
+                k = k.repeat_interleave(self.num_key_value_groups, dim=2)
+                v = v.repeat_interleave(self.num_key_value_groups, dim=2)
+                q, k, v = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)  # B,H,T,D
+                stride = self.xattn_params["stride"]
+                threshold = self.xattn_params["threshold"]
+                norm = self.xattn_params["norm"]
+                from sparseattn.src.Xattention import Xattention_prefill
+                cw_attn_output = Xattention_prefill(
                     q,
                     k,
                     v,
-                    self.head_indices,
-                    self.xattn_params,
-                    self.granularity,
-                )
+                    stride,
+                    norm,
+                    threshold,
+                    use_triton=True,
+                ).transpose(1,2)  # B,T,H,D
             else:
                 if unpadded_lengths is not None:
                     # varlen, ignore padding tokens, efficient for large batch with many paddings
