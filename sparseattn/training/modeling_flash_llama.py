@@ -82,6 +82,9 @@ class PawLlamaConfig(LlamaConfig):
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
 
+        # ada-sparsity
+        self.enable_ada_sparsity = kwargs.pop("enable_ada_sparsity", False)
+        
         # Layer-wise sparsity control
         self.enable_layerwise_sparsity = kwargs.pop("enable_layerwise_sparsity", False)
 
@@ -1248,27 +1251,27 @@ class LlamaAttention(nn.Module):
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
-        # effective_attn_output = attn_output * z.unsqueeze(-1) + cw_attn_output * (
-        #     1 - z
-        # ).unsqueeze(-1)
+        effective_attn_output = attn_output * z.unsqueeze(-1) + cw_attn_output * (
+            1 - z
+        ).unsqueeze(-1)
         
-        def _expand_z_to_attn(z, template_tensor):
-            if template_tensor.dim() == 4:
-                B, T, H, D = template_tensor.shape
-                if z.dim() == 1:
-                    return z.view(1, 1, H, 1).expand(B, T, H, D)
-                elif z.dim() == 2:
-                    return z.unsqueeze(1).unsqueeze(-1).expand(B, T, H, D)
-            elif template_tensor.dim() == 3:
-                total, H, D = template_tensor.shape
-                if z.dim() == 1:
-                    return z.view(1, H, 1).expand(total, H, D)
-                elif z.dim() == 2:
-                    return z.unsqueeze(-1).expand(total, H, D)
-            return z
+        # def _expand_z_to_attn(z, template_tensor):
+        #     if template_tensor.dim() == 4:
+        #         B, T, H, D = template_tensor.shape
+        #         if z.dim() == 1:
+        #             return z.view(1, 1, H, 1).expand(B, T, H, D)
+        #         elif z.dim() == 2:
+        #             return z.unsqueeze(1).unsqueeze(-1).expand(B, T, H, D)
+        #     elif template_tensor.dim() == 3:
+        #         total, H, D = template_tensor.shape
+        #         if z.dim() == 1:
+        #             return z.view(1, H, 1).expand(total, H, D)
+        #         elif z.dim() == 2:
+        #             return z.unsqueeze(-1).expand(total, H, D)
+        #     return z
 
-        z_exp = _expand_z_to_attn(z, attn_output)
-        effective_attn_output = attn_output * z_exp + cw_attn_output * (1 - z_exp)
+        # z_exp = _expand_z_to_attn(z, attn_output)
+        # effective_attn_output = attn_output * z_exp + cw_attn_output * (1 - z_exp)
 
         return effective_attn_output
 
@@ -1341,39 +1344,40 @@ class LlamaAttention(nn.Module):
         else:
             past_kv = kv
         past_key_value = (past_kv, past_len + q.size(1)) if use_cache else None
-
-        # z_kv = get_mask(
-        #     self.attn_mask_log_alphas,
-        #     training=self.training,
-        #     threshold_for_deterministic=self.threshold_for_deterministic,
-        # )  # (num_key_value_heads,)
-        # # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
-        # z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
-        if unpadded_lengths is None:
-            pooled = hidden_states.mean(dim=1)
-            task_ids = kwargs.get("task_ids", None)
-            probs_kv, z_kv_batch = self.mask_allocator(pooled, task_ids=task_ids)
-            z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(
-                z_kv_batch.size(0), -1
-            )  # [B, num_heads]
-            z = z_batch_heads
+        if not self.config.enable_layerwise_sparsity:
+            z_kv = get_mask(
+                self.attn_mask_log_alphas,
+                training=self.training,
+                threshold_for_deterministic=self.threshold_for_deterministic,
+            )  # (num_key_value_heads,)
+            # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
+            z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
         else:
-            cu_seqlens, _ = unpadded_lengths
-            B = cu_seqlens.numel() - 1
-            pooled_list = []
-            for b in range(B):
-                s = int(cu_seqlens[b].item())
-                e = int(cu_seqlens[b + 1].item())
-                if e > s:
-                    pooled_list.append(hidden_states[s:e].mean(dim=0))
-                else:
-                    pooled_list.append(hidden_states.new_zeros(self.hidden_size))
-            pooled = torch.stack(pooled_list, dim=0) if len(pooled_list) > 0 else hidden_states.new_zeros(B, self.hidden_size)
+            if unpadded_lengths is None:
+                pooled = hidden_states.mean(dim=1)
+                task_ids = kwargs.get("task_ids", None)
+                probs_kv, z_kv_batch = self.mask_allocator(pooled, task_ids=task_ids)
+                z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(
+                    z_kv_batch.size(0), -1
+                )  # [B, num_heads]
+                z = z_batch_heads
+            else:
+                cu_seqlens, _ = unpadded_lengths
+                B = cu_seqlens.numel() - 1
+                pooled_list = []
+                for b in range(B):
+                    s = int(cu_seqlens[b].item())
+                    e = int(cu_seqlens[b + 1].item())
+                    if e > s:
+                        pooled_list.append(hidden_states[s:e].mean(dim=0))
+                    else:
+                        pooled_list.append(hidden_states.new_zeros(self.hidden_size))
+                pooled = torch.stack(pooled_list, dim=0) if len(pooled_list) > 0 else hidden_states.new_zeros(B, self.hidden_size)
 
-            task_ids = kwargs.get("task_ids", None)
-            probs_kv, z_kv_batch = self.mask_allocator(pooled, task_ids=task_ids)
-            z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(B, -1)
-            z = z_batch_heads
+                task_ids = kwargs.get("task_ids", None)
+                probs_kv, z_kv_batch = self.mask_allocator(pooled, task_ids=task_ids)
+                z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(B, -1)
+                z = z_batch_heads
 
 
 
@@ -1387,12 +1391,13 @@ class LlamaAttention(nn.Module):
                 "group": seq_parallel_group,
                 "gather_idx": (0 if unpadded_lengths is not None else 1),
             }
-
-            # z = torch.split(
-            #     z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
-            # )[dist.get_rank(seq_parallel_group)]
-            z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
-            z = z_splits[dist.get_rank(seq_parallel_group)]
+            if not self.config.enable_layerwise_sparsity:
+                z = torch.split(
+                    z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
+                )[dist.get_rank(seq_parallel_group)]
+            else:
+                z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
+                z = z_splits[dist.get_rank(seq_parallel_group)]
         else:
             attention_func = self.interpolated_attention
             kwargs = {}

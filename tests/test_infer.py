@@ -62,9 +62,9 @@ def main():
     model = load_sparse_model(model_path)
 
     config = model.config
-    threshold = getattr(config, "suggested_threshold", 0.5)
+    # threshold = getattr(config, "suggested_threshold", 0.5)
     # threshold = 0
-    print(f"Using threshold: {threshold}")
+    # print(f"Using threshold: {threshold}")
     # model.set_threshold_for_deterministic(threshold)
     model.eval()
 

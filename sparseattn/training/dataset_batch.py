@@ -290,7 +290,6 @@ def build_dataset(
         path_list = paths
 
     parquet_files = []
-    print(path_list)
     for p in path_list:
         if os.path.isdir(p):
             files = glob.glob(os.path.join(p, "*.parquet"))

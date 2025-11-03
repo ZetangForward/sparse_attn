@@ -203,6 +203,11 @@ class TrainingArguments(HfTrainingArguments):
         default=2048,
         metadata={"help": "The k value for top-k toggling."},
     )
+    
+    enable_ada_sparsity: bool = field(
+        default=False,
+        metadata={"help": "Whether to enable layer-wise sparsity."},
+    )
 
     # Layer-wise sparsity
     enable_layerwise_sparsity: bool = field(

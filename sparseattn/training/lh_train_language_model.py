@@ -114,6 +114,7 @@ def main():
             sink_size=training_args.sink_size,
             topk_k=training_args.topk_k,
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
+            enable_ada_sparsity=training_args.enable_ada_sparsity,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
             erank_analysis_path=training_args.erank_analysis_path
             if hasattr(training_args, "erank_analysis_path")
@@ -130,6 +131,7 @@ def main():
             sink_size=training_args.sink_size,
             topk_k=training_args.topk_k,
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
+            enable_ada_sparsity=training_args.enable_ada_sparsity,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
             erank_analysis_path=training_args.erank_analysis_path
             if hasattr(training_args, "erank_analysis_path")
@@ -146,6 +148,7 @@ def main():
             sink_size=training_args.sink_size,
             topk_k=training_args.topk_k,
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
+            enable_ada_sparsity=training_args.enable_ada_sparsity,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
             erank_analysis_path=training_args.erank_analysis_path
             if hasattr(training_args, "erank_analysis_path")

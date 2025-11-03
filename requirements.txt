@@ -71,7 +71,7 @@ fastapi-cloud-cli==0.1.5
 fastjsonschema==2.21.1
 fastrlock==0.8.3
 filelock==3.18.0
-flashinfer-python==0.2.8
+# flashinfer-python==0.2.8
 fonttools==4.59.0
 fqdn==1.5.1
 frozenlist==1.7.0
@@ -241,7 +241,7 @@ python-dotenv==1.1.1
 python-json-logger==3.3.0
 python-multipart==0.0.20
 python-snappy==0.7.3
-pytrec_eval==0.5
+# pytrec_eval==0.5
 pytz==2025.2
 PyYAML==6.0.2
 pyzmq==27.0.1

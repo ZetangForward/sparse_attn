@@ -1,5 +1,5 @@
 # Model and training configuration
-model=${MODEL:-"/data/hf_models/Meta-Llama-3.1-8B-Instruct"}
+model=${MODEL:-"/data1/hf_model/Meta-Llama-3.1-8B-Instruct"}
 bsz=${BSZ:-16}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
@@ -32,9 +32,11 @@ freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
 # Streaming configuration
-toggle_type=${TOGGLE_TYPE:-"xattn"}
+toggle_type=${TOGGLE_TYPE:-"streaming"}
 sink_size=${SINK_SIZE:-128}
 topk_k=${TOPK_K:-2048}
+
+enable_ada_sparsity=${ENABLE_ADA_SPARSITY:-true}
 
 # Layer-wise sparsity configuration
 enable_layerwise_sparsity=${ENABLE_LAYERWISE_SPARSITY:-true}
@@ -47,10 +49,10 @@ erank_analysis_path="/"
 
 # Dataset configuration
 # dataset=${DATASET:-"/data/lcm_lab/qqt/project/SparseAttn/sparseattn/data"}
-dataset=${DATASET:-"/data/public_data/long_data_collection_pre_filter"}
+dataset=${DATASET:-"/data1/public_data/Long-Data-Collections_Pre_filter"}
 
 # Create run name
-extra_name="llama_streaming_32k_layer-wise-sp_topk_debug"
+extra_name="llama_streaming_32k_layer-wise-sp_ada_sparsity"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
@@ -70,7 +72,7 @@ if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
 else
     num_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 fi
-num_gpus=1
+num_gpus=${NUM_GPUS:-$num_gpus}
 
 num_nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | wc -l)
 if [ $num_nodes == 0 ]; then
@@ -175,6 +177,8 @@ base_arguments=(
     --toggle_type $toggle_type
     --sink_size $sink_size
     --topk_k $topk_k
+
+    --enable_ada_sparsity $enable_ada_sparsity
 
     # layer decay configuration
     --enable_layerwise_sparsity $enable_layerwise_sparsity
