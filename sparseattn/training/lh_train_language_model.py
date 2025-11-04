@@ -13,6 +13,10 @@ from transformers import (
     set_seed,
 )
 
+from block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
+import torch
+from transformers import LlamaForCausalLM, AutoTokenizer
+
 from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
 from .modeling_flash_qwen import PawQwen3ForCausalLM, PawQwen3Config
 from .modeling_flash_phi import PawPhi3ForCausalLM, PawPhi3Config
@@ -31,7 +35,7 @@ import json
 
 from csv import reader
 
-from fla.models.nsa import AutoModelForCausalLM as NSAAutoModelForCausalLM
+# from fla.models.nsa import AutoModelForCausalLM as NSAAutoModelForCausalLM
 
 logger = logging.getLogger(__name__)
 
@@ -175,12 +179,20 @@ def main():
     if script_args.model_name_or_path:
         # Determine model type and load appropriate model
         if training_args.attention_type is not None and "nsa" in training_args.attention_type :
-            model = NSAAutoModelForCausalLM.from_pretrained(
+            # model = NSAAutoModelForCausalLM.from_pretrained(
+            #     script_args.model_name_or_path,
+            #     cache_dir=script_args.cache_dir,
+            #     revision=script_args.model_revision,
+            #     use_auth_token=True if script_args.use_auth_token else None,
+            # )
+            model = LlamaForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
+                from_tf=bool(".ckpt" in script_args.model_name_or_path),
                 cache_dir=script_args.cache_dir,
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
             )
+            pass
         elif "qwen" in script_args.model_name_or_path.lower():
             model = PawQwen3ForCausalLM.from_pretrained(
                 script_args.model_name_or_path,

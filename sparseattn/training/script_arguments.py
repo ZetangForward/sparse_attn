@@ -186,7 +186,7 @@ class TrainingArguments(HfTrainingArguments):
     )
     
     attention_type: str = field(
-        default="nsa",
+        default="None",
         metadata={
             "help": "The type of toggling to use. Currently supports: `streaming` and `local`."
         },
