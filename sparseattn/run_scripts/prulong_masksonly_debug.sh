@@ -117,7 +117,7 @@ export LOGIT_BLOCK_SIZE=2048
 
 # Training arguments
 base_arguments=(
-    --report_to swanlab
+    --report_to tensorboard
     --do_train
 
     --model_name $model
