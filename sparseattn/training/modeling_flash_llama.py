@@ -1248,6 +1248,8 @@ class LlamaAttention(nn.Module):
                         causal=True,
                         return_attn_probs=True,
                     )
+        elif self.toggle_type == "none":
+            cw_attn_output = torch.zeros_like(attn_output)
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
