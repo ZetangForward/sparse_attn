@@ -1344,7 +1344,7 @@ class LlamaAttention(nn.Module):
         else:
             past_kv = kv
         past_key_value = (past_kv, past_len + q.size(1)) if use_cache else None
-        if not self.config.enable_layerwise_sparsity:
+        if not self.config.enable_ada_sparsity:
             z_kv = get_mask(
                 self.attn_mask_log_alphas,
                 training=self.training,
@@ -1391,7 +1391,7 @@ class LlamaAttention(nn.Module):
                 "group": seq_parallel_group,
                 "gather_idx": (0 if unpadded_lengths is not None else 1),
             }
-            if not self.config.enable_layerwise_sparsity:
+            if not self.config.enable_ada_sparsity:
                 z = torch.split(
                     z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
                 )[dist.get_rank(seq_parallel_group)]
@@ -1729,11 +1729,11 @@ class LlamaModel(LlamaPreTrainedModel):
         target_sparsity: Optional[float] = None,
         erank_analysis_path: Optional[str] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        # if not self.training and use_cache:
-        #     compute_sparsity = False
-        # else:
-        #     compute_sparsity = True
-        compute_sparsity = True
+        if not self.training:
+            compute_sparsity = False
+        else:
+            compute_sparsity = True
+        # compute_sparsity = True
         output_attentions = (
             output_attentions
             if output_attentions is not None

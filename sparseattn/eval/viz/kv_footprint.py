@@ -2,6 +2,7 @@ import torch
 import functools
 from typing import Tuple
 import numpy as np
+import math
 
 
 def causal_mask_active(total_len: int):
@@ -145,9 +146,12 @@ def get_kv_footprint(
         causal_mask_active(prompt_len + response_len),
         np.array([prompt_len + response_len]),
     )
+    print("streaming_active_entries:", streaming_active_entries)
 
     streaming_footprint = streaming_active_entries / full_active_entries
     global_footprint = global_active_entries / full_active_entries
+    print("streaming_footprint:", streaming_footprint)
+    print("global_footprint:", global_footprint)
 
     kv_footprint = streaming_footprint * head_sparsity + global_footprint * (
         1 - head_sparsity
@@ -240,4 +244,158 @@ def calculate_kv_statistics_locret(
         kv_footprint.append(a)
         kv_peak.append(b)
 
+    return np.mean(kv_footprint), np.mean(kv_peak)
+
+# XAttention block-level KV footprint estimation
+
+# @functools.lru_cache(maxsize=1000)
+# def get_kv_footprint_xattn(
+#     prompt_len: int,
+#     response_len: int,
+#     chunk_size: int = 16384, 
+#     block_size: int = 64, 
+#     threshold: float = 0.9,
+#     head_sparsity: float = 0.5,
+#     kv_sparsity: float = 0.2,
+# ) -> Tuple[float, float]:
+
+#     empirical_points = {
+#         4_000: 0.5538,
+#         8_000: 0.4355,
+#         16_000: 0.2891,
+#         32_000: 0.2793,
+#         64_000: 0.1132,
+#         128_000: 0.0732,
+#     }
+#     lengths = np.array(list(empirical_points.keys()), dtype=np.float64)
+#     sparsities = np.array(list(empirical_points.values()), dtype=np.float64)
+#     log_L = np.log(lengths)
+#     log_S = np.log(sparsities)
+#     slope, intercept = np.polyfit(log_L, log_S, deg=1)  # log_S ≈ slope * log_L + intercept
+#     a = float(np.exp(intercept))
+#     b = float(slope)
+
+#     total_tokens = int(prompt_len + response_len)
+#     retained_ratio = a * (total_tokens ** b)
+#     retained_ratio = float(np.clip(retained_ratio, 0.01, 0.9))
+    
+#     retained_tokens = total_tokens * retained_ratio
+#     num_chunks = np.ceil(total_tokens / chunk_size)
+#     active_entries = retained_tokens / num_chunks
+
+#     # full baseline (causal dense for whole sequence)
+#     full_active_entries = causal_mask_active(total_tokens)
+#     if full_active_entries <= 0:
+#         return 0.0, 0.0
+#     full_peak_points = np.array([prompt_len + response_len])
+
+#     global_active_entries, global_peak_points = global_mask_stats(
+#         prompt_len, response_len, chunk_size, kv_sparsity
+#     )
+
+#     global_footprint = global_active_entries / full_active_entries
+
+#     kv_footprint = (
+#         active_entries * head_sparsity + global_footprint * ( 1 - head_sparsity)
+#         ) / full_peak_points.max()
+#     kv_peak = retained_tokens / total_tokens
+#     return kv_footprint, kv_peak
+
+
+@functools.lru_cache(maxsize=1000)
+def get_kv_footprint_xattn(
+    prompt_len: int,
+    response_len: int,
+    chunk_size: int = 16384, 
+    block_size: int = 64, 
+    threshold: float = 0.9,
+    head_sparsity: float = 0.5,
+    kv_sparsity: float = 0.2,
+) -> Tuple[float, float]:
+    # empirical_points = {
+    #     4_000: 0.5538,
+    #     8_000: 0.4355,
+    #     16_000: 0.2891,
+    #     32_000: 0.2793,
+    #     64_000: 0.1132,
+    #     128_000: 0.0732,
+    # }
+    empirical_points = {
+        4_000: 0.5538,
+        8_000: 0.4355,
+        16_000: 0.2891,
+        32_000: 0.2793,
+        64_000: 0.1132,
+        128_000: 0.0732,
+    }
+    lengths = np.array(list(empirical_points.keys()), dtype=np.float64)
+    sparsities = np.array(list(empirical_points.values()), dtype=np.float64)
+    log_L = np.log(lengths)
+    log_S = np.log(sparsities)
+    slope, intercept = np.polyfit(log_L, log_S, deg=1)
+    a = float(np.exp(intercept))
+    b = float(slope)
+
+    total_tokens = int(prompt_len + response_len)
+    retained_ratio = a * (prompt_len ** b)
+    retained_ratio = float(np.clip(retained_ratio, 0.01, 0.9))
+
+    prefill_boundaries = list(np.arange(0, prompt_len, chunk_size)) + [prompt_len]
+
+    peak_points = []
+
+    active_entries = causal_mask_active(prompt_len * retained_ratio)
+    for a, b in zip(prefill_boundaries[:-1], prefill_boundaries[1:]):
+        active_entries += causal_mask_active(b - a)
+
+    for a in range(prompt_len, prompt_len + response_len):
+        active_entries += 1 + prompt_len
+    peak_points.append(1 + response_len)
+    print("XAttention active_entries:", active_entries)
+    
+    full_active_entries = causal_mask_active(total_tokens)
+    if full_active_entries <= 0:
+        return 0.0, 0.0
+
+    kv_footprint = active_entries / full_active_entries
+    kv_peak = (active_entries + response_len) / total_tokens
+    print("XAttention kv_footprint:", kv_footprint)
+    
+    full_active_entries, full_peak_points = (
+        causal_mask_active(prompt_len + response_len),
+        np.array([prompt_len + response_len]),
+    )
+    
+    global_active_entries, global_peak_points = global_mask_stats(
+        prompt_len, response_len, chunk_size, kv_sparsity
+    )
+
+    global_footprint = global_active_entries / full_active_entries
+
+    kv_footprint = min(1.0, kv_footprint * head_sparsity + global_footprint * (
+        1 - head_sparsity
+    ))
+    kv_peak = (
+        head_sparsity * kv_footprint + (1 - head_sparsity) * global_peak_points
+    ).max() / full_peak_points.max()
+
+
+    return kv_footprint, kv_peak
+
+
+def calculate_kv_statistics_xattn(
+    prompt_lens,
+    response_lens,
+    chunk_size: int = 16384,
+    block_size: int = 64,
+    threshold: float = 0.9,
+) -> Tuple[float, float]:
+    kv_footprint = []
+    kv_peak = []
+    for prompt_len, response_len in zip(prompt_lens, response_lens):
+        a, b = get_kv_footprint_xattn(
+            prompt_len, response_len, chunk_size, block_size, threshold
+        )
+        kv_footprint.append(a)
+        kv_peak.append(b)
     return np.mean(kv_footprint), np.mean(kv_peak)
