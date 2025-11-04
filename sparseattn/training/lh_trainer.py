@@ -679,11 +679,17 @@ class Trainer(HFTrainer):
             optimizer_2_group = []  # params, decay
             optimizer_3_group = []  # mask params, decay
             optimizer_4_group = []  # reg params, decay
+            optimizer_5_group = []  # mask params, decay
 
             for n, p in opt_model.named_parameters():
                 if not p.requires_grad:
                     continue
-                if "log_alpha" in n:
+                if ".mask_allocator." in n or "mask_allocator" in n:
+                    if self.freeze_mask_parameters:
+                        p.requires_grad = False
+                    else:
+                        optimizer_5_group.append(p)
+                elif "log_alpha" in n:
                     if self.freeze_mask_parameters:
                         p.requires_grad = False
                     else:
@@ -734,6 +740,13 @@ class Trainer(HFTrainer):
                         "weight_decay": self.args.weight_decay,
                         "lr": self.reg_learning_rate,
                         "maximize": True,
+                    }
+                )
+                optimizer_grouped_parameters.append(
+                    {
+                        "params": optimizer_5_group,
+                        "weight_decay": self.args.weight_decay,
+                        "lr": self.mask_learning_rate,
                     }
                 )
 

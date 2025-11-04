@@ -31,6 +31,7 @@ import json
 
 from csv import reader
 
+from fla.models.nsa import AutoModelForCausalLM as NSAAutoModelForCausalLM
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,14 @@ def main():
 
     if script_args.model_name_or_path:
         # Determine model type and load appropriate model
-        if "qwen" in script_args.model_name_or_path.lower():
+        if training_args.attention_type is not None and "nsa" in training_args.attention_type :
+            model = NSAAutoModelForCausalLM.from_pretrained(
+                script_args.model_name_or_path,
+                cache_dir=script_args.cache_dir,
+                revision=script_args.model_revision,
+                use_auth_token=True if script_args.use_auth_token else None,
+            )
+        elif "qwen" in script_args.model_name_or_path.lower():
             model = PawQwen3ForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
                 from_tf=bool(".ckpt" in script_args.model_name_or_path),
@@ -214,14 +222,17 @@ def main():
             model = PawLlamaForCausalLM(config)
         elif "phi" in script_args.model_name_or_path.lower():
             model = PawPhi3ForCausalLM(config)
+        elif "nsa" in script_args.model_name_or_path.lower():
+            # NSA: 目前仅支持从预训练权重加载
+            raise ValueError("NSA 模型必须从预训练权重加载，请提供 --model_name_or_path 指向 NSA 权重。")
         else:
             raise ValueError(
                 f"Model name {script_args.model_name_or_path} does not contain. "
                 "Please provide a valid model name."
             )
 
-    # Last time with the Edge Pruning classes, we needed to reset the log alphas if loading from an HF checkpoint
-    model.reset_masks()
+    if hasattr(model, "reset_masks"):
+        model.reset_masks()
 
     if training_args.stripe_init_width_1 is not None:
         # We should initialize with a striped pattern
@@ -236,18 +247,24 @@ def main():
                 "Stripe initialization without freezing mask parameters is not recommended"
             )
 
-        model.reset_masks_with_stripe_pattern(
-            training_args.stripe_init_width_1,
-            training_args.stripe_init_width_2,
-            start_with_keep=training_args.stripe_init_start_with_keep,
-        )
+        if hasattr(model, "reset_masks_with_stripe_pattern"):
+            model.reset_masks_with_stripe_pattern(
+                training_args.stripe_init_width_1,
+                training_args.stripe_init_width_2,
+                start_with_keep=training_args.stripe_init_start_with_keep,
+            )
+        else:
+            logger.warning("当前模型不支持条纹掩码初始化，已跳过。")
     elif training_args.load_masks_from is not None:
         logger.info(f"Loading masks from {training_args.load_masks_from}")
-        load_masks_from_tsv_file(
-            model,
-            training_args.load_masks_from,
-            sparsity=training_args.load_masks_sparsity,
-        )
+        if hasattr(model, "load_masks"):
+            load_masks_from_tsv_file(
+                model,
+                training_args.load_masks_from,
+                sparsity=training_args.load_masks_sparsity,
+            )
+        else:
+            logger.warning("当前模型不支持加载掩码，已跳过。")
 
     if (
         script_args.tokenizer_name is not None
@@ -263,8 +280,11 @@ def main():
     streaming.base.util.clean_stale_shared_memory()
 
     if script_args.token_scaled_loss:
-        model.token_scaled_loss = True
-        training_args.token_scaled_loss = True
+        if hasattr(model, "token_scaled_loss"):
+            model.token_scaled_loss = True
+            training_args.token_scaled_loss = True
+        else:
+            logger.warning("当前模型不支持 token_scaled_loss，已忽略该选项。")
 
     # load_datasets
     if training_args.do_train:

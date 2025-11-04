@@ -57,8 +57,9 @@ from block_sparse_attn import block_streaming_attn_func
 
 from dataclasses import dataclass
 
-from .distributed_attention import DistributedAttention
-from .attention_mask import (
+from sparseattn.src.Xattention import Xattention_prefill
+
+from ..attention_mask import (
     deterministic_z_from_log_alpha,
     sample_z_from_log_alpha,
     cdf_stretched_concrete,
@@ -70,9 +71,6 @@ logger = logging.get_logger(__name__)
 class PawLlamaConfig(LlamaConfig):
     def __init__(self, *args, **kwargs):
         self.local_window_size = kwargs.pop("local_window_size", 1024)
-        self.disable_linear_regularization_term = kwargs.pop(
-            "disable_linear_regularization_term", False
-        )
         self.suggested_sparsity = kwargs.pop("suggested_sparsity", None)
 
         # Streaming
@@ -255,175 +253,6 @@ class LlamaRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         return rmsnorm_func(hidden_states, self.weight, self.variance_epsilon)
-
-
-class FlashRotaryEmbedding(torch.nn.Module):
-    """
-    The rotary position embeddings from RoFormer_ (Su et. al).
-    A crucial insight from the method is that the query and keys are
-    transformed by rotation matrices which depend on the relative positions.
-
-    Other implementations are available in the Rotary Transformer repo_ and in
-    GPT-NeoX_, GPT-NeoX was an inspiration
-
-    .. _RoFormer: https://arxiv.org/abs/2104.09864
-    .. _repo: https://github.com/ZhuiyiTechnology/roformer
-    .. _GPT-NeoX: https://github.com/EleutherAI/gpt-neox
-
-    If scale_base is not None, this implements XPos (Sun et al., https://arxiv.org/abs/2212.10554).
-    A recommended value for scale_base is 512: https://github.com/HazyResearch/flash-attention/issues/96
-    Reference: https://github.com/sunyt32/torchscale/blob/main/torchscale/component/xpos_relative_position.py
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        base=10000.0,
-        interleaved=False,
-        scale_base=None,
-        scaling_factor=1.0,
-        pos_idx_in_fp32=True,
-        device=None,
-    ):
-        """
-        interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead
-            of 1st half and 2nd half (GPT-NeoX style).
-        pos_idx_in_fp32: if True, the position indices [0.0, ..., seqlen - 1] are in fp32,
-            otherwise they might be in lower precision.
-            This option was added because previously (before 2023-07-02), when we construct
-            the position indices, we use the dtype of self.inv_freq. In most cases this would
-            be fp32, but if the model is trained in pure bf16 (not mixed precision), then
-            self.inv_freq would be bf16, and the position indices are also in bf16.
-            Because of the limited precision of bf16 (e.g. 1995.0 is rounded to 2000.0), the
-            embeddings for some positions will coincide.
-            To maintain compatibility with models previously trained in pure bf16,
-            we add this option.
-        scaling_factor: RotaryEmbedding extended with linear scaling.
-        """
-        super().__init__()
-        self.dim = dim
-        self.base = float(base)
-        self.pos_idx_in_fp32 = pos_idx_in_fp32
-        # Generate and save the inverse frequency buffer (non trainable)
-        inv_freq = self._compute_inv_freq(device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.interleaved = interleaved
-        self.scale_base = scale_base
-        self.scaling_factor = scaling_factor
-        scale = (
-            (torch.arange(0, dim, 2, device=device, dtype=torch.float32) + 0.4 * dim)
-            / (1.4 * dim)
-            if scale_base is not None
-            else None
-        )
-        self.register_buffer("scale", scale)
-
-        self._seq_len_cached = 0
-        self._cos_cached = None
-        self._sin_cached = None
-        self._cos_k_cached = None
-        self._sin_k_cached = None
-
-    def _compute_inv_freq(self, device=None):
-        return 1 / (
-            self.base
-            ** (
-                torch.arange(0, self.dim, 2, device=device, dtype=torch.float32)
-                / self.dim
-            )
-        )
-
-    def _update_cos_sin_cache(self, seqlen, device=None, dtype=None):
-        # Reset the tables if the sequence length has changed,
-        # if we're on a new device (possibly due to tracing for instance),
-        # or if we're switching from inference mode to training
-        if (
-            seqlen > self._seq_len_cached
-            or self._cos_cached.device != device
-            or self._cos_cached.dtype != dtype
-            or (self.training and self._cos_cached.is_inference())
-        ):
-            self._seq_len_cached = seqlen
-            # We want fp32 here, not self.inv_freq.dtype, since the model could be loaded in bf16
-            # And the output of arange can be quite large, so bf16 would lose a lot of precision.
-            # However, for compatibility reason, we add an option to use the dtype of self.inv_freq.
-            if self.pos_idx_in_fp32:
-                t = torch.arange(seqlen, device=device, dtype=torch.float32)
-                t /= self.scaling_factor
-                # We want fp32 here as well since inv_freq will be multiplied with t, and the output
-                # will be large. Having it in bf16 will lose a lot of precision and cause the
-                # cos & sin output to change significantly.
-                # We want to recompute self.inv_freq if it was not loaded in fp32
-                if self.inv_freq.dtype != torch.float32:
-                    inv_freq = self.inv_freq.to(torch.float32)
-                else:
-                    inv_freq = self.inv_freq
-            else:
-                t = torch.arange(seqlen, device=device, dtype=self.inv_freq.dtype)
-                t /= self.scaling_factor
-                inv_freq = self.inv_freq
-            # Don't do einsum, it converts fp32 to fp16 under AMP
-            # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-            freqs = torch.outer(t, inv_freq)
-            if self.scale is None:
-                self._cos_cached = torch.cos(freqs).to(dtype)
-                self._sin_cached = torch.sin(freqs).to(dtype)
-            else:
-                power = (
-                    torch.arange(
-                        seqlen, dtype=self.scale.dtype, device=self.scale.device
-                    )
-                    - seqlen // 2
-                ) / self.scale_base
-                scale = self.scale.to(device=power.device) ** power.unsqueeze(-1)
-                # We want the multiplication by scale to happen in fp32
-                self._cos_cached = (torch.cos(freqs) * scale).to(dtype)
-                self._sin_cached = (torch.sin(freqs) * scale).to(dtype)
-                self._cos_k_cached = (torch.cos(freqs) / scale).to(dtype)
-                self._sin_k_cached = (torch.sin(freqs) / scale).to(dtype)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        seqlen_offset: int = 0,
-        unpadded_lengths: Optional[Tuple[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        q: (batch, seqlen, nheads, headdim)
-        k: (batch, seqlen, nheads, headdim)
-        seqlen_offset: can be used in generation where the qkv being passed in is only the last
-        token in the batch.
-        """
-        if unpadded_lengths is not None:
-            cu_seqlens, max_seqlen = unpadded_lengths
-        else:
-            cu_seqlens, max_seqlen = None, q.shape[1]
-        self._update_cos_sin_cache(
-            max_seqlen + seqlen_offset, device=q.device, dtype=q.dtype
-        )
-
-        if self.scale is None:
-            return apply_rotary_emb_func(
-                q,
-                self._cos_cached[seqlen_offset:],
-                self._sin_cached[seqlen_offset:],
-                self.interleaved,
-                True,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            ), apply_rotary_emb_func(
-                k,
-                self._cos_cached[seqlen_offset:],
-                self._sin_cached[seqlen_offset:],
-                self.interleaved,
-                True,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
-        else:
-            assert False
-
 
 class LlamaRotaryEmbedding(nn.Module):
     def __init__(
@@ -668,7 +497,6 @@ class LlamaAttention(nn.Module):
             hard=getattr(config, "mask_hard_sample", False),
         )
 
-        self.distributed_attn_func = DistributedAttention(self.interpolated_attention)
 
         self._dtype = self.q_proj.weight.dtype
         self.attn_mask_log_alphas = nn.Parameter(
@@ -1200,21 +1028,12 @@ class LlamaAttention(nn.Module):
                     q = q.unsqueeze(0)
                     k = k.unsqueeze(0)
                     v = v.unsqueeze(0)
-                # cw_attn_output = self.xattn_flash_attn_func(
-                #     q,
-                #     k,
-                #     v,
-                #     self.head_indices,
-                #     self.xattn_params,
-                #     self.granularity,
-                # )
                 k = k.repeat_interleave(self.num_key_value_groups, dim=2)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=2)
                 q, k, v = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)  # B,H,T,D
                 stride = self.xattn_params["stride"]
                 threshold = self.xattn_params["threshold"]
                 norm = self.xattn_params["norm"]
-                from sparseattn.src.Xattention import Xattention_prefill
                 cw_attn_output = Xattention_prefill(
                     q,
                     k,
@@ -1258,25 +1077,6 @@ class LlamaAttention(nn.Module):
         effective_attn_output = attn_output * z.unsqueeze(-1) + cw_attn_output * (
             1 - z
         ).unsqueeze(-1)
-        
-        # def _expand_z_to_attn(z, template_tensor):
-        #     if template_tensor.dim() == 4:
-        #         B, T, H, D = template_tensor.shape
-        #         if z.dim() == 1:
-        #             return z.view(1, 1, H, 1).expand(B, T, H, D)
-        #         elif z.dim() == 2:
-        #             return z.unsqueeze(1).unsqueeze(-1).expand(B, T, H, D)
-        #     elif template_tensor.dim() == 3:
-        #         total, H, D = template_tensor.shape
-        #         if z.dim() == 1:
-        #             return z.view(1, H, 1).expand(total, H, D)
-        #         elif z.dim() == 2:
-        #             return z.unsqueeze(-1).expand(total, H, D)
-        #     return z
-
-        # z_exp = _expand_z_to_attn(z, attn_output)
-        # effective_attn_output = attn_output * z_exp + cw_attn_output * (1 - z_exp)
-
         return effective_attn_output
 
     def forward(
@@ -1383,28 +1183,8 @@ class LlamaAttention(nn.Module):
                 z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(B, -1)
                 z = z_batch_heads
 
-
-
-        if (
-            seq_parallel_group is not None
-            and dist.is_initialized()
-            and dist.get_world_size(seq_parallel_group) > 1
-        ):
-            attention_func = self.distributed_attn_func
-            kwargs = {
-                "group": seq_parallel_group,
-                "gather_idx": (0 if unpadded_lengths is not None else 1),
-            }
-            if not self.config.enable_ada_sparsity:
-                z = torch.split(
-                    z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
-                )[dist.get_rank(seq_parallel_group)]
-            else:
-                z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
-                z = z_splits[dist.get_rank(seq_parallel_group)]
-        else:
-            attention_func = self.interpolated_attention
-            kwargs = {}
+        attention_func = self.interpolated_attention
+        kwargs = {}
 
         attn_output = attention_func(q, kv, k, v, unpadded_lengths, z, **kwargs)
         if k.dim() == 3:
@@ -1413,9 +1193,7 @@ class LlamaAttention(nn.Module):
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))
 
         attn_weights = None
-        if z.sum().item() > self.num_heads:
-            breakpoint()
-        return z.sum(), attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_value
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -1484,7 +1262,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        z_sum, hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1503,7 +1281,6 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         outputs = (
-            z_sum,
             hidden_states,
         )
 
@@ -1593,13 +1370,6 @@ class LlamaModel(LlamaPreTrainedModel):
         self.total_num_kv_heads = config.num_key_value_heads * config.num_hidden_layers
 
         self._dtype = self.norm.weight.dtype
-        if disable_linear_regularization_term:
-            self.sparsity_lambda_1 = torch.tensor([0.0], dtype=self._dtype)
-        else:
-            self.sparsity_lambda_1 = nn.Parameter(
-                torch.tensor([0.0], dtype=self._dtype)
-            )
-        self.sparsity_lambda_2 = nn.Parameter(torch.tensor([0.0], dtype=self._dtype))
 
         self.threshold_for_deterministic = None
         if config.suggested_sparsity is not None:
@@ -1733,11 +1503,7 @@ class LlamaModel(LlamaPreTrainedModel):
         target_sparsity: Optional[float] = None,
         erank_analysis_path: Optional[str] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        if not self.training:
-            compute_sparsity = False
-        else:
-            compute_sparsity = True
-        # compute_sparsity = True
+        
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1771,20 +1537,12 @@ class LlamaModel(LlamaPreTrainedModel):
 
         hidden_states = inputs_embeds
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
 
-        z_sum = 0 if compute_sparsity else None
-        layer_z_sums = []
 
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
@@ -1794,41 +1552,25 @@ class LlamaModel(LlamaPreTrainedModel):
                 past_key_values[idx] if past_key_values is not None else None
             )
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    decoder_layer,
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    None,
-                    unpadded_lengths,
-                    output_attentions,
-                    False,
-                    seq_parallel_group,
-                    use_reentrant=False,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    unpadded_lengths=unpadded_lengths,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    seq_parallel_group=seq_parallel_group,
-                )
+            
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                unpadded_lengths=unpadded_lengths,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                seq_parallel_group=seq_parallel_group,
+            )
 
-            z_layer_sum, hidden_states = layer_outputs[0], layer_outputs[1]
-            if compute_sparsity:
-                z_sum = z_sum + z_layer_sum
-            layer_z_sums.append(z_layer_sum)
+            hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache += (layer_outputs[3 if output_attentions else 2],)
+                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
 
             if output_attentions:
-                all_self_attns += (layer_outputs[2],)
+                all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -1837,231 +1579,12 @@ class LlamaModel(LlamaPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
-        if compute_sparsity:
-            if (
-                seq_parallel_group is not None
-                and dist.is_initialized()
-                and dist.get_world_size(seq_parallel_group) > 1
-            ):
-                # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
-                z_sums = [
-                    torch.zeros_like(z_sum)
-                    for _ in range(dist.get_world_size(seq_parallel_group))
-                ]
-                dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
-                z_sum = sum(z_sums)
-
-                gathered_layer_z_sums = []
-                for z_l in layer_z_sums:
-                    tmp = [
-                        torch.zeros_like(z_l)
-                        for _ in range(dist.get_world_size(seq_parallel_group))
-                    ]
-                    dist.all_gather(tmp, z_l, group=seq_parallel_group)
-                    gathered_layer_z_sums.append(sum(tmp))
-                layer_z_sums = gathered_layer_z_sums
-
-            model_sparsity = 1 - (z_sum / self.total_num_heads)
-        else:
-            model_sparsity = None
-            z_loss = None
-        # print("Model sparsity:", model_sparsity.item() if model_sparsity is not None else None)
-        if compute_sparsity:
-            layerwise_model_sparsity = None
-            layerwise_target = None
-            layerwise_loss = None
-            if len(layer_z_sums) > 0:
-                per_layer_heads = self.config.num_attention_heads
-                layerwise_model_sparsity = (
-                    1.0 - torch.stack(layer_z_sums) / per_layer_heads
-                )  # (num_layers,)
-
-            if target_sparsity is None:
-                z_loss = None
-            else:
-                z_loss = (
-                    self.sparsity_lambda_1.reshape([])
-                    * (model_sparsity - target_sparsity)
-                    + self.sparsity_lambda_2.reshape([])
-                    * (model_sparsity - target_sparsity) ** 2
-                )
-        else:
-            layerwise_model_sparsity = None
-            layerwise_target = None
-            layerwise_loss = None
-        if (
-            target_sparsity is not None
-            and self.config.enable_layerwise_sparsity
-            and layerwise_model_sparsity is not None
-            and compute_sparsity
-        ):
-            L = layerwise_model_sparsity.numel()
-            device = layerwise_model_sparsity.device
-
-            # new
-            path = erank_analysis_path or getattr(
-                self.config, "erank_analysis_path", None
-            )
-            if not path.endswith(".pt"):
-                idxs = torch.arange(L, device=device, dtype=torch.float32)
-                denom = max(L - 1, 1)
-                x = torch.sin(torch.pi * (idxs / denom))
-                x = x.pow(float(self.config.layerwise_sparsity_power))
-
-                min_r = float(self.config.layerwise_sparsity_min_ratio)
-                max_r = float(self.config.layerwise_sparsity_max_ratio)
-                sched = getattr(
-                    self.config, "layerwise_sparsity_schedule", "low-high-low"
-                )
-                if sched == "high-low-high":
-                    ratios = max_r - (max_r - min_r) * x
-                else:
-                    ratios = min_r + (max_r - min_r) * x
-
-                layerwise_target = torch.clamp(
-                    ratios * float(target_sparsity), min=0.0, max=1.0
-                )
-            else:
-                avg_erank = self._get_avg_erank(path)  # [L, H] on CPU
-                E = avg_erank.mean(dim=1).to(device)  # [L] 每层平均有效秩
-
-                assert E.numel() == L, (
-                    f"Mismatch: got {E.numel()} layers from erank but model has {L}"
-                )
-
-                E_norm = (E - E.min()) / (E.max() - E.min() + 1e-8)
-                inv_E = (1.0 / (E_norm + 1e-3)) ** 0.5
-                w = inv_E
-
-                L = layerwise_model_sparsity.numel()
-                layerwise_target = (w / w.sum()) * (target_sparsity * L)
-                layerwise_target = torch.clamp(layerwise_target, 0.0, 1.0)
-                s = layerwise_target.sum()
-                if s > 0:
-                    layerwise_target = layerwise_target / s * (target_sparsity * L)
-
-            diffs = layerwise_model_sparsity - layerwise_target
-
-            def is_main_process():
-                if not dist.is_available() or not dist.is_initialized():
-                    return True
-                return dist.get_rank() == 0
-
-            # if is_main_process():
-            #     print("============debug layerwise sparsity loss computation============")
-            #     print("debug layerwise_model_sparsity:", layerwise_model_sparsity)
-            #     print("debug layerwise_target:", layerwise_target)
-            #     print("debug diffs:", diffs)
-            #     print("============debug layerwise sparsity loss computation============")
-
-            per_layer_loss = self.sparsity_lambda_1.reshape(
-                []
-            ) * diffs + self.sparsity_lambda_2.reshape([]) * (diffs**2)
-            layerwise_loss = (
-                float(self.config.layerwise_sparsity_weight) * per_layer_loss.mean()
-            )
-
-            # z_loss = layerwise_loss if z_loss is None else (z_loss + layerwise_loss)
-            z_loss = layerwise_loss
-
-        # Diagnostics: compute expected sparsity (no sampling) and stats over masks
-        with torch.no_grad():
-            try:
-                # Collect all log_alphas from layers
-                log_alphas = []
-                per_layer_expected = []
-                total_heads = 0
-                for layer in self.layers:
-                    la = layer.self_attn.attn_mask_log_alphas
-                    # Probability head is active (non-zero) = 1 - CDF(0)
-                    p_active_kv = 1 - cdf_stretched_concrete(0, la)
-                    # Expand kv heads to query heads
-                    p_active = (
-                        p_active_kv.unsqueeze(-1)
-                        .expand(-1, layer.self_attn.num_key_value_groups)
-                        .reshape(-1)
-                    )
-                    per_layer_expected.append(p_active)
-                    total_heads += p_active.numel()
-
-                if len(per_layer_expected) > 0:
-                    expected_z_all = torch.cat(per_layer_expected)
-                    expected_z_mean = expected_z_all.mean()
-                    expected_z_std = expected_z_all.float().std()
-                    expected_model_sparsity = 1 - expected_z_mean
-                    la_all = torch.cat([t.reshape(-1) for t in log_alphas])
-                    log_alpha_mean = la_all.mean()
-                    log_alpha_std = la_all.float().std()
-                else:
-                    expected_model_sparsity = torch.tensor(
-                        float("nan"), device=hidden_states.device
-                    )
-                    expected_z_mean = torch.tensor(
-                        float("nan"), device=hidden_states.device
-                    )
-                    expected_z_std = torch.tensor(
-                        float("nan"), device=hidden_states.device
-                    )
-                    log_alpha_mean = torch.tensor(
-                        float("nan"), device=hidden_states.device
-                    )
-                    log_alpha_std = torch.tensor(
-                        float("nan"), device=hidden_states.device
-                    )
-            except Exception:
-                # Be resilient to any unexpected shape/device issues
-                expected_model_sparsity = torch.tensor(
-                    float("nan"), device=hidden_states.device
-                )
-                expected_z_mean = torch.tensor(
-                    float("nan"), device=hidden_states.device
-                )
-                expected_z_std = torch.tensor(float("nan"), device=hidden_states.device)
-                log_alpha_mean = torch.tensor(float("nan"), device=hidden_states.device)
-                log_alpha_std = torch.tensor(float("nan"), device=hidden_states.device)
-
-        if not return_dict:
-            return tuple(
-                v
-                for v in [
-                    hidden_states,
-                    next_cache,
-                    all_hidden_states,
-                    all_self_attns,
-                    model_sparsity,
-                    target_sparsity,
-                    z_loss,
-                    expected_model_sparsity,
-                    self.sparsity_lambda_1.reshape([]),
-                    self.sparsity_lambda_2.reshape([]),
-                    expected_z_mean,
-                    expected_z_std,
-                    log_alpha_mean,
-                    log_alpha_std,
-                    layerwise_model_sparsity,
-                    layerwise_target,
-                    layerwise_loss,
-                ]
-                if v is not None
-            )
+        
         return BaseModelOutputWithPastAndSparsity(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-            model_sparsity=model_sparsity,
-            target_sparsity=target_sparsity,
-            sparsity_loss=z_loss,
-            expected_model_sparsity=expected_model_sparsity,
-            lambda1=self.sparsity_lambda_1.reshape([]),
-            lambda2=self.sparsity_lambda_2.reshape([]),
-            expected_z_mean=expected_z_mean,
-            expected_z_std=expected_z_std,
-            log_alpha_mean=log_alpha_mean,
-            log_alpha_std=log_alpha_std,
-            layerwise_model_sparsity=layerwise_model_sparsity,
-            layerwise_target_sparsity=layerwise_target,
-            layerwise_sparsity_loss=layerwise_loss,
         )
 
 
@@ -2323,53 +1846,8 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         if seq_lengths is None and unpadded_lengths is not None:
             hidden_states = pad_input(hidden_states, unpad_indices, bsz, max_seqlen)
 
-        if labels is not None or shifted_labels is not None:
-            if shifted_labels is not None:
-                labels = shifted_labels.reshape(-1)
-                hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
-            else:
-                labels = labels[..., 1:].reshape(-1)
-                hidden_states = hidden_states[..., :-1, :].reshape(
-                    -1, hidden_states.size(-1)
-                )
-
-            if self.logit_block_size > 0:
-                num_valid_labels = (labels != -100).sum()
-                hidden_states = torch.split(hidden_states, self.logit_block_size, dim=0)
-                labels = torch.split(labels, self.logit_block_size, dim=0)
-
-                if getattr(self, "token_scaled_loss", False):
-                    loss = sum(
-                        torch.utils.checkpoint.checkpoint(
-                            self.compute_loss,
-                            hidden_state_block,
-                            label_block,
-                            use_reentrant=False,
-                        )
-                        for hidden_state_block, label_block in zip(
-                            hidden_states, labels
-                        )
-                    )
-                else:
-                    loss = sum(
-                        ((label_block != -100).sum() / num_valid_labels)
-                        * torch.utils.checkpoint.checkpoint(
-                            self.compute_loss,
-                            hidden_state_block,
-                            label_block,
-                            use_reentrant=False,
-                        )
-                        for hidden_state_block, label_block in zip(
-                            hidden_states, labels
-                        )
-                    )
-            else:
-                loss = self.compute_loss(hidden_states, labels)
-
-            logits = None
-        else:
-            logits = self.lm_head(hidden_states)
-            loss = None
+        logits = self.lm_head(hidden_states[:, -1:, :])
+        loss = None
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -2382,19 +1860,6 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            model_sparsity=outputs.model_sparsity,
-            target_sparsity=outputs.target_sparsity,
-            sparsity_loss=outputs.sparsity_loss,
-            expected_model_sparsity=outputs.expected_model_sparsity,
-            lambda1=outputs.lambda1,
-            lambda2=outputs.lambda2,
-            expected_z_mean=outputs.expected_z_mean,
-            expected_z_std=outputs.expected_z_std,
-            log_alpha_mean=outputs.log_alpha_mean,
-            log_alpha_std=outputs.log_alpha_std,
-            layerwise_model_sparsity=outputs.layerwise_model_sparsity,
-            layerwise_target_sparsity=outputs.layerwise_target_sparsity,
-            layerwise_sparsity_loss=outputs.layerwise_sparsity_loss,
         )
 
     def prepare_inputs_for_generation(

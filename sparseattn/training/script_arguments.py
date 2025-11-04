@@ -184,6 +184,13 @@ class TrainingArguments(HfTrainingArguments):
     load_masks_sparsity: float = field(
         default=None, metadata={"help": "Sparsity to load masks with, if any."}
     )
+    
+    attention_type: str = field(
+        default="nsa",
+        metadata={
+            "help": "The type of toggling to use. Currently supports: `streaming` and `local`."
+        },
+    )
 
     ## Streaming
     toggle_type: str = field(
