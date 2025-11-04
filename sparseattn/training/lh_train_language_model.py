@@ -13,7 +13,7 @@ from transformers import (
     set_seed,
 )
 
-from block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
+from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
 import torch
 from transformers import LlamaForCausalLM, AutoTokenizer
 
@@ -179,12 +179,6 @@ def main():
     if script_args.model_name_or_path:
         # Determine model type and load appropriate model
         if training_args.attention_type is not None and "nsa" in training_args.attention_type :
-            # model = NSAAutoModelForCausalLM.from_pretrained(
-            #     script_args.model_name_or_path,
-            #     cache_dir=script_args.cache_dir,
-            #     revision=script_args.model_revision,
-            #     use_auth_token=True if script_args.use_auth_token else None,
-            # )
             model = LlamaForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
                 from_tf=bool(".ckpt" in script_args.model_name_or_path),
@@ -192,7 +186,28 @@ def main():
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
             )
-            pass
+            config = model.config
+            config._attn_implementation = "flash_attention_2"
+            config.compress_type = "linear"#"avgpool","weightedpool"
+            config.kernel_size = 32
+            config.kernel_stride = 16
+            config.block_size = 64
+            config.topk = 8
+            config.init_blocks = 1
+            config.local_blocks = 2
+            config.window_size = 500
+            
+            for i, layer in enumerate(model.model.layers):
+                original_attn = layer.self_attn
+
+                original_dtype = next(original_attn.parameters()).dtype
+                device = next(original_attn.parameters()).device
+
+                new_attn = LlamaNSA(config, layer_idx=original_attn.layer_idx)
+                new_attn.load_state_dict(original_attn.state_dict(), strict=False)
+                new_attn = new_attn.to(device).to(original_dtype)
+
+                layer.self_attn = new_attn
         elif "qwen" in script_args.model_name_or_path.lower():
             model = PawQwen3ForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
@@ -234,9 +249,6 @@ def main():
             model = PawLlamaForCausalLM(config)
         elif "phi" in script_args.model_name_or_path.lower():
             model = PawPhi3ForCausalLM(config)
-        elif "nsa" in script_args.model_name_or_path.lower():
-            # NSA: 目前仅支持从预训练权重加载
-            raise ValueError("NSA 模型必须从预训练权重加载，请提供 --model_name_or_path 指向 NSA 权重。")
         else:
             raise ValueError(
                 f"Model name {script_args.model_name_or_path} does not contain. "
@@ -266,7 +278,7 @@ def main():
                 start_with_keep=training_args.stripe_init_start_with_keep,
             )
         else:
-            logger.warning("当前模型不支持条纹掩码初始化，已跳过。")
+            logger.warning("skipping stripe initialization -- model does not support it")
     elif training_args.load_masks_from is not None:
         logger.info(f"Loading masks from {training_args.load_masks_from}")
         if hasattr(model, "load_masks"):
@@ -276,7 +288,7 @@ def main():
                 sparsity=training_args.load_masks_sparsity,
             )
         else:
-            logger.warning("当前模型不支持加载掩码，已跳过。")
+            logger.warning("skipping loading masks -- model does not support it")
 
     if (
         script_args.tokenizer_name is not None
@@ -296,7 +308,7 @@ def main():
             model.token_scaled_loss = True
             training_args.token_scaled_loss = True
         else:
-            logger.warning("当前模型不支持 token_scaled_loss，已忽略该选项。")
+            logger.warning("skipping token_scaled_loss -- model does not support it")
 
     # load_datasets
     if training_args.do_train:

@@ -430,20 +430,11 @@ class Trainer(HFTrainer):
 
         try:
             outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
+            breakpoint()
         except Exception as e:
-            error_str = "-" * 30
-            for k, v in inputs.items():
-                if isinstance(v, torch.Tensor):
-                    error_str += (
-                        f"\n{k}:\n{v.cpu().tolist()}\n    ({v.dtype}, {v.shape})\n"
-                    )
-            error_str += "-" * 30
-            print(error_str[:256], flush=True)
             raise e
 
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-        if outputs["loss"] is None:
-            breakpoint()
 
         if getattr(self.args, "token_scaled_loss", False):
             seq_parallel_world_size = (
@@ -473,186 +464,198 @@ class Trainer(HFTrainer):
                 )  # moving avg
             lm_loss = lm_loss / self.state.avg_num_valid_tokens_per_device
 
-        reg_loss = (
-            outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-1]
-        )
+        # reg_loss = (
+        #     outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-1]
+        # ) 
+        reg_loss = torch.tensor(0.0).to(lm_loss.device)  
         loss = lm_loss + reg_loss
 
-        if self.log_loss and self.accelerator.is_main_process:
-            model_sparsity = (
-                outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
-            )
-            # logger.info(
-            #     f"@ {self.state.global_step} | Loss: {loss:.4f} | LM Loss: {lm_loss:.4f} | "
-            #     f"Reg Loss: {reg_loss:.4f} | Target Sparsity: {target_sparsity:.4f} | "
-            #     f"Model Sparsity: {model_sparsity:.4f}"
-            # )
-            # Fetch diagnostics if present
-            exp_sparsity = (
-                outputs.get("expected_model_sparsity", None)
-                if isinstance(outputs, dict)
-                else None
-            )
-            lambda1 = (
-                outputs.get("lambda1", None) if isinstance(outputs, dict) else None
-            )
-            lambda2 = (
-                outputs.get("lambda2", None) if isinstance(outputs, dict) else None
-            )
-            ez_mean = (
-                outputs.get("expected_z_mean", None)
-                if isinstance(outputs, dict)
-                else None
-            )
-            ez_std = (
-                outputs.get("expected_z_std", None)
-                if isinstance(outputs, dict)
-                else None
-            )
-            la_mean = (
-                outputs.get("log_alpha_mean", None)
-                if isinstance(outputs, dict)
-                else None
-            )
-            la_std = (
-                outputs.get("log_alpha_std", None)
-                if isinstance(outputs, dict)
-                else None
-            )
+        # if self.log_loss and self.accelerator.is_main_process:
+        #     model_sparsity = (
+        #         outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
+        #     )
+        #     # logger.info(
+        #     #     f"@ {self.state.global_step} | Loss: {loss:.4f} | LM Loss: {lm_loss:.4f} | "
+        #     #     f"Reg Loss: {reg_loss:.4f} | Target Sparsity: {target_sparsity:.4f} | "
+        #     #     f"Model Sparsity: {model_sparsity:.4f}"
+        #     # )
+        #     # Fetch diagnostics if present
+        #     exp_sparsity = (
+        #         outputs.get("expected_model_sparsity", None)
+        #         if isinstance(outputs, dict)
+        #         else None
+        #     )
+        #     lambda1 = (
+        #         outputs.get("lambda1", None) if isinstance(outputs, dict) else None
+        #     )
+        #     lambda2 = (
+        #         outputs.get("lambda2", None) if isinstance(outputs, dict) else None
+        #     )
+        #     ez_mean = (
+        #         outputs.get("expected_z_mean", None)
+        #         if isinstance(outputs, dict)
+        #         else None
+        #     )
+        #     ez_std = (
+        #         outputs.get("expected_z_std", None)
+        #         if isinstance(outputs, dict)
+        #         else None
+        #     )
+        #     la_mean = (
+        #         outputs.get("log_alpha_mean", None)
+        #         if isinstance(outputs, dict)
+        #         else None
+        #     )
+        #     la_std = (
+        #         outputs.get("log_alpha_std", None)
+        #         if isinstance(outputs, dict)
+        #         else None
+        #     )
 
-            extra = []
-            if exp_sparsity is not None:
-                extra.append(f"ExpSparsity: {float(exp_sparsity):.4f}")
-            if lambda1 is not None and lambda2 is not None:
-                extra.append(
-                    f"Lambda1: {float(lambda1):.4f} Lambda2: {float(lambda2):.4f}"
-                )
-            if ez_mean is not None and ez_std is not None:
-                extra.append(f"E[z]: {float(ez_mean):.4f}±{float(ez_std):.4f}")
-            if la_mean is not None and la_std is not None:
-                extra.append(f"logα: {float(la_mean):.3f}±{float(la_std):.3f}")
+        #     extra = []
+        #     if exp_sparsity is not None:
+        #         extra.append(f"ExpSparsity: {float(exp_sparsity):.4f}")
+        #     if lambda1 is not None and lambda2 is not None:
+        #         extra.append(
+        #             f"Lambda1: {float(lambda1):.4f} Lambda2: {float(lambda2):.4f}"
+        #         )
+        #     if ez_mean is not None and ez_std is not None:
+        #         extra.append(f"E[z]: {float(ez_mean):.4f}±{float(ez_std):.4f}")
+        #     if la_mean is not None and la_std is not None:
+        #         extra.append(f"logα: {float(la_mean):.3f}±{float(la_std):.3f}")
 
-            logger.info(
-                f"@ {self.state.global_step} | Loss: {loss.item():.4f} | LM: {lm_loss.item():.4f} | Reg: {reg_loss.item():.4f} | "
-                f"Target: {target_sparsity:.4f} | Sparsity: {model_sparsity:.4f}"
-                + (" | " + " | ".join(extra) if len(extra) else "")
-            )
+        #     logger.info(
+        #         f"@ {self.state.global_step} | Loss: {loss.item():.4f} | LM: {lm_loss.item():.4f} | Reg: {reg_loss.item():.4f} | "
+        #         f"Target: {target_sparsity:.4f} | Sparsity: {model_sparsity:.4f}"
+        #         + (" | " + " | ".join(extra) if len(extra) else "")
+        #     )
 
-            if (
-                not return_output_and_metrics
-                and getattr(self.args, "log_train_sparsity_metrics", True)
-                and self.state.global_step > 0
-            ):
-                train_metrics = {
-                    "lm_loss": float(
-                        lm_loss.detach().item()
-                        if isinstance(lm_loss, torch.Tensor)
-                        else lm_loss
-                    ),
-                    "reg_loss": float(
-                        reg_loss.detach().item()
-                        if isinstance(reg_loss, torch.Tensor)
-                        else reg_loss
-                    ),
-                    "loss": float(
-                        loss.detach().item() if isinstance(loss, torch.Tensor) else loss
-                    ),
-                    "target_sparsity": float(target_sparsity),
-                    "model_sparsity": float(model_sparsity),
-                    "step": self.state.global_step,
-                }
-                if isinstance(outputs, dict):
-                    for k in [
-                        "expected_model_sparsity",
-                        "lambda1",
-                        "lambda2",
-                        "expected_z_mean",
-                        "expected_z_std",
-                        "log_alpha_mean",
-                        "log_alpha_std",
-                    ]:
-                        v = outputs.get(k, None)
-                        if v is not None:
-                            if isinstance(v, torch.Tensor):
-                                v = v.detach()
-                                if v.numel() == 1:
-                                    v = v.item()
-                                else:
-                                    v = float(v.mean().item())
-                            train_metrics[k] = v
-                if isinstance(outputs, dict):
-                    if (
-                        "layerwise_model_sparsity" in outputs
-                        and outputs["layerwise_model_sparsity"] is not None
-                    ):
-                        lms = outputs["layerwise_model_sparsity"]
-                        if isinstance(lms, torch.Tensor):
-                            lms = lms.detach().cpu().float()
-                            for i, s in enumerate(lms):
-                                train_metrics[f"layer_{i}/sparsity"] = float(s)
+        #     if (
+        #         not return_output_and_metrics
+        #         and getattr(self.args, "log_train_sparsity_metrics", True)
+        #         and self.state.global_step > 0
+        #     ):
+        #         train_metrics = {
+        #             "lm_loss": float(
+        #                 lm_loss.detach().item()
+        #                 if isinstance(lm_loss, torch.Tensor)
+        #                 else lm_loss
+        #             ),
+        #             "reg_loss": float(
+        #                 reg_loss.detach().item()
+        #                 if isinstance(reg_loss, torch.Tensor)
+        #                 else reg_loss
+        #             ),
+        #             "loss": float(
+        #                 loss.detach().item() if isinstance(loss, torch.Tensor) else loss
+        #             ),
+        #             "target_sparsity": float(target_sparsity),
+        #             "model_sparsity": float(model_sparsity),
+        #             "step": self.state.global_step,
+        #         }
+        #         if isinstance(outputs, dict):
+        #             for k in [
+        #                 "expected_model_sparsity",
+        #                 "lambda1",
+        #                 "lambda2",
+        #                 "expected_z_mean",
+        #                 "expected_z_std",
+        #                 "log_alpha_mean",
+        #                 "log_alpha_std",
+        #             ]:
+        #                 v = outputs.get(k, None)
+        #                 if v is not None:
+        #                     if isinstance(v, torch.Tensor):
+        #                         v = v.detach()
+        #                         if v.numel() == 1:
+        #                             v = v.item()
+        #                         else:
+        #                             v = float(v.mean().item())
+        #                     train_metrics[k] = v
+        #         if isinstance(outputs, dict):
+        #             if (
+        #                 "layerwise_model_sparsity" in outputs
+        #                 and outputs["layerwise_model_sparsity"] is not None
+        #             ):
+        #                 lms = outputs["layerwise_model_sparsity"]
+        #                 if isinstance(lms, torch.Tensor):
+        #                     lms = lms.detach().cpu().float()
+        #                     for i, s in enumerate(lms):
+        #                         train_metrics[f"layer_{i}/sparsity"] = float(s)
 
-                    if (
-                        "layerwise_target_sparsity" in outputs
-                        and outputs["layerwise_target_sparsity"] is not None
-                    ):
-                        lt = outputs["layerwise_target_sparsity"]
-                        if isinstance(lt, torch.Tensor):
-                            lt = lt.detach().cpu().float()
-                            for i, t in enumerate(lt):
-                                train_metrics[f"layer_{i}/target"] = float(t)
+        #             if (
+        #                 "layerwise_target_sparsity" in outputs
+        #                 and outputs["layerwise_target_sparsity"] is not None
+        #             ):
+        #                 lt = outputs["layerwise_target_sparsity"]
+        #                 if isinstance(lt, torch.Tensor):
+        #                     lt = lt.detach().cpu().float()
+        #                     for i, t in enumerate(lt):
+        #                         train_metrics[f"layer_{i}/target"] = float(t)
 
-                    if (
-                        "layerwise_model_sparsity" in outputs
-                        and "layerwise_target" in outputs
-                    ):
-                        lms = outputs["layerwise_model_sparsity"]
-                        lt = outputs["layerwise_target"]
-                        if lms is not None and lt is not None:
-                            diff = (lms - lt).detach().cpu().float()
-                            for i, d in enumerate(diff):
-                                train_metrics[f"layer_{i}/sparsity_diff"] = float(d)
-                self.log(train_metrics)
+        #             if (
+        #                 "layerwise_model_sparsity" in outputs
+        #                 and "layerwise_target" in outputs
+        #             ):
+        #                 lms = outputs["layerwise_model_sparsity"]
+        #                 lt = outputs["layerwise_target"]
+        #                 if lms is not None and lt is not None:
+        #                     diff = (lms - lt).detach().cpu().float()
+        #                     for i, d in enumerate(diff):
+        #                         train_metrics[f"layer_{i}/sparsity_diff"] = float(d)
+        #         self.log(train_metrics)
 
         if return_output_and_metrics:
-            # shifted_labels = inputs["labels"][:,1:].contiguous()
-            # valid_mask = (shifted_labels != -100)
-            # correct = (outputs.logits[:,:-1].argmax(-1) == shifted_labels).float()
-            # correct[~valid_mask] = 0.0
-            # acc = correct.sum(dim=-1) / valid_mask.float().sum(dim=-1)
-            model_sparsity_val = (
-                outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
-            )
+        #     # shifted_labels = inputs["labels"][:,1:].contiguous()
+        #     # valid_mask = (shifted_labels != -100)
+        #     # correct = (outputs.logits[:,:-1].argmax(-1) == shifted_labels).float()
+        #     # correct[~valid_mask] = 0.0
+        #     # acc = correct.sum(dim=-1) / valid_mask.float().sum(dim=-1)
+        #     model_sparsity_val = (
+        #         outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
+        #     )
 
+        #     metrics = {
+        #         "lm_loss": lm_loss.detach().item()
+        #         if isinstance(lm_loss, torch.Tensor)
+        #         else float(lm_loss),
+        #         "reg_loss": reg_loss.detach().item()
+        #         if isinstance(reg_loss, torch.Tensor)
+        #         else float(reg_loss),
+        #         "loss": loss.detach().item()
+        #         if isinstance(loss, torch.Tensor)
+        #         else float(loss),
+        #         "target_sparsity": float(target_sparsity),
+        #         "model_sparsity": float(model_sparsity_val),
+        #         "step": self.state.global_step,
+        #     }
+
+        #     # Carry diagnostics into metrics if available
+        #     if isinstance(outputs, dict):
+        #         for k in [
+        #             "expected_model_sparsity",
+        #             "lambda1",
+        #             "lambda2",
+        #             "expected_z_mean",
+        #             "expected_z_std",
+        #             "log_alpha_mean",
+        #             "log_alpha_std",
+        #             "",
+        #         ]:
+        #             if k in outputs and outputs[k] is not None:
+        #                 metrics[k] = outputs[k]
+        
             metrics = {
-                "lm_loss": lm_loss.detach().item()
-                if isinstance(lm_loss, torch.Tensor)
-                else float(lm_loss),
-                "reg_loss": reg_loss.detach().item()
-                if isinstance(reg_loss, torch.Tensor)
-                else float(reg_loss),
-                "loss": loss.detach().item()
-                if isinstance(loss, torch.Tensor)
-                else float(loss),
-                "target_sparsity": float(target_sparsity),
-                "model_sparsity": float(model_sparsity_val),
+                "lm_loss": float(
+                    lm_loss.detach().item()
+                    if isinstance(lm_loss, torch.Tensor)
+                    else lm_loss
+                ),
+                "loss": float(
+                    loss.detach().item() if isinstance(loss, torch.Tensor) else loss
+                ),
                 "step": self.state.global_step,
             }
-
-            # Carry diagnostics into metrics if available
-            if isinstance(outputs, dict):
-                for k in [
-                    "expected_model_sparsity",
-                    "lambda1",
-                    "lambda2",
-                    "expected_z_mean",
-                    "expected_z_std",
-                    "log_alpha_mean",
-                    "log_alpha_std",
-                    "",
-                ]:
-                    if k in outputs and outputs[k] is not None:
-                        metrics[k] = outputs[k]
-
             self.log(metrics)
 
             return (loss, outputs, metrics)
@@ -680,11 +683,15 @@ class Trainer(HFTrainer):
             optimizer_3_group = []  # mask params, decay
             optimizer_4_group = []  # reg params, decay
             optimizer_5_group = []  # mask params, decay
+            optimizer_nsa_group = []
 
             for n, p in opt_model.named_parameters():
                 if not p.requires_grad:
                     continue
-                if ".mask_allocator." in n or "mask_allocator" in n:
+                if "gate" in n or "compress_key" in n or "compress_value" in n:
+                    p.requires_grad = True
+                    optimizer_nsa_group.append(p)
+                elif ".mask_allocator." in n or "mask_allocator" in n:
                     if self.freeze_mask_parameters:
                         p.requires_grad = False
                     else:
@@ -749,7 +756,13 @@ class Trainer(HFTrainer):
                         "lr": self.mask_learning_rate,
                     }
                 )
-
+            optimizer_grouped_parameters.append(
+                {
+                    "params": optimizer_nsa_group,
+                    "weight_decay": self.args.weight_decay,
+                    "lr": 1e-4,
+                }
+            )
             optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(
                 self.args, opt_model
             )

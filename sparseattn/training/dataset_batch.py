@@ -38,6 +38,16 @@ class DataArguments:
         default=False,
         metadata={"help": "Use streaming dataset (no full in-memory load)"},
     )
+    task_type: str = field(
+        default="pretrain",
+        metadata={"help": "Training task type: 'pretrain' or 'sft'."},
+    )
+    use_packing: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable cross-sample packing. If False, use per-sample padding/trunc/drop strategy."
+        },
+    )
 
 
 class ParquetDataset(Dataset):
@@ -73,12 +83,16 @@ class ParquetDataset(Dataset):
 
         tokenized = self.tokenizer(
             text,
-            truncation=True,
+            truncation=(self.data_args.task_type == "pretrain"),
             add_special_tokens=True,
         )
         input_ids = tokenized["input_ids"]
 
-        if self.data_args.subsplit_length is not None and not self.data_args.single_seq:
+        if (
+            self.data_args.subsplit_length is not None
+            and not self.data_args.single_seq
+            and self.data_args.task_type != "sft"
+        ):
             chunks = []
             L = self.data_args.subsplit_length
             for i in range(0, len(input_ids), L):
@@ -113,12 +127,17 @@ class StreamingParquetIterable(IterableDataset):
             text = item.get("context") or item.get("text") or item.get("content")
             if text is None:
                 continue
-            tokenized = self.tokenizer(text, truncation=True, add_special_tokens=True)
+            tokenized = self.tokenizer(
+                text,
+                truncation=(self.data_args.task_type == "pretrain"),
+                add_special_tokens=True,
+            )
             input_ids = tokenized["input_ids"]
 
             if (
                 self.data_args.subsplit_length is not None
                 and not self.data_args.single_seq
+                and self.data_args.task_type != "sft"
             ):
                 L = self.data_args.subsplit_length
                 chunks = [
@@ -228,40 +247,83 @@ class PackingDataCollator:
             else:
                 all_input_ids.append(f["input_ids"])
 
-        # detect prepacked
-        prepacked = (
-            all(len(x) == self.max_seq_len for x in all_input_ids)
-            if all_input_ids
-            else False
-        )
+        if getattr(self.data_args, "use_packing", False):
+            # detect prepacked
+            prepacked = (
+                all(len(x) == self.max_seq_len for x in all_input_ids)
+                if all_input_ids
+                else False
+            )
 
-        if prepacked:
-            packed_input_ids = all_input_ids
-            packed_labels = []
-            for seq in packed_input_ids:
-                lab = seq.copy()
-                lab[0] = -100
-                packed_labels.append(lab)
-        else:
-            packed_input_ids, packed_labels = self._pack_sequences(all_input_ids)
+            if prepacked:
+                packed_input_ids = all_input_ids
+                packed_labels = []
+                for seq in packed_input_ids:
+                    lab = seq.copy()
+                    lab[0] = -100
+                    packed_labels.append(lab)
+            else:
+                packed_input_ids, packed_labels = self._pack_sequences(all_input_ids)
 
-        # pad to max_seq_len
-        batch_size = len(packed_input_ids)
+            # pad to max_seq_len
+            batch_size = len(packed_input_ids)
+            input_ids_tensor = torch.full(
+                (batch_size, self.max_seq_len),
+                self.tokenizer.pad_token_id,
+                dtype=torch.long,
+            )
+            labels_tensor = torch.full(
+                (batch_size, self.max_seq_len), -100, dtype=torch.long
+            )
+            attention_mask = torch.zeros((batch_size, self.max_seq_len), dtype=torch.long)
+
+            for i, (inp, lab) in enumerate(zip(packed_input_ids, packed_labels)):
+                L = len(inp)
+                input_ids_tensor[i, :L] = torch.tensor(inp, dtype=torch.long)
+                labels_tensor[i, :L] = torch.tensor(lab, dtype=torch.long)
+                attention_mask[i, :L] = 1
+
+            return {
+                "input_ids": input_ids_tensor,
+                "labels": labels_tensor,
+                "attention_mask": attention_mask,
+            }
+            
+        # No packing: apply per-sample truncation/drop strategy
+        kept_inputs = []
+        kept_labels = []
+
+        is_sft = getattr(self.data_args, "task_type", "pretrain") == "sft"
+        for seq in all_input_ids:
+            if len(seq) > self.max_seq_len:
+                if is_sft:
+                    continue
+                else:
+                    seq = seq[: self.max_seq_len]
+
+            labels = seq.copy()
+            if labels:
+                labels[0] = -100
+
+            kept_inputs.append(seq)
+            kept_labels.append(labels)
+
+        batch_size = len(kept_inputs)
+
         input_ids_tensor = torch.full(
             (batch_size, self.max_seq_len),
             self.tokenizer.pad_token_id,
             dtype=torch.long,
         )
-        labels_tensor = torch.full(
-            (batch_size, self.max_seq_len), -100, dtype=torch.long
-        )
+        labels_tensor = torch.full((batch_size, self.max_seq_len), -100, dtype=torch.long)
         attention_mask = torch.zeros((batch_size, self.max_seq_len), dtype=torch.long)
 
-        for i, (inp, lab) in enumerate(zip(packed_input_ids, packed_labels)):
+        for i, (inp, lab) in enumerate(zip(kept_inputs, kept_labels)):
             L = len(inp)
-            input_ids_tensor[i, :L] = torch.tensor(inp, dtype=torch.long)
-            labels_tensor[i, :L] = torch.tensor(lab, dtype=torch.long)
-            attention_mask[i, :L] = 1
+            if L > 0:
+                input_ids_tensor[i, :L] = torch.tensor(inp, dtype=torch.long)
+                labels_tensor[i, :L] = torch.tensor(lab, dtype=torch.long)
+                attention_mask[i, :L] = 1
 
         return {
             "input_ids": input_ids_tensor,
@@ -341,9 +403,15 @@ def build_dataset(
             text = item.get("context") or item.get("text") or item.get("content")
             if text is None:
                 continue
-            tokenized = tokenizer(text, truncation=True, add_special_tokens=True)
+            tokenized = tokenizer(
+                text, truncation=(data_args.task_type == "pretrain"), add_special_tokens=True
+            )
             input_ids = tokenized["input_ids"]
-            if data_args.subsplit_length and not data_args.single_seq:
+            if (
+                data_args.subsplit_length
+                and not data_args.single_seq
+                and data_args.task_type != "sft"
+            ):
                 L = data_args.subsplit_length
                 for i in range(0, len(input_ids), L):
                     chunk = input_ids[i : i + L]
