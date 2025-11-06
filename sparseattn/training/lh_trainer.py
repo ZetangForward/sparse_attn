@@ -431,19 +431,19 @@ class Trainer(HFTrainer):
         try:
             outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
         except Exception as e:
-            error_str = "-" * 30
-            for k, v in inputs.items():
-                if isinstance(v, torch.Tensor):
-                    error_str += (
-                        f"\n{k}:\n{v.cpu().tolist()}\n    ({v.dtype}, {v.shape})\n"
-                    )
-            error_str += "-" * 30
-            print(error_str[:256], flush=True)
-            raise e
+            attn_mask = inputs["attention_mask"]
+            valid_tokens = attn_mask.sum(dim=1)
+            print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+                f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
+            print(f"[Warning] Error occurred on this batch, skipping. Error: {repr(e)}")
+            print("-" * 80, flush=True)
+
+            zero_loss = torch.tensor(0.0, requires_grad=True, device=model.device)
+            if return_outputs:
+                return (zero_loss, None)
+            return zero_loss
 
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-        if outputs["loss"] is None:
-            breakpoint()
 
         if getattr(self.args, "token_scaled_loss", False):
             seq_parallel_world_size = (
@@ -521,16 +521,10 @@ class Trainer(HFTrainer):
             )
 
             extra = []
-            if exp_sparsity is not None:
-                extra.append(f"ExpSparsity: {float(exp_sparsity):.4f}")
             if lambda1 is not None and lambda2 is not None:
                 extra.append(
                     f"Lambda1: {float(lambda1):.4f} Lambda2: {float(lambda2):.4f}"
                 )
-            if ez_mean is not None and ez_std is not None:
-                extra.append(f"E[z]: {float(ez_mean):.4f}±{float(ez_std):.4f}")
-            if la_mean is not None and la_std is not None:
-                extra.append(f"logα: {float(la_mean):.3f}±{float(la_std):.3f}")
 
             logger.info(
                 f"@ {self.state.global_step} | Loss: {loss.item():.4f} | LM: {lm_loss.item():.4f} | Reg: {reg_loss.item():.4f} | "
@@ -563,13 +557,8 @@ class Trainer(HFTrainer):
                 }
                 if isinstance(outputs, dict):
                     for k in [
-                        "expected_model_sparsity",
                         "lambda1",
                         "lambda2",
-                        "expected_z_mean",
-                        "expected_z_std",
-                        "log_alpha_mean",
-                        "log_alpha_std",
                     ]:
                         v = outputs.get(k, None)
                         if v is not None:
@@ -641,14 +630,8 @@ class Trainer(HFTrainer):
             # Carry diagnostics into metrics if available
             if isinstance(outputs, dict):
                 for k in [
-                    "expected_model_sparsity",
                     "lambda1",
                     "lambda2",
-                    "expected_z_mean",
-                    "expected_z_std",
-                    "log_alpha_mean",
-                    "log_alpha_std",
-                    "",
                 ]:
                     if k in outputs and outputs[k] is not None:
                         metrics[k] = outputs[k]

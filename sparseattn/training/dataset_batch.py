@@ -75,6 +75,10 @@ class ParquetDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.raw_dataset[idx]
+        if self.data_args.task_type == "sft":
+            # build sft input+labels
+            input_ids, labels = _build_sft_input_and_labels(item, self.tokenizer, self.data_args, self.max_seq_len)
+            return {"input_ids": input_ids, "labels": labels}
         text = item.get("context") or item.get("text") or item.get("content")
         if text is None:
             raise KeyError(
@@ -124,6 +128,11 @@ class StreamingParquetIterable(IterableDataset):
 
     def __iter__(self):
         for item in self.dataset_iterable:
+            if self.data_args.task_type == "sft":
+                input_ids, labels = _build_sft_input_and_labels(item, self.tokenizer, self.data_args, self.max_seq_len)
+                yield {"input_ids": input_ids, "labels": labels}
+                continue
+
             text = item.get("context") or item.get("text") or item.get("content")
             if text is None:
                 continue
@@ -188,7 +197,7 @@ class PackingDataCollator:
         self.max_seq_len = max_seq_len
         assert self.max_seq_len > 0
 
-    def _pack_sequences(self, all_input_ids: list) -> (list, list):
+    def _pack_sequences(self, all_input_ids: list, all_labels: Optional[list] = None) -> (list, list):
         packed_input_ids = []
         packed_labels = []
         current_seq = []
@@ -196,16 +205,20 @@ class PackingDataCollator:
 
         max_tokens_per_pack = self.data_args.per_device_max_tokens or self.max_seq_len
 
-        for seq in all_input_ids:
-            # truncate sequence if longer than max_seq_len
+        for idx, seq in enumerate(all_input_ids):
+            labels_seq = None
+            if all_labels is not None:
+                labels_seq = all_labels[idx]
+            # truncate sequence if longer
             if len(seq) > self.max_seq_len:
                 seq = seq[: self.max_seq_len]
+                if labels_seq is not None:
+                    labels_seq = labels_seq[: self.max_seq_len]
 
             seq_idx = 0
             while seq_idx < len(seq):
                 remaining_tokens = max_tokens_per_pack - len(current_seq)
                 if remaining_tokens <= 0:
-                    # flush current pack
                     packed_input_ids.append(current_seq)
                     packed_labels.append(current_labels)
                     current_seq = []
@@ -214,18 +227,24 @@ class PackingDataCollator:
 
                 take_len = min(len(seq) - seq_idx, remaining_tokens)
                 chunk = seq[seq_idx : seq_idx + take_len]
-                # create labels
-                labels = chunk.copy()
-                # mask first token of new chunk if current_seq is empty
-                if not current_seq:
-                    labels[0] = -100
+                if labels_seq is not None:
+                    lab_chunk = labels_seq[seq_idx : seq_idx + take_len]
+                else:
+                    # create labels same as original behavior: mask first token of new chunk
+                    lab_chunk = chunk.copy()
+                    if not current_seq:
+                        lab_chunk[0] = -100
+
+                # If attaching to non-empty current_seq, we must mask the first token of this chunk
+                # to avoid leakage between samples
+                if current_seq:
+                    lab_chunk[0] = -100
 
                 current_seq.extend(chunk)
-                current_labels.extend(labels)
+                current_labels.extend(lab_chunk)
 
                 seq_idx += take_len
 
-                # flush if exactly full
                 if len(current_seq) == max_tokens_per_pack:
                     packed_input_ids.append(current_seq)
                     packed_labels.append(current_labels)
@@ -238,14 +257,25 @@ class PackingDataCollator:
 
         return packed_input_ids, packed_labels
 
+
     def __call__(self, features: list) -> dict:
         # gather all sequences
         all_input_ids = []
+        all_labels = []
+        labels_provided = False
         for f in features:
             if "input_ids_chunks" in f:
                 all_input_ids.extend(f["input_ids_chunks"])
+                # no labels in chunked mode unless SFT provided chunk-level labels
+                if "labels_chunks" in f:
+                    all_labels.extend(f["labels_chunks"])
             else:
                 all_input_ids.append(f["input_ids"])
+                if "labels" in f:
+                    labels_provided = True
+                    all_labels.append(f["labels"])
+                else:
+                    all_labels.append(None)
 
         if getattr(self.data_args, "use_packing", False):
             # detect prepacked
@@ -254,6 +284,8 @@ class PackingDataCollator:
                 if all_input_ids
                 else False
             )
+            packed_input_ids, packed_labels = self._pack_sequences(all_input_ids, all_labels if labels_provided else None)
+
 
             if prepacked:
                 packed_input_ids = all_input_ids
@@ -330,6 +362,70 @@ class PackingDataCollator:
             "labels": labels_tensor,
             "attention_mask": attention_mask,
         }
+def _build_sft_input_and_labels(item, tokenizer, data_args, max_seq_len):
+    """
+    Given an item in your SFT JSON format, produce (input_ids, labels) where:
+    - input_ids: token ids of prompt+answer
+    - labels: same length, prompt tokens => -100, answer tokens => token ids
+    metadata.flag: "0" => context+question are separate; "1" => merged in question
+    We will join with spaces by default; you can customize separators.
+    """
+    ctx = item.get("context", "") or ""
+    q = item.get("question", "") or ""
+    a = item.get("answer", "") or ""
+    meta = item.get("metadata", {}) or {}
+    flag = str(meta.get("flag", "0"))
+
+    # Decide how to join prompt parts
+    if flag == "1":
+        # already merged into question
+        prompt_text = q
+        if ctx:
+            # if both present but flagged merged, prefer q as prompt (user note)
+            prompt_text = q
+    else:
+        # default: join context and question with a separator
+        if ctx and q:
+            prompt_text = ctx.rstrip() + "\n" + q.lstrip()
+        else:
+            prompt_text = (ctx or q)
+
+    # Combine prompt + separator + answer
+    # You may choose different separators depending on your dataset conventions
+    separator = "\n\n"  # you can change to " " or tokenizer.eos_token
+    full_text = prompt_text + separator + a if a else prompt_text
+
+    tokenized = tokenizer(
+        full_text,
+        truncation=False,  # we'll manually enforce length below
+        add_special_tokens=True,
+    )
+    input_ids = tokenized["input_ids"]
+
+    # Now build labels: mask prompt tokens
+    # To identify prompt length we tokenize prompt_text separately
+    tokenized_prompt = tokenizer(prompt_text, add_special_tokens=True, truncation=False)
+    prompt_len = len(tokenized_prompt["input_ids"])
+
+    labels = [-100] * len(input_ids)
+    # If answer exists, fill labels for answer tokens
+    if a:
+        # answer starts at prompt_len + separator_tokens
+        # compute tokenized separator length:
+        tokenized_separator = tokenizer(separator, add_special_tokens=False)
+        sep_len = len(tokenized_separator["input_ids"]) if tokenized_separator["input_ids"] else 0
+        answer_start = prompt_len + sep_len
+        # clamp
+        if answer_start < len(input_ids):
+            for i in range(answer_start, len(input_ids)):
+                labels[i] = input_ids[i]
+
+    # enforce max_seq_len
+    if len(input_ids) > max_seq_len:
+        input_ids = input_ids[:max_seq_len]
+        labels = labels[:max_seq_len]
+
+    return input_ids, labels
 
 
 def build_dataset(

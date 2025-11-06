@@ -4,7 +4,8 @@ bsz=${BSZ:-16}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
 steps=${STEPS:-1000}
-save_steps=${SAVE:-500}
+save_steps=${SAVE:-76}
+save_total_limit=3
 warmup=${WARMUP:-0.1}
 suffix=${SUFFIX:-""}
 overrides=${OVERRIDES:-""}
@@ -32,14 +33,14 @@ freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
 # Streaming configuration
-toggle_type=${TOGGLE_TYPE:-"streaming"}
+toggle_type=${TOGGLE_TYPE:-"xattn"}
 sink_size=${SINK_SIZE:-128}
 topk_k=${TOPK_K:-2048}
 
-enable_ada_sparsity=${ENABLE_ADA_SPARSITY:-true}
+enable_ada_sparsity=${ENABLE_ADA_SPARSITY:-false}
 
 # Layer-wise sparsity configuration
-enable_layerwise_sparsity=${ENABLE_LAYERWISE_SPARSITY:-true}
+enable_layerwise_sparsity=${ENABLE_LAYERWISE_SPARSITY:-false}
 layerwise_sparsity_schedule=${LAYERWISE_SPARSITY_SCHEDULE:-"high-low-high"}
 layerwise_sparsity_min_ratio=${LAYERWISE_SPARSITY_MIN_RATIO:-0.5}
 layerwise_sparsity_max_ratio=${LAYERWISE_SPARSITY_MAX_RATIO:-1.0}
@@ -48,11 +49,12 @@ layerwise_sparsity_weight=${LAYERWISE_SPARSITY_WEIGHT:-1.0}
 erank_analysis_path="/"
 
 # Dataset configuration
-# dataset=${DATASET:-"/data/lcm_lab/qqt/project/SparseAttn/sparseattn/data"}
-dataset=${DATASET:-"/data1/public_data/Long-Data-Collections_Pre_filter"}
+dataset=${DATASET:-"/data1/public_data/mix_sft_filter2"}
+# dataset=${DATASET:-"/data1/public_data/Pre_filter"}
+task_type="sft" # pretrain or sft
 
 # Create run name
-extra_name="llama_streaming_32k_layer-wise-sp_ada_sparsity"
+extra_name="xattn_sft_11.6debug"
 if [[ $freeze_weights == "true" ]]; then
     extra_name="${extra_name}_wfrozen"
 fi
@@ -72,7 +74,7 @@ if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
 else
     num_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 fi
-num_gpus=${NUM_GPUS:-$num_gpus}
+num_gpus=8
 
 num_nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | wc -l)
 if [ $num_nodes == 0 ]; then
@@ -146,6 +148,7 @@ base_arguments=(
 
     --max_steps $steps
     --save_steps $save_steps
+    --save_total_limit $save_total_limit
     --dataloader_num_workers 1
 
     --disable_tqdm true
@@ -157,6 +160,7 @@ base_arguments=(
 
     # PruLong-specific arguments
     --per_device_max_tokens $max_toks
+    --task_type $task_type
     --seq_parallel_size $seq_parallel_size
     --start_head_sparsity $start_head_sparsity
     --end_head_sparsity $end_head_sparsity

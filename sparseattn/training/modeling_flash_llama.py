@@ -63,6 +63,7 @@ from .attention_mask import (
     sample_z_from_log_alpha,
     cdf_stretched_concrete,
 )
+import math
 
 logger = logging.get_logger(__name__)
 
@@ -575,31 +576,49 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(final_shape)
 
 class MaskAllocator(nn.Module):
-    def __init__(self, input_dim, num_key_value_heads, hidden_dim=128,
-                 use_task_emb=False, temp=0.5, hard=False):
+    def __init__(self, input_dim, num_key_value_heads, hidden_dim=128, temp=0.5, hard=False):
         super().__init__()
         self.num_kv = num_key_value_heads
         self.temp = temp
         self.hard = hard
-        self.use_task_emb = use_task_emb
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.num_kv),
         )
-        if use_task_emb:
-            self.task_embed = nn.Embedding(32, input_dim)
 
-    def forward(self, pooled_input, task_ids=None):
-        x = pooled_input
-        if self.use_task_emb and task_ids is not None:
-            x = x + self.task_embed(task_ids)
-        logits = self.net(x)
+    def forward(self, hidden_states, chunk_size=16384):
+        """
+        hidden_states: [B, seq_len, hidden_dim]
+        chunk_size: int, optional, e.g. 128
+        """
+        B, seq_len, H = hidden_states.shape
+
+        # --- chunk pooling ---
+        if chunk_size is not None and chunk_size < seq_len:
+            num_chunks = math.ceil(seq_len / chunk_size)
+            pad_len = num_chunks * chunk_size - seq_len
+            if pad_len > 0:
+                pad = torch.zeros(B, pad_len, H, device=hidden_states.device, dtype=hidden_states.dtype)
+                hidden_states = torch.cat([hidden_states, pad], dim=1)
+            hidden_states = hidden_states.view(B, num_chunks, chunk_size, H)
+            pooled = hidden_states.mean(dim=2)  # [B, num_chunks, H]
+        else:
+            pooled = hidden_states.mean(dim=1, keepdim=True)  # [B, 1, H]
+            num_chunks = 1
+
+        # --- feed forward for each chunk ---
+        logits = self.net(pooled)  # [B, num_chunks, num_kv]
         probs = torch.sigmoid(logits)
+
+        # --- gumbel-sigmoid sampling (可导) ---
         if self.training:
             u = torch.rand_like(probs)
             g = -torch.log(-torch.log(u + 1e-10) + 1e-10)
-            y = torch.sigmoid((torch.log(probs + 1e-10) - torch.log(1 - probs + 1e-10) + g) / max(1e-6, self.temp))
+            y = torch.sigmoid(
+                (torch.log(probs + 1e-10) - torch.log(1 - probs + 1e-10) + g)
+                / max(1e-6, self.temp)
+            )
             if self.hard:
                 z = (y > 0.5).float()
                 z = (z - y).detach() + y
@@ -607,7 +626,11 @@ class MaskAllocator(nn.Module):
                 z = y
         else:
             z = (probs > 0.5).float()
-        return probs, z
+
+        # 汇聚所有 chunk 的 gating 结果
+        z_final = z.mean(dim=1)  # [B, num_kv]
+
+        return probs, z_final
 
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -663,7 +686,6 @@ class LlamaAttention(nn.Module):
             input_dim=self.hidden_size,
             num_key_value_heads=self.num_key_value_heads,
             hidden_dim=min(512, self.hidden_size // 2),
-            use_task_emb=getattr(config, "use_task_emb_for_mask", False),
             temp=getattr(config, "mask_temp", 0.5),
             hard=getattr(config, "mask_hard_sample", False),
         )
@@ -1210,20 +1232,27 @@ class LlamaAttention(nn.Module):
                 # )
                 k = k.repeat_interleave(self.num_key_value_groups, dim=2)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=2)
-                q, k, v = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)  # B,H,T,D
+                q, k, v = q.transpose(1,2).contiguous(), k.transpose(1,2).contiguous(), v.transpose(1,2).contiguous()  # B,H,T,D
                 stride = self.xattn_params["stride"]
                 threshold = self.xattn_params["threshold"]
                 norm = self.xattn_params["norm"]
                 from sparseattn.src.Xattention import Xattention_prefill
-                cw_attn_output = Xattention_prefill(
-                    q,
-                    k,
-                    v,
-                    stride,
-                    norm,
-                    threshold,
-                    use_triton=True,
-                ).transpose(1,2)  # B,T,H,D
+                
+                try:
+                    cw_attn_output = Xattention_prefill(
+                        q,
+                        k,
+                        v,
+                        stride,
+                        norm,
+                        threshold,
+                        use_triton=True,
+                    ).transpose(1,2)  # B,T,H,D
+                except Exception as e:
+                    print("==================================================\n")
+                    print(f"q.shape{q.shape},k.shape{k.shape},v.shape{v.shape}")
+                    print("==================================================\n")
+                    raise e
             else:
                 if unpadded_lengths is not None:
                     # varlen, ignore padding tokens, efficient for large batch with many paddings
@@ -1358,9 +1387,7 @@ class LlamaAttention(nn.Module):
             z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
         else:
             if unpadded_lengths is None:
-                pooled = hidden_states.mean(dim=1)
-                task_ids = kwargs.get("task_ids", None)
-                probs_kv, z_kv_batch = self.mask_allocator(pooled, task_ids=task_ids)
+                probs_kv, z_kv_batch = self.mask_allocator(hidden_states)
                 z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(
                     z_kv_batch.size(0), -1
                 )  # [B, num_heads]
@@ -1373,17 +1400,14 @@ class LlamaAttention(nn.Module):
                     s = int(cu_seqlens[b].item())
                     e = int(cu_seqlens[b + 1].item())
                     if e > s:
-                        pooled_list.append(hidden_states[s:e].mean(dim=0))
+                        pooled_list.append(hidden_states[s:e])
                     else:
                         pooled_list.append(hidden_states.new_zeros(self.hidden_size))
                 pooled = torch.stack(pooled_list, dim=0) if len(pooled_list) > 0 else hidden_states.new_zeros(B, self.hidden_size)
 
-                task_ids = kwargs.get("task_ids", None)
-                probs_kv, z_kv_batch = self.mask_allocator(pooled, task_ids=task_ids)
+                probs_kv, z_kv_batch = self.mask_allocator(pooled)
                 z_batch_heads = z_kv_batch.unsqueeze(-1).expand(-1, -1, self.num_key_value_groups).reshape(B, -1)
                 z = z_batch_heads
-
-
 
         if (
             seq_parallel_group is not None
@@ -1413,10 +1437,8 @@ class LlamaAttention(nn.Module):
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))
 
         attn_weights = None
-        if z.sum().item() > self.num_heads:
-            breakpoint()
+        
         return z.sum(), attn_output, attn_weights, past_key_value
-
 
 class LlamaDecoderLayer(nn.Module):
     def __init__(
@@ -2106,7 +2128,7 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        self.logit_block_size = int(os.environ.get("LOGIT_BLOCK_SIZE", 0))
+        self.logit_block_size = int(os.environ.get("LOGIT_BLOCK_SIZE", 16384))
 
         # Initialize weights and apply final processing
         self.post_init()

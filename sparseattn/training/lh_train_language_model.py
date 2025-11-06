@@ -21,6 +21,7 @@ from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
 from .modeling_flash_qwen import PawQwen3ForCausalLM, PawQwen3Config
 from .modeling_flash_phi import PawPhi3ForCausalLM, PawPhi3Config
 from .lh_trainer import Trainer
+from .lh_trainer_nsa import Trainer as NSATrainer
 
 # from .dataset import build_dataset, DataCollator, DataArguments
 from .dataset_batch import build_dataset, PackingDataCollator, DataArguments
@@ -185,6 +186,7 @@ def main():
                 cache_dir=script_args.cache_dir,
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
+                torch_dtype=torch.bfloat16,
             )
             config = model.config
             config._attn_implementation = "flash_attention_2"
@@ -196,7 +198,6 @@ def main():
             config.init_blocks = 1
             config.local_blocks = 2
             config.window_size = 500
-            
             for i, layer in enumerate(model.model.layers):
                 original_attn = layer.self_attn
 
@@ -208,6 +209,7 @@ def main():
                 new_attn = new_attn.to(device).to(original_dtype)
 
                 layer.self_attn = new_attn
+
         elif "qwen" in script_args.model_name_or_path.lower():
             model = PawQwen3ForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
@@ -353,19 +355,30 @@ def main():
         }
 
     # data_collator = DataCollator(tokenizer, data_args)
-    data_collator = PackingDataCollator(tokenizer, data_args)
+    data_collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
     assert training_args.max_steps is not None, "max_steps must be set!"
 
     # Initialize our Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        log_loss=script_args.should_log_loss,
-    )
+    if training_args.attention_type is not None and "nsa" in training_args.attention_type :
+        trainer = NSATrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset if training_args.do_train else None,
+            eval_dataset=eval_dataset if training_args.do_eval else None,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            log_loss=script_args.should_log_loss,
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset if training_args.do_train else None,
+            eval_dataset=eval_dataset if training_args.do_eval else None,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            log_loss=script_args.should_log_loss,
+        )
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these
