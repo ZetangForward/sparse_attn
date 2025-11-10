@@ -38,6 +38,10 @@ class DataArguments:
         default=False,
         metadata={"help": "Use streaming dataset (no full in-memory load)"},
     )
+    min_seq_len: Optional[int] = field(
+        default=1000,
+        metadata={"help": "Minimum sequence length (after tokenization). Shorter samples are filtered out."}
+    )
     task_type: str = field(
         default="pretrain",
         metadata={"help": "Training task type: 'pretrain' or 'sft'."},
@@ -489,6 +493,25 @@ def build_dataset(
 
     raw_dataset = load_dataset("parquet", data_files=parquet_files, split="train")
 
+    if data_args.min_seq_len is not None and not data_args.streaming and not data_args.prepack:
+        logger.info(f"Filtering out samples with tokenized length <= {data_args.min_seq_len - 1}")
+
+        def filter_fn(item):
+            text = item.get("context") or item.get("text") or item.get("content")
+            if text is None:
+                return False
+            tokenized = tokenizer(
+                text,
+                truncation=False,  # we want full length to judge
+                add_special_tokens=True,
+            )
+            length = len(tokenized["input_ids"])
+            return length > data_args.min_seq_len
+
+        raw_dataset = raw_dataset.filter(filter_fn, num_proc=os.cpu_count())
+
+        logger.info(f"After filtering: {len(raw_dataset)} samples remain.")
+        
     if data_args.prepack:
         logger.info(
             "Prepacking dataset into fixed-length sequences. This may take time but speeds up training."
@@ -541,23 +564,22 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     data_args = DataArguments(
-        subsplit_length=1024,
+        subsplit_length=16000,
         per_device_max_tokens=32768,
         prepack=False,
         streaming=False,
     )
     dataset = build_dataset(
-        ["/data/public_data/long_data_collection"],
+        ["/data1/public_data/Long-Data-Collections_Pre_filter"],
         data_args=data_args,
         is_training=True,
-        model_name_or_path="/data/hf_models/Qwen3-4B",
+        model_name_or_path="/data1/hf_model/Qwen3-4B",
     )
-
     # Example: use DataLoader
     from torch.utils.data import DataLoader
 
     tokenizer = AutoTokenizer.from_pretrained(
-        "/data/hf_models/Qwen3-4B", use_fast=True, trust_remote_code=True
+        "/data1/hf_model/Qwen3-4B", use_fast=True, trust_remote_code=True
     )
     collator = PackingDataCollator(
         tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens
@@ -566,12 +588,11 @@ if __name__ == "__main__":
     loader = DataLoader(
         dataset, batch_size=8, collate_fn=collator, num_workers=4, pin_memory=True
     )
-
     for batch in loader:
         # batch contains tensors ready to feed model
         print(
-            batch["input_ids"].shape,
-            batch["labels"].shape,
-            batch["attention_mask"].shape,
+            batch["input_ids"][0],
+            batch["labels"][0],
+            batch["attention_mask"][0],
         )
-        break
+        breakpoint()

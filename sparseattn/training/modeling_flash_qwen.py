@@ -82,6 +82,9 @@ class PawQwen3Config(Qwen3Config):
 
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
+        
+        # ada-sparsity
+        self.enable_ada_sparsity = kwargs.pop("enable_ada_sparsity", False)
 
         # Layer-wise sparsity control
         self.enable_layerwise_sparsity = kwargs.pop("enable_layerwise_sparsity", False)
@@ -609,7 +612,252 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         batch, num_key_value_heads, n_rep, slen, head_dim
     )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+import torch.nn.functional as F
+import math
+class AttentionRouterEntropy(nn.Module):
+    """
+    AttentionRouterEntropy:
+      - 输入 q: [B, S, H, D] 或 pooled_input: [B, 1, H, feat]
+      - 在 seq_len 维度压缩成 num_chunks（adaptive_avg_pool1d）
+      - 在 head_dim D 上计算归一化熵作为信息混乱度指标
+      - 将 pooled features 与 entropy concat 后映射为 2-class logits per head
+      - 训练时返回可微 soft decisions（gumbel_softmax 或 softmax）；推理时返回 hard binary mask
+    """
+    def __init__(self,
+                 input_dim,
+                 num_key_value_heads,
+                 head_dim=None,            # 当你给 q 时需要提供 head_dim D，用于归一化熵
+                 d_feature=128,
+                 num_chunks=4,
+                 use_task_emb=False,
+                 temp=1.0,
+                 hard=False,
+                 router_type='mlp',
+                 entropy_agg='mean',       # 'mean' or 'max' (如何把 chunk-level entropy 聚合成每 head 一个值)
+                 eps=1e-8):
+        super().__init__()
+        self.num_kv = num_key_value_heads
+        self.temp = temp
+        self.hard = hard
+        self.use_task_emb = use_task_emb
+        self.router_type = router_type
+        self.num_chunks = num_chunks
+        self.entropy_agg = entropy_agg
+        self.eps = eps
+        self.head_dim = head_dim  # used for entropy normalization if provided
 
+        map_in = input_dim + 1  # concat entropy scalar per head
+        if router_type == 'linear':
+            self.dim_mapping = nn.Linear(map_in, 2)
+        else:  # 'mlp' or other
+            self.dim_mapping = nn.Sequential(
+                nn.Linear(map_in, d_feature),
+                nn.SiLU(),
+                nn.Linear(d_feature, 2)
+            )
+
+        self.q_projector = nn.Sequential(
+            nn.Linear( (head_dim or input_dim), input_dim ),
+            nn.SiLU(),
+            nn.Linear(input_dim, input_dim)
+        )
+        
+        self.chunk_queries = nn.Parameter(torch.randn(num_chunks, head_dim) * 0.01)
+
+    def _compute_entropy_per_head(self, chunked_q):
+        B, C, H, D = chunked_q.shape
+        v = chunked_q.reshape(B*C*H, D)
+        a = v.abs()
+        p = F.softmax(a, dim=-1).clamp(min=self.eps, max=1.0)
+        ent = - (p * p.log()).sum(dim=-1) / math.log(max(D, 2))
+        ent = ent.view(B, C, H)
+        return ent.mean(dim=1) if self.entropy_agg == 'mean' else ent.max(dim=1).values
+
+    def _compress_seq_to_chunks(self, q):
+        B, S, H, D = q.shape
+        q_flat = q.permute(0, 2, 1, 3)  # [B, H, S, D]
+
+        # normalize both sides to avoid overflow
+        q_norm = F.normalize(q_flat, dim=-1)
+        chunk_q = F.normalize(self.chunk_queries, dim=-1)
+
+        queries = chunk_q.unsqueeze(0).unsqueeze(0).expand(B, H, -1, -1)
+        sim = (queries @ q_norm.transpose(-1, -2)) / 0.1  # temp=0.1 for stable contrast
+        sim = sim - sim.amax(dim=-1, keepdim=True)  # extra stabilization
+
+        attn_weights = torch.softmax(sim, dim=-1)
+        pooled = attn_weights @ q_flat
+        pooled = pooled.permute(0, 2, 1, 3).contiguous()
+        return pooled
+
+    def forward(self, q=None, pooled_input=None, task_ids=None):
+        """
+        Either provide q ([B,S,H,D]) or pooled_input ([B,1,H,input_dim]) (or both). q preferred.
+        Returns dict:
+          decisions: soft probability of sparse [B, H]
+          hard_decisions: one-hot [B, H, 2]
+          sparse_mask: binary [B, H] (0=full, 1=sparse) - inference uses this
+          logits: raw logits [B, H, 2]
+          entropy: [B, H] normalized entropy per head
+        """
+        assert q is not None or pooled_input is not None, "Either q or pooled_input must be provided."
+        if q is not None:
+            # q: [B, S, H, D]
+            B, S, H, D = q.shape
+
+            # compress seq -> chunks
+            chunked = self._compress_seq_to_chunks(q)  # [B, C, H, D]
+            entropy = self._compute_entropy_per_head(chunked)  # [B, H]
+
+            # derive a pooled feature per head from chunked q: e.g., mean across chunks and sequence (or use projector)
+            # pooled_feat shape we'll make [B, H, input_dim]
+            # take mean over chunks and D
+            pooled_feat = chunked.mean(dim=1).mean(dim=-1)  # [B, H]  (mean over chunks and D)
+            # project to input_dim
+            pooled_feat = pooled_feat.unsqueeze(-1)  # [B, H, 1]
+            # expand to match expected input_dim via projector (projector accepts D or input_dim)
+            # alternative: we can use q_projector on chunk-mean over D
+            q_chunk_mean_over_D = chunked.mean(dim=1)  # [B, H, D]
+            pooled_feat_proj = self.q_projector(q_chunk_mean_over_D)  # [B, H, input_dim]
+        else:
+            # pooled_input: expected shape [B, 1, H, input_dim] or [B, H, input_dim]
+            pi = pooled_input
+            if pi.dim() == 4:
+                # [B,1,H,input_dim] -> [B,H,input_dim]
+                pooled_feat_proj = pi.squeeze(1)
+            elif pi.dim() == 3:
+                pooled_feat_proj = pi
+            else:
+                raise ValueError("pooled_input must be shape [B,1,H,input_dim] or [B,H,input_dim]")
+            # no entropy from q available -> set entropy to zeros (or you could estimate)
+            entropy = torch.zeros(pooled_feat_proj.shape[0], pooled_feat_proj.shape[1], device=pooled_feat_proj.device)
+
+        # Now pooled_feat_proj: [B, H, input_dim]
+        B, H, in_dim = pooled_feat_proj.shape
+        # entropy: [B, H] -> normalize (already normalized by log(D) earlier)
+        ent = entropy.unsqueeze(-1)  # [B, H, 1]
+
+        # concat features
+        cat = torch.cat([pooled_feat_proj, ent], dim=-1)  # [B, H, input_dim+1]
+
+        # compute logits per head
+        logits = self.dim_mapping(cat)  # [B, H, 2]
+
+        # soft / hard decisions
+        if self.router_type == 'gumbel' and self.training:
+            # Gumbel-Softmax (soft, differentiable)
+            decisions_full = F.gumbel_softmax(logits.view(-1, 2), tau=self.temp, hard=False)
+            decisions_full = decisions_full.view(B, H, 2)
+            hard_decisions = F.gumbel_softmax(logits.view(-1, 2), tau=self.temp, hard=True).view(B, H, 2)
+        else:
+            # softmax with temperature for soft decisions
+            decisions_full = F.softmax(logits / max(self.temp, 1e-6), dim=-1)  # [B,H,2]
+            # hard decisions: one-hot via argmax (non-differentiable; training uses decisions_full)
+            argmax = logits.argmax(dim=-1, keepdim=True)  # [B,H,1]
+            hard_decisions = torch.zeros_like(decisions_full).scatter_(-1, argmax, 1.0)
+
+        # inference mode: use hard decisions as the returned "decisions" mask if not training
+        if not self.training:
+            chosen = hard_decisions
+        else:
+            chosen = decisions_full  # soft during training
+
+        # sparse mask is index 1 (1 = sparse)
+        sparse_mask = chosen[..., 1]  # [B, H]  (soft in train, binary in eval)
+
+        # also produce a clean decisions scalar (probability of sparse)
+        decisions = decisions_full[..., 1]  # soft prob of sparse [B,H]
+
+        return {
+            'decisions': decisions,            # soft probability (train: soft, eval: one-hot->0/1)
+            'hard_decisions': hard_decisions,  # one-hot [B,H,2]
+            'sparse_mask': sparse_mask,        # binary/soft mask [B,H]
+            'logits': logits,                  # raw logits [B,H,2]
+            'entropy': entropy                 # [B,H]
+        }
+
+
+
+class MaskAllocator(nn.Module):
+    def __init__(self, input_dim, num_key_value_heads, hidden_dim=128, temp=1.5, hard=False, dtype=torch.float32):
+        super().__init__()
+        self.num_kv = num_key_value_heads
+        self.temp = temp
+        self.hard = hard
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, self.num_kv, bias=True),
+        )
+        self.max_logit = 5.0
+
+    def forward(self, hidden_states):
+        # hidden_states: [B, S, H]
+        pooled = hidden_states.mean(dim=1)
+        logits_raw = self.net(pooled)
+        
+        logits = self.max_logit * torch.tanh(logits_raw / self.max_logit)
+        probs = torch.sigmoid(logits)
+
+        if self.training:
+            # Gumbel-Sigmoid
+            logits_2d = torch.stack([logits, -logits], dim=-1)
+            z = F.gumbel_softmax(logits_2d, tau=self.temp, hard=self.hard, dim=-1)[..., 0]
+            z = torch.clamp(z, 0.1, 0.9) 
+        else:
+            z = (torch.sigmoid(logits) > 0.5).float()
+        
+
+        return {
+            'decisions': z,            # soft probability (train: soft, eval: one-hot->0/1)
+            'logits': probs,                  # raw logits [B,H,2]
+        }
+
+class AttentionRouter(nn.Module):
+    def __init__(self, input_dim, num_key_value_heads, d_feature=128,
+                 use_task_emb=False, temp=1.0, hard=False, router_type='mlp'):
+        super().__init__()
+        self.num_kv = num_key_value_heads
+        self.temp = temp
+        self.hard = hard
+        self.use_task_emb = use_task_emb
+        self.router_type = router_type
+
+        if router_type == 'linear':
+            self.dim_mapping = nn.Linear(d_feature, 2)
+        elif router_type == 'mlp':
+            self.dim_mapping = nn.Sequential(
+                nn.Linear(d_feature, d_feature),
+                nn.SiLU(),
+                nn.Linear(d_feature, 2)
+            )
+
+    def forward(self, pooled_input):
+        """pooled_input: [b, seq_len, h, hidden_dim]"""
+        x = pooled_input.mean(dim=1)
+        logits = self.dim_mapping(x) # [b, 1, h, 2]
+        if self.router_type == 'gumbel' and self.training:
+            # Gumbel-Softmax: 训练时可微，推理时离散
+            decisions = F.gumbel_softmax(logits, tau=self.temp, hard=False)
+            hard_decisions = F.gumbel_softmax(logits, tau=self.temp, hard=True)
+        else:
+            # 标准softmax
+            decisions = F.softmax(logits / self.temp, dim=-1)
+            hard_decisions = torch.zeros_like(decisions)
+            hard_decisions.scatter_(-1, logits.argmax(dim=-1, keepdim=True), 1.0)
+
+        if not self.training:
+            decisions = hard_decisions
+
+        sparse_mask = hard_decisions[..., 1]  # (B, H)
+        decisions = decisions[..., 1].squeeze(1)
+
+        return {
+            'decisions': decisions,  # soft probability
+            'hard_decisions': hard_decisions,  # one-hot
+            'sparse_mask': sparse_mask,  # binary mask
+            'logits': logits,  # for loss computation
+        }
 
 class Qwen3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -678,6 +926,36 @@ class Qwen3Attention(nn.Module):
         )  # sigmoid(4.5) ≈ 0.989
         self.threshold_for_deterministic = None
 
+        self.mask_allocator = AttentionRouter(
+            input_dim=self.hidden_size,
+            num_key_value_heads=self.num_key_value_heads,
+            d_feature=self.head_dim,
+            use_task_emb=getattr(config, "use_task_emb_for_mask", False),
+            temp=getattr(config, "mask_temp", 0.5),
+            hard=getattr(config, "mask_hard_sample", False),
+        )
+        
+        # self.mask_allocator = AttentionRouterEntropy(
+        #     input_dim=self.hidden_size,          
+        #     num_key_value_heads=self.num_key_value_heads,  
+        #     head_dim=self.head_dim,               
+        #     d_feature=128,                        
+        #     num_chunks=128,                         
+        #     use_task_emb=getattr(config, "use_task_emb_for_mask", False),
+        #     temp=getattr(config, "mask_temp", 0.5),       
+        #     hard=getattr(config, "mask_hard_sample", False),  
+        #     router_type=getattr(config, "mask_router_type", "gumbel"),  # 'mlp' / 'linear' / 'gumbel'
+        #     entropy_agg='mean',                   # 'mean' 或 'max'
+        # )
+        
+        # self.mask_allocator = MaskAllocator(
+        #     input_dim=self.hidden_size,
+        #     num_key_value_heads=self.num_key_value_heads,
+        #     hidden_dim=min(512, self.hidden_size // 2),
+        #     temp=getattr(config, "mask_temp", 0.5),
+        #     hard=getattr(config, "mask_hard_sample", False),
+        # )
+
         self.context_window_toggle = context_window_toggle
 
         self.toggle_type = config.toggle_type
@@ -703,6 +981,31 @@ class Qwen3Attention(nn.Module):
             self.topk_k = int(getattr(config, "topk_k", 2048))
             self.topk_q_chunk = int(os.environ.get("TOPK_Q_CHUNK", 128))
             self.topk_k_chunk = int(os.environ.get("TOPK_K_CHUNK", 4096))
+        elif self.toggle_type == "xattn":
+            from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+            self.streaming_info_kwargs = {
+                "sink_block_num": self.sink_blocks,
+                "local_block_num": self.local_blocks,
+            }
+            # self.head_indices = self.num_heads // self.num_key_value_heads
+            self.head_indices = self.num_heads
+            self.xattn_flash_attn_func = xattn_flash_attn_func
+            self.granularity = int(getattr(config, "block_size", 64))
+            self.xattn_params = {
+                "stride": 16,
+                "norm": 1,
+                "softmax": True,
+                "threshold": 0.9,
+                "chunk_size": 16384,
+                "select_mode": "inverse",
+                "use_triton": True,
+                "causal": True,
+                "kdb": 1,
+                "keep_sink": True,
+                "keep_recent": True,
+            }
+        elif self.toggle_type == "none":
+            pass
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -960,7 +1263,7 @@ class Qwen3Attention(nn.Module):
 
         return out
 
-    def interpolated_attention(self, q, kv, unpadded_lengths, z):
+    def interpolated_attention(self, q, kv, k, v, unpadded_lengths, z):
         if unpadded_lengths is not None:
             # varlen, ignore padding tokens, efficient for large batch with many paddings
             cu_seqlens, max_seqlen = unpadded_lengths
@@ -1122,7 +1425,79 @@ class Qwen3Attention(nn.Module):
                 cw_attn_output = topk_attention(q, kv, cu_seqlens, max_seqlen)
             else:
                 cw_attn_output = topk_attention(q, kv)
+        elif self.toggle_type == "xattn":  
+            # def set_pdb_trace(rank: int = None):
+            #     import pdb
+            #     import sys
+            #     sys.stdin = open(0)  
+            #     pdb.set_trace()
+            # set_pdb_trace(0)
+            if not self.training :
+                _, seq_len, _, _ = q.size()         
+            if self.training or seq_len != 1:
+                if q.dim() == 3:
+                    q = q.unsqueeze(0)
+                    k = k.unsqueeze(0)
+                    v = v.unsqueeze(0)
+                # cw_attn_output = self.xattn_flash_attn_func(
+                #     q,
+                #     k,
+                #     v,
+                #     self.head_indices,
+                #     self.xattn_params,
+                #     self.granularity,
+                # )
+                k = k.repeat_interleave(self.num_key_value_groups, dim=2)
+                v = v.repeat_interleave(self.num_key_value_groups, dim=2)
+                q, k, v = q.transpose(1,2).contiguous(), k.transpose(1,2).contiguous(), v.transpose(1,2).contiguous()  # B,H,T,D
+                stride = self.xattn_params["stride"]
+                threshold = self.xattn_params["threshold"]
+                norm = self.xattn_params["norm"]
+                from sparseattn.src.Xattention import Xattention_prefill
+                
+                try:
+                    cw_attn_output = Xattention_prefill(
+                        q,
+                        k,
+                        v,
+                        stride,
+                        norm,
+                        threshold,
+                        use_triton=True,
+                    ).transpose(1,2)  # B,T,H,D
+                except Exception as e:
+                    print("==================================================\n")
+                    print(f"q.shape{q.shape},k.shape{k.shape},v.shape{v.shape}")
+                    print("==================================================\n")
+                    raise e
+            else:
+                if unpadded_lengths is not None:
+                    # varlen, ignore padding tokens, efficient for large batch with many paddings
+                    cu_seqlens, max_seqlen = unpadded_lengths
 
+                    cw_attn_output, _, attn_probs = flash_attn_varlen_kvpacked_func(
+                        q,
+                        kv,
+                        cu_seqlens,
+                        cu_seqlens,
+                        max_seqlen,
+                        max_seqlen,
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / self.norm_factor,
+                        causal=True,
+                        return_attn_probs=True,
+                    )
+                else:
+                    cw_attn_output, _, attn_probs = flash_attn_kvpacked_func(
+                        q,
+                        kv,
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / self.norm_factor,
+                        causal=True,
+                        return_attn_probs=True,
+                    )
+        elif self.toggle_type == "none":
+            cw_attn_output = torch.zeros_like(attn_output)
         else:
             raise ValueError(f"Unknown toggle type: {self.toggle_type}")
 
@@ -1153,6 +1528,43 @@ class Qwen3Attention(nn.Module):
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
         k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
         v = self.v_proj(hidden_states).view(hidden_shape)
+
+        if not self.config.enable_ada_sparsity:
+            z_kv = get_mask(
+                self.attn_mask_log_alphas,
+                training=self.training,
+                threshold_for_deterministic=self.threshold_for_deterministic,
+            )  # (num_key_value_heads,)
+            # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
+            z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
+        else:
+            target_x = k
+            if unpadded_lengths is not None:
+                # breakpoint()
+                cu_seqlens, _ = unpadded_lengths
+                B = cu_seqlens.numel() - 1
+                pooled_list = []
+                for b in range(B):
+                    s, e = int(cu_seqlens[b]), int(cu_seqlens[b + 1])
+                    if e > s:
+                        pooled_list.append(target_x[s:e])
+                    else:
+                        pooled_list.append(torch.zeros_like(target_x[0:1]))
+                target_x = torch.cat(pooled_list, dim=0).unsqueeze(0)  # [B, seq, H, D] 或 [B, H, D]
+                if target_x.dim() == 3 and target_x.shape[-1] == self.head_dim:
+                    target_x = target_x.unsqueeze(0)
+
+            res = self.mask_allocator(target_x)
+            z_kv_batch = res['decisions']
+
+            if z_kv_batch.shape[-1] == self.num_key_value_heads:
+                z_kv_batch = (
+                    z_kv_batch.unsqueeze(-1)              # [B, num_kv, 1]
+                    .expand(-1, -1, self.num_key_value_groups)  # [B, num_kv, num_groups]
+                    .reshape(z_kv_batch.size(0), -1)      # [B, num_kv * num_groups]
+                )
+
+            z = z_kv_batch
 
         has_layer_past = past_key_value is not None
         if has_layer_past:
@@ -1203,14 +1615,6 @@ class Qwen3Attention(nn.Module):
             past_kv = kv
         past_key_value = (past_kv, past_len + q.size(1)) if use_cache else None
 
-        z_kv = get_mask(
-            self.attn_mask_log_alphas,
-            training=self.training,
-            threshold_for_deterministic=self.threshold_for_deterministic,
-        )  # (num_key_value_heads,)
-        # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
-        z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
-
         if (
             seq_parallel_group is not None
             and dist.is_initialized()
@@ -1221,118 +1625,26 @@ class Qwen3Attention(nn.Module):
                 "group": seq_parallel_group,
                 "gather_idx": (0 if unpadded_lengths is not None else 1),
             }
-
-            z = torch.split(
-                z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
-            )[dist.get_rank(seq_parallel_group)]
+            if not self.config.enable_ada_sparsity:
+                z = torch.split(
+                    z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
+                )[dist.get_rank(seq_parallel_group)]
+            else:
+                z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
+                z = z_splits[dist.get_rank(seq_parallel_group)]
         else:
             attention_func = self.interpolated_attention
             kwargs = {}
 
-        attn_output = attention_func(q, kv, unpadded_lengths, z, **kwargs)
+        attn_output = attention_func(q, kv, k, v, unpadded_lengths, z, **kwargs)
+        if k.dim() == 3:
+            attn_output = attn_output.squeeze(0)
         attn_output = attn_output.reshape(
             *attn_output.shape[:-2], self.num_heads * self.head_dim
         )
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
-        else:
-            attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(
-                self.head_dim
-            )
-
-            # ---- begin patch ----
-            if attention_mask is not None:
-                # attn_scores: (B, H, Lq, Lk)
-                B, H, Lq, Lk = attn_scores.shape
-
-                mask = attention_mask
-
-                # If mask is bool or int 0/1 token mask, convert to float additive mask:
-                # aim to produce add_mask shaped (B, 1, 1, Lk) or (B, 1, Lq, Lk) that can add to attn_scores.
-                def to_additive(m):
-                    # if already additive (float and contains very negative values), keep it
-                    if m.dtype.is_floating_point and (m.min() < -1e3 or m.max() > 1e3):
-                        return m
-                    # else assume it's 0/1 or boolean (1 means keep token), convert:
-                    m = m.float()
-                    # make 1 -> keep (0), 0 -> mask out by adding -1e9
-                    return (1.0 - m) * -1e9
-
-                # Normalize dims
-                if mask.dim() == 1:
-                    # unlikely, treat as (L,) -> key-dim
-                    mask = mask.unsqueeze(0)
-
-                if mask.dim() == 2:
-                    # (B, L) — probably key-length or full seq-length
-                    if mask.size(0) != B:
-                        # maybe shape (total_seq_len, ) or wrong batch; try to align last L
-                        mask = mask.unsqueeze(0).expand(B, -1)
-                    if mask.size(1) == Lk:
-                        mask = mask[:, None, None, :]  # (B,1,1,Lk)
-                    elif mask.size(1) == Lq:
-                        # mask provided for queries; expand to keys by repeating last tokens
-                        # create (B,1,Lq,Lk) by repeating across key dim
-                        mask_q = mask[:, None, :, None]  # (B,1,Lq,1)
-                        mask = mask_q.expand(-1, -1, Lq, Lk)[
-                            :, :, :, -Lk:
-                        ]  # keep last Lk if needed
-                    else:
-                        # fallback: take last Lk positions (sequence may be longer)
-                        mask = mask[:, None, None, -Lk:]
-
-                elif mask.dim() == 3:
-                    # (B, 1, L) or (B, L, 1) or (B, Lq, Lk)
-                    if mask.size(0) != B:
-                        mask = mask.unsqueeze(0).expand(B, -1, -1)
-                    if mask.size(2) == Lk and mask.size(1) == 1:
-                        mask = mask[:, :, None, :]  # (B,1,1,Lk)
-                    elif mask.size(1) == Lq and mask.size(2) == 1:
-                        # (B, Lq, 1) -> make (B,1,Lq,Lk)
-                        mask = mask[:, None, :, :].expand(-1, -1, Lq, Lk)
-                    elif mask.size(1) == Lq and mask.size(2) == Lk:
-                        mask = mask[:, None, :, :]  # already (B, Lq, Lk)
-                    else:
-                        # general fallback: align last Lk
-                        mask = mask[..., -Lk:]
-                        if mask.dim() == 3:
-                            # try to get to (B,1,1,Lk)
-                            mask = mask[:, 0:1, None, :]
-
-                elif mask.dim() == 4:
-                    # assume already (B, 1, 1, Lk) or (B, 1, Lq, Lk)
-                    if mask.size(0) != B:
-                        mask = mask.unsqueeze(0).expand(B, -1, -1, -1)
-                    # If last dim doesn't match Lk, take last Lk tokens
-                    if mask.size(-1) != Lk:
-                        mask = mask[..., -Lk:]
-
-                else:
-                    # unknown shape: try to slice last Lk and reshape
-                    mask = mask.reshape(B, -1)[..., -Lk:]
-                    mask = mask[:, None, None, :]
-
-                # Now mask should have last dim Lk (or shape (B,1,Lq,Lk)), convert to additive
-                add_mask = to_additive(mask)
-
-                # If add_mask shape is (B,1,1,Lk) -> broadcasts to (B,H,Lq,Lk)
-                # If add_mask shape is (B,1,Lq,Lk) -> ok as well
-                # Final check: try broadcasting; if fails, try taking last Lk along last axis
-                try:
-                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(
-                        attn_scores.device
-                    )
-                except Exception as e:
-                    # last-resort: align by slicing key-dim
-                    add_mask = add_mask[..., -Lk:]
-                    attn_scores = attn_scores + add_mask.to(attn_scores.dtype).to(
-                        attn_scores.device
-                    )
-            # ---- end patch ----
-
-            attn_weights = torch.softmax(attn_scores, dim=-1)
+        attn_weights = None
 
         return z.sum(), attn_output, attn_weights, past_key_value
 
@@ -1770,22 +2082,28 @@ class Qwen3Model(Qwen3PreTrainedModel):
             ):
                 # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
 
-                dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+                z_sums = [
+                    torch.zeros_like(z_sum)
+                    for _ in range(dist.get_world_size(seq_parallel_group))
+                ]
+                dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
+                z_sum = sum(z_sums)
 
-                if self.config.enable_layerwise_sparsity and len(layer_z_sums) > 0:
-                    layer_z_sums_tensor = torch.stack(layer_z_sums)  # (num_layers,)
-                    dist.all_reduce(
-                        layer_z_sums_tensor,
-                        op=dist.ReduceOp.SUM,
-                        group=seq_parallel_group,
-                    )
-                    layer_z_sums = list(layer_z_sums_tensor.unbind(0))
+                gathered_layer_z_sums = []
+                for z_l in layer_z_sums:
+                    tmp = [
+                        torch.zeros_like(z_l)
+                        for _ in range(dist.get_world_size(seq_parallel_group))
+                    ]
+                    dist.all_gather(tmp, z_l, group=seq_parallel_group)
+                    gathered_layer_z_sums.append(sum(tmp))
+                layer_z_sums = gathered_layer_z_sums
 
             model_sparsity = 1 - (z_sum / self.total_num_heads)
         else:
             model_sparsity = None
             z_loss = None
-
+        # print("model_sparsity:", model_sparsity)
         if compute_sparsity:
             layerwise_model_sparsity = None
             layerwise_target = None
@@ -1960,7 +2278,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        self.logit_block_size = int(os.environ.get("LOGIT_BLOCK_SIZE", 0))
+        self.logit_block_size = int(os.environ.get("LOGIT_BLOCK_SIZE", 16384))
 
         # Initialize weights and apply final processing
         self.post_init()
