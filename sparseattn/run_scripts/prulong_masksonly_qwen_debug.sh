@@ -10,7 +10,7 @@ warmup=${WARMUP:-0.1}
 suffix=${SUFFIX:-""}
 overrides=${OVERRIDES:-""}
 min_lr_ratio=${MIN_LR_RATIO:-0.01}
-seq_parallel_size=${SEQ_PARALLEL_SIZE:-1}
+seq_parallel_size=${SEQ_PARALLEL_SIZE:-2}
 
 # FSDP configuration
 # 0=Disable, 1=FULL_SHARD, 2=SHARD_GRAD_OP, 3=NO_SHARD, 4=HYBRID_SHARD, 5=HYBRID_SHARD_ZERO2
@@ -18,8 +18,8 @@ fsdp=${FSDP:-"1"}
 gc=${GC:-"1"}
 
 # PruLong-specific arguments
-max_toks=${MAX_TOKS:-32768}
-# max_toks=${MAX_TOKS:-256}
+# max_toks=${MAX_TOKS:-32768}
+max_toks=${MAX_TOKS:-256}
 start_head_sparsity=${START_HEAD_SPARSITY:-0.0}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.7}
 mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
@@ -49,9 +49,10 @@ layerwise_sparsity_weight=${LAYERWISE_SPARSITY_WEIGHT:-1.0}
 erank_analysis_path="/"
 
 # Dataset configuration
-# dataset=${DATASET:-"/data/public_data/mix_sft_filter2"}
-dataset=${DATASET:-"/data1/public_data/Pre_filter"}
-task_type="pretrain" # pretrain or sft
+dataset=${DATASET:-"/data2/public_data/mix_sft_64k"}
+dataset_cache_dir="data_cache/sft"
+# dataset=${DATASET:-"/data1/public_data/Pre_filter"}
+task_type="sft" # pretrain or sft
 
 # Create run name
 extra_name="entropy_xattn"

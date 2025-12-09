@@ -13,7 +13,7 @@ from transformers import (
     set_seed,
 )
 
-from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
+#from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
 import torch
 from transformers import LlamaForCausalLM, AutoTokenizer
 
@@ -402,9 +402,6 @@ def main():
             data_collator=data_collator,
             log_loss=script_args.should_log_loss,
         )
-    if training_args.do_train:
-        trainer.train_dataloader = train_dataloader
-        logger.info("Successfully injected CustomDistributedStratifiedSampler into Trainer.")
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these

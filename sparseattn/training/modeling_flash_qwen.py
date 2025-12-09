@@ -1112,20 +1112,17 @@ class Qwen3Attention(nn.Module):
             if self.training or seq_len != 1:
 
                 is_vlen_input = (q.dim() == 3) and (unpadded_lengths is not None)
-
+                
                 if is_vlen_input:
-                    k = k.repeat_interleave(self.num_key_value_groups, dim=1)
-                    v = v.repeat_interleave(self.num_key_value_groups, dim=1)
+                    k, v = kv[:,0,], kv[:,1]
                     q, k, v = q.transpose(0, 1).contiguous(), k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous() 
                 else:
-                    k = k.repeat_interleave(self.num_key_value_groups, dim=2)
-                    v = v.repeat_interleave(self.num_key_value_groups, dim=2)
+                    k, v = kv[:,:,0], kv[:,:,1]
                     q, k, v = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous() 
                     
                 stride = self.xattn_params["stride"]
                 threshold = self.xattn_params["threshold"]
                 norm = self.xattn_params["norm"]
-
                 if unpadded_lengths is not None:
                     cu_seqlens, max_seqlen = unpadded_lengths
                     cw_attn_output = Xattention_prefill_dim3(
@@ -1208,6 +1205,92 @@ class Qwen3Attention(nn.Module):
 
         return effective_attn_output
     
+    def broadcast_object(self, obj, group_src=0, group=None):
+        """广播Python对象到所有进程"""
+        if dist.get_rank(group) == group_src:
+            # 源进程：将对象放入列表
+            object_list = [obj]
+        else:
+            # 其他进程：准备空列表
+            object_list = [None]
+        
+        # 广播对象
+        dist.broadcast_object_list(object_list, group_src=group_src, group=group)
+        
+        return object_list[0]
+    
+    def seq_parallel_mask_broadcast(self, seq_parallel_group, q, unpadded_lengths, range_ids, task_ids):
+        seq_parallel_rank = dist.get_rank(seq_parallel_group)
+        # 先计算形状信息，以便创建接收缓冲区
+        if seq_parallel_rank == 0:
+            if unpadded_lengths is not None:
+                res = self.mask_allocator(q, unpadded_lengths[0], range_ids, task_ids)
+            else:
+                res = self.mask_allocator(q, None, range_ids, task_ids)
+            z_kv_batch, pooled_hidden_states = res['sparse_mask'], res['pooled_hidden_states']
+            z_contrast = res['decisions']
+            
+            # 收集元数据以便其他GPU创建缓冲区
+            metadata = {
+                'z_kv_shape': z_kv_batch.shape,
+                'z_kv_dtype': z_kv_batch.dtype,
+                'pooled_exists': pooled_hidden_states is not None,
+                'contrast_exists': z_contrast is not None
+            }
+            
+            if pooled_hidden_states is not None:
+                metadata['pooled_shape'] = pooled_hidden_states.shape
+                metadata['pooled_dtype'] = pooled_hidden_states.dtype
+                
+            if z_contrast is not None:
+                metadata['contrast_shape'] = z_contrast.shape
+                metadata['contrast_dtype'] = z_contrast.dtype
+        else:
+            metadata = None
+            z_kv_batch = None
+            pooled_hidden_states = None
+            z_contrast = None
+        
+        # 广播元数据
+        metadata = self.broadcast_object(metadata, group_src=0, group=seq_parallel_group)
+        
+        # 其他GPU根据元数据创建缓冲区
+        if seq_parallel_rank != 0:
+            z_kv_batch = torch.zeros(
+                metadata['z_kv_shape'],
+                dtype=metadata['z_kv_dtype'],
+                device=q.device
+            )
+            
+            if metadata['pooled_exists']:
+                pooled_hidden_states = torch.zeros(
+                    metadata['pooled_shape'],
+                    dtype=metadata['pooled_dtype'],
+                    device=q.device
+                )
+            else:
+                pooled_hidden_states = None
+                
+            if metadata['contrast_exists']:
+                z_contrast = torch.zeros(
+                    metadata['contrast_shape'],
+                    dtype=metadata['contrast_dtype'],
+                    device=q.device
+                )
+            else:
+                z_contrast = None
+        
+        # 广播实际数据
+        dist.broadcast(z_kv_batch, group_src=0, group=seq_parallel_group)
+        
+        if metadata['pooled_exists']:
+            dist.broadcast(pooled_hidden_states, group_src=0, group=seq_parallel_group)
+            
+        if metadata['contrast_exists']:
+            dist.broadcast(z_contrast, group_src=0, group=seq_parallel_group)
+        
+        return z_kv_batch, pooled_hidden_states, z_contrast
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1226,7 +1309,6 @@ class Qwen3Attention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
@@ -1241,14 +1323,16 @@ class Qwen3Attention(nn.Module):
             # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
             z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
         else:
-            if unpadded_lengths is not None:
-                res = self.mask_allocator(q, unpadded_lengths[0], range_ids, task_ids)
-                z_kv_batch, pooled_hidden_states = res['sparse_mask'], res['pooled_hidden_states']
-                z_constrast = res['decisions']
+            if (
+                seq_parallel_group is not None
+                and dist.is_initialized()
+                and dist.get_world_size(seq_parallel_group) > 1
+            ):
+                z_kv_batch, pooled_hidden_states, z_constrast = self.seq_parallel_mask_broadcast(seq_parallel_group, q, unpadded_lengths, range_ids, task_ids) 
             else:
                 res = self.mask_allocator(q, None, range_ids, task_ids)
-                z_kv_batch, pooled_hidden_states = res['sparse_mask'], res['pooled_hidden_states']
-                z_constrast = res['decisions']
+                z_kv_batch, pooled_hidden_states, z_constrast = res['sparse_mask'], res['pooled_hidden_states'], res['decisions']
+                
             if z_kv_batch.shape[-1] == self.num_key_value_heads:
                 z_kv_batch = (
                     z_kv_batch.unsqueeze(-1)              # [B, num_kv, 1]
@@ -1315,12 +1399,9 @@ class Qwen3Attention(nn.Module):
                 "gather_idx": (0 if unpadded_lengths is not None else 1),
             }
             if not self.config.enable_ada_sparsity:
-                z = torch.split(
-                    z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
-                )[dist.get_rank(seq_parallel_group)]
+                z = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0)[dist.get_rank(seq_parallel_group)]
             else:
-                z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
-                z = z_splits[dist.get_rank(seq_parallel_group)]
+                z = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)[dist.get_rank(seq_parallel_group)]
         else:
             attention_func = self.interpolated_attention
             kwargs = {}
@@ -1784,7 +1865,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[4],)
-
         if enable_contrastive_loss:
             def jsd(p, q, eps=1e-8):
                 """
@@ -1951,12 +2031,13 @@ class Qwen3Model(Qwen3PreTrainedModel):
             ):
                 # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
 
-                z_sums = [
-                    torch.zeros_like(z_sum)
-                    for _ in range(dist.get_world_size(seq_parallel_group))
-                ]
-                dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
-                z_sum = sum(z_sums)
+                # z_sums = [
+                #     torch.zeros_like(z_sum)
+                #     for _ in range(dist.get_world_size(seq_parallel_group))
+                # ]
+                # dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
+                # z_sum = sum(z_sums)
+                dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
 
                 gathered_layer_z_sums = []
                 for z_l in layer_z_sums:

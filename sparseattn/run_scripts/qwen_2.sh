@@ -1,3 +1,4 @@
+export CUDA_VISIBLE_DEVICES=1,2,3,4
 # Model and training configuration
 model=${MODEL:-"/data2/hf_models/Qwen3-4B"}
 bsz=${BSZ:-16}
@@ -10,6 +11,7 @@ warmup=${WARMUP:-0.1}
 suffix=${SUFFIX:-""}
 overrides=${OVERRIDES:-""}
 min_lr_ratio=${MIN_LR_RATIO:-1e-7}
+
 seq_parallel_size=${SEQ_PARALLEL_SIZE:-1}
 
 # FSDP configuration
@@ -19,8 +21,8 @@ gc=${GC:-"1"}
 
 # PruLong-specific arguments
 # max_toks=${MAX_TOKS:-65536}
-max_toks=${MAX_TOKS:-32768}
-# max_toks=${MAX_TOKS:-256}
+# max_toks=${MAX_TOKS:-32768}
+max_toks=${MAX_TOKS:-256}
 start_head_sparsity=${START_HEAD_SPARSITY:-0.0}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.3}
 mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
@@ -55,7 +57,7 @@ dataset_cache_dir="data_cache/sft"
 # dataset=${DATASET:-"/data1/public_data/Pre_filter"}
 task_type="sft" # pretrain or sft
 
-pooling_mode="ctx_q" # first_token,mean_all,ctx,q,ctx_q
+pooling_mode="first_token" # first_token,mean_all,ctx,q,ctx_q
 
 # Create run name
 extra_name="sft3_pretrain_64k_xattn_mlp_new*2_nolinear_ctx_q_5reg_32k_11.30"
@@ -79,7 +81,8 @@ if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
 else
     num_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 fi
-num_gpus=${NUM_GPUS_PER_NODE:-$num_gpus}
+#num_gpus=${NUM_GPUS_PER_NODE:-$num_gpus}
+num_gpus=4
 
 num_nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | wc -l)
 if [ $num_nodes == 0 ]; then
@@ -116,7 +119,7 @@ echo "num_nodes=${num_nodes} master_addr=${master_addr} master_port=${master_por
 
 # Environment variables
 export OMP_NUM_THREADS=$num_gpus
-export SWANLAB_API_KEY="t0PmOeLpVom1LRBDAKHaA"
+export SWANLAB_API_KEY="g5vUmp1WaDMSV9FNveypn"
 export SWANLAB_LOG_DIR=$out_dir
 export SWANLAB_MODE="cloud"
 export TOKENIZERS_PARALLELISM=true
@@ -154,7 +157,7 @@ base_arguments=(
     --max_steps $steps
     --save_steps $save_steps
     --save_total_limit $save_total_limit
-    --dataloader_num_workers 1
+    --dataloader_num_workers 0
 
     --data_cache_dir $dataset_cache_dir
 

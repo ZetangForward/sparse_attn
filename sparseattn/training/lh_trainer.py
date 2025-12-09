@@ -266,6 +266,7 @@ class Trainer(HFTrainer):
         self.log_loss = kwargs.pop("log_loss", False)
 
         super().__init__(model, args, *more_args, **kwargs)
+        self.args = args
         self.start_head_sparsity = args.start_head_sparsity
         self.end_head_sparsity = args.end_head_sparsity
         self.learning_rate = args.learning_rate
@@ -287,7 +288,6 @@ class Trainer(HFTrainer):
             "Summarization": {"start": 0, "end": 0.5},
         }
         self.reverse_class_map = {0: 'Single QA', 1: 'MultiHop QA', 2: 'Summarization', 3: 'Code'}
-
         if not dist.is_initialized() or args.seq_parallel_size == dist.get_world_size():
             logger.info(f"Using world as sequence parallel group")
             self.seq_parallel_group = dist.group.WORLD
@@ -337,17 +337,16 @@ class Trainer(HFTrainer):
         seq_parallel_world_size = (
             dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1
         )
-
+        
         if seq_parallel_world_size > 1:
             seq_parallel_rank = dist.get_rank(self.seq_parallel_group)
 
             input_ids = inputs["input_ids"]
+            assert input_ids.shape[0] == 1#只支持batch_size=1
             labels = inputs["labels"]
 
             shifted_labels = labels.roll(-1, dims=-1)
             shifted_labels[..., -1] = -100
-
-            seq_lengths = inputs["seq_lengths"]
 
             # add right padding here to make equal sized chunks
             if input_ids.size(-1) % seq_parallel_world_size != 0:
@@ -364,7 +363,8 @@ class Trainer(HFTrainer):
                 shifted_labels = torch.cat(
                     [shifted_labels, padding_zeros - 100], dim=-1
                 )
-                seq_lengths[-1] += padding
+                #seq_lengths[-1] += padding
+                #相应的这边要对attention_mask进行处理
 
             # select chunk of input_ids and labels
             input_ids_chunks = torch.tensor_split(
@@ -376,13 +376,15 @@ class Trainer(HFTrainer):
 
             inputs = {
                 "input_ids": input_ids_chunks[seq_parallel_rank],
-                "shifted_labels": shifted_labels_chunks[seq_parallel_rank],
-                "seq_lengths": seq_lengths,
+                "shifted_labels": shifted_labels_chunks[seq_parallel_rank],#这边需要考虑清楚是否要进行shifted
+                "attention_mask": inputs['attention_mask'],
+                "task_type": inputs['task_type'],
+                "segment_ids": inputs['segment_ids'],
+                "range_ids": inputs['range_ids'],
+                "task_ids": inputs['task_ids'],
                 "seq_parallel_group": self.seq_parallel_group,
             }
 
-            max_seq_length = seq_lengths.max()
-            max_tokens_per_device = seq_lengths.sum() // seq_parallel_world_size
 
             start_index = sum(
                 chunk.size(-1) for chunk in input_ids_chunks[:seq_parallel_rank]
@@ -391,25 +393,28 @@ class Trainer(HFTrainer):
 
             inputs["position_ids"] = torch.tensor([start_index]).to(input_ids.device)
 
-            # max sequence length is smaller per device => no need for sequence parallelism
-            if max_seq_length <= max_tokens_per_device:
-                # take the seq length field and only retain seq lengths with indices that are valid for this rank
-                seq_indices = seq_lengths.cumsum(-1)
-                seq_indices = seq_indices[
-                    (seq_indices < end_index) & (seq_indices >= start_index)
-                ]
+            #以下的代码只在多batch下有效
+            # max_seq_length = seq_lengths.max()
+            # max_tokens_per_device = seq_lengths.sum() // seq_parallel_world_size
+            # # max sequence length is smaller per device => no need for sequence parallelism
+            # if max_seq_length <= max_tokens_per_device:
+            #     # take the seq length field and only retain seq lengths with indices that are valid for this rank
+            #     seq_indices = seq_lengths.cumsum(-1)
+            #     seq_indices = seq_indices[
+            #         (seq_indices < end_index) & (seq_indices >= start_index)
+            #     ]
 
-                start_index_tensor = torch.tensor(
-                    [start_index], device=seq_indices.device
-                )
-                end_index_tensor = torch.tensor([end_index], device=seq_indices.device)
+            #     start_index_tensor = torch.tensor(
+            #         [start_index], device=seq_indices.device
+            #     )
+            #     end_index_tensor = torch.tensor([end_index], device=seq_indices.device)
 
-                seq_lengths = seq_indices.diff(
-                    prepend=start_index_tensor, append=end_index_tensor
-                )
-                seq_lengths = seq_lengths[seq_lengths > 0]
-                inputs["seq_lengths"] = seq_lengths
-                inputs["seq_parallel_group"] = None
+            #     seq_lengths = seq_indices.diff(
+            #         prepend=start_index_tensor, append=end_index_tensor
+            #     )
+            #     seq_lengths = seq_lengths[seq_lengths > 0]
+            #     inputs["seq_lengths"] = seq_lengths
+            #     inputs["seq_parallel_group"] = None
 
         return inputs
 
@@ -433,11 +438,12 @@ class Trainer(HFTrainer):
         
         inputs = self.get_sequence_parallel_inputs(inputs)
         
-        print(f"[Step {self.state.global_step}] Sample tasks: {tasks[:3]} → sparsity: {[f'{s:.3f}' for s in target_sparsity[:3].tolist()]}")
-        attention_mask = inputs.get("attention_mask")
-        valid_tokens = attention_mask.sum(dim=1)
-        print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
-            f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
+        if dist.get_world_size(self.seq_parallel_group)==0:
+            print(f"[Step {self.state.global_step}] Sample tasks: {tasks[:3]} → sparsity: {[f'{s:.3f}' for s in target_sparsity[:3].tolist()]}")
+            attention_mask = inputs.get("attention_mask")
+            valid_tokens = attention_mask.sum(dim=1)
+            print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+                f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
 
         outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
 
@@ -762,111 +768,37 @@ class Trainer(HFTrainer):
 
         return self.lr_scheduler
 
-    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+
+    def get_train_dataloader(self):
         if self.train_dataset is None:
-            return None
-
-        if self.args.ordered:
-            return SequentialSampler(self.train_dataset)
-
-        return super()._get_train_sampler()
-
-    def get_train_dataloader(self):    
-        if self.train_dataloader is not None:
-            return self.train_dataloader
-
-        return super().get_train_dataloader()
-
-    def prediction_step(
-        self,
-        model: nn.Module,
-        inputs: Dict[str, Union[torch.Tensor, Any]],
-        prediction_loss_only: bool,
-        ignore_keys: Optional[List[str]] = None,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """
-        Perform an evaluation step on `model` using `inputs`.
-
-        Subclass and override to inject custom behavior.
-
-        Args:
-            model (`nn.Module`):
-                The model to evaluate.
-            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
-                The inputs and targets of the model.
-
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument `labels`. Check your model's documentation for all accepted arguments.
-            prediction_loss_only (`bool`):
-                Whether or not to return the loss only.
-            ignore_keys (`Lst[str]`, *optional*):
-                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
-                gathering predictions.
-
-        Return:
-            Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple with the loss,
-            logits and labels (each being optional).
-        """
-        has_labels = (
-            False
-            if len(self.label_names) == 0
-            else all(inputs.get(k) is not None for k in self.label_names)
+            raise ValueError("Trainer: training requires a train_dataset.")
+        # 获取原始数据加载器
+        data_loader = super().get_train_dataloader()
+        seq_parallel_world_size = (
+            dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1
         )
-        # For CLIP-like models capable of returning loss values.
-        # If `return_loss` is not specified or being `None` in `inputs`, we check if the default value of `return_loss`
-        # is `True` in `model.forward`.
-        return_loss = inputs.get("return_loss", None)
-        if return_loss is None:
-            return_loss = self.can_return_loss
-        loss_without_labels = (
-            True if len(self.label_names) == 0 and return_loss else False
-        )
-
-        inputs = self._prepare_inputs(inputs)
-        if ignore_keys is None:
-            if hasattr(self.model, "config"):
-                ignore_keys = getattr(
-                    self.model.config, "keys_to_ignore_at_inference", []
-                )
-            else:
-                ignore_keys = []
-
-        # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
-        if has_labels or loss_without_labels:
-            labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
-            if len(labels) == 1:
-                labels = labels[0]
-        else:
-            labels = None
-
-        with torch.no_grad():
-            if is_sagemaker_mp_enabled():
-                raise ValueError(
-                    "SageMaker Model Parallelism is not supported in BaseTrainer"
-                )
-            else:
-                with self.compute_loss_context_manager():
-                    loss, outputs, metrics = self.compute_loss(
-                        model, inputs, return_output_and_metrics=True
-                    )
-                if loss is not None:
-                    loss = loss.mean().detach()
-
-                if isinstance(outputs, dict):
-                    logits = tuple(
-                        v for k, v in outputs.items() if k not in ignore_keys + ["loss"]
-                    )
-                else:
-                    logits = outputs[1:]
-
-        if prediction_loss_only:
-            return (loss, None, None, metrics)
-
-        logits = nested_detach(logits)
-        if len(logits) == 1:
-            logits = logits[0]
-
-        return (loss, logits, labels, metrics)
+        # 如果启用了分布式训练，并且想要自定义 Sampler
+        if seq_parallel_world_size > 1:
+            from torch.utils.data import DistributedSampler
+            
+            # 创建自定义的 DistributedSampler
+            train_sampler = DistributedSampler(
+                self.train_dataset,
+                num_replicas=dist.get_world_size() // seq_parallel_world_size,  # 关键：使用序列并行组的大小
+                rank=dist.get_rank() // seq_parallel_world_size
+            )
+            
+            # 重新创建 DataLoader，使用自定义的 Sampler
+            data_loader = DataLoader(
+                self.train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                sampler=train_sampler,
+                collate_fn=data_loader.collate_fn,
+                drop_last=self.args.dataloader_drop_last,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+        return data_loader
 
     def compute_loss_context_manager(self):
         """
@@ -876,385 +808,6 @@ class Trainer(HFTrainer):
             gc.collect()
             torch.cuda.empty_cache()
         return self.autocast_smart_context_manager()
-
-    def evaluation_loop(
-        self,
-        dataloader: DataLoader,
-        description: str,
-        prediction_loss_only: Optional[bool] = None,
-        ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
-    ) -> EvalLoopOutput:
-        """
-        Prediction/evaluation loop, shared by `Trainer.evaluate()` and `Trainer.predict()`.
-
-        Works both with or without labels.
-        """
-        args = self.args
-
-        prediction_loss_only = (
-            prediction_loss_only
-            if prediction_loss_only is not None
-            else args.prediction_loss_only
-        )
-
-        model = self._wrap_model(self.model, training=False, dataloader=dataloader)
-
-        if len(self.accelerator._models) == 0 and model is self.model:
-            model = (
-                self.accelerator.prepare(model)
-                if self.is_deepspeed_enabled
-                else self.accelerator.prepare_model(model, evaluation_mode=False)
-            )
-
-            if self.is_fsdp_enabled:
-                self.model = model
-
-            # for the rest of this function `model` is the outside model, whether it was wrapped or not
-            if model is not self.model:
-                self.model_wrapped = model
-
-            # backward compatibility
-            if self.is_deepspeed_enabled:
-                self.deepspeed = self.model_wrapped
-
-        # if full fp16 or bf16 eval is wanted and this ``evaluation`` or ``predict`` isn't called
-        # while ``train`` is running, cast it to the right dtype first and then put on device
-        if not self.is_in_train:
-            if args.fp16_full_eval:
-                model = model.to(dtype=torch.float16, device=args.device)
-            elif args.bf16_full_eval:
-                model = model.to(dtype=torch.bfloat16, device=args.device)
-
-        batch_size = self.args.eval_batch_size
-
-        logger.info(f"***** Running {description} *****")
-        if has_length(dataloader):
-            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
-        else:
-            logger.info("  Num examples: Unknown")
-        logger.info(f"  Batch size = {batch_size}")
-
-        model.eval()
-
-        self.callback_handler.eval_dataloader = dataloader
-        # Do this before wrapping.
-        eval_dataset = getattr(dataloader, "dataset", None)
-
-        if args.past_index >= 0:
-            self._past = None
-
-        # Initialize containers
-        # losses/preds/labels on GPU/TPU (accumulated for eval_accumulation_steps)
-        losses_host = None
-        preds_host = None
-        labels_host = None
-        inputs_host = None
-        metrics_host = None
-
-        metrics_names = None
-
-        # losses/preds/labels on CPU (final containers)
-        all_losses = None
-        all_preds = None
-        all_labels = None
-        all_inputs = None
-        all_metrics = None
-        # Will be useful when we have an iterable dataset so don't know its length.
-
-        observed_num_examples = 0
-        # Main evaluation loop
-        for step, inputs in enumerate(dataloader):
-            # Update the observed num examples
-            observed_batch_size = find_batch_size(inputs)
-            if observed_batch_size is not None:
-                observed_num_examples += observed_batch_size
-                # For batch samplers, batch_size is not known by the dataloader in advance.
-                if batch_size is None:
-                    batch_size = observed_batch_size
-
-            # Prediction step
-            loss, logits, labels, metrics = self.prediction_step(
-                model, inputs, prediction_loss_only, ignore_keys=ignore_keys
-            )
-            inputs_decode = (
-                self._prepare_input(inputs["input_ids"])
-                if args.include_inputs_for_metrics
-                else None
-            )
-
-            # Update containers on host
-            if loss is not None:
-                losses = self.accelerator.gather_for_metrics((loss.repeat(batch_size)))
-                losses_host = (
-                    losses
-                    if losses_host is None
-                    else nested_concat(losses_host, losses, padding_index=-100)
-                )
-            if labels is not None:
-                labels = self.accelerator.pad_across_processes(
-                    labels, dim=1, pad_index=-100
-                )
-            if inputs_decode is not None:
-                inputs_decode = self.accelerator.pad_across_processes(
-                    inputs_decode, dim=1, pad_index=-100
-                )
-                inputs_decode = self.accelerator.gather_for_metrics((inputs_decode))
-                inputs_host = (
-                    inputs_decode
-                    if inputs_host is None
-                    else nested_concat(inputs_host, inputs_decode, padding_index=-100)
-                )
-            if metrics is not None:
-                if metrics_names is None:
-                    metrics_names = list(metrics.keys())
-                else:
-                    assert metrics_names == list(metrics.keys()), (
-                        "Metrics should have the same keys across batches"
-                    )
-
-                metrics = [
-                    metric if metric.shape else metric.repeat(batch_size)
-                    for metric in metrics.values()
-                ]
-                metrics = self.accelerator.pad_across_processes(
-                    metrics, dim=1, pad_index=float("nan")
-                )
-                metrics = self.accelerator.gather_for_metrics(metrics)
-                metrics_host = (
-                    metrics
-                    if metrics_host is None
-                    else nested_concat(
-                        metrics_host, metrics, padding_index=float("nan")
-                    )
-                )
-            if logits is not None:
-                logits = self.accelerator.pad_across_processes(
-                    logits, dim=1, pad_index=-100
-                )
-                if self.preprocess_logits_for_metrics is not None:
-                    logits = self.preprocess_logits_for_metrics(logits, labels)
-                logits = self.accelerator.gather_for_metrics((logits))
-                preds_host = (
-                    logits
-                    if preds_host is None
-                    else nested_concat(preds_host, logits, padding_index=-100)
-                )
-
-            if labels is not None:
-                labels = self.accelerator.gather_for_metrics((labels))
-                labels_host = (
-                    labels
-                    if labels_host is None
-                    else nested_concat(labels_host, labels, padding_index=-100)
-                )
-
-            self.control = self.callback_handler.on_prediction_step(
-                args, self.state, self.control
-            )
-
-            # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
-            if (
-                args.eval_accumulation_steps is not None
-                and (step + 1) % args.eval_accumulation_steps == 0
-            ):
-                if losses_host is not None:
-                    losses = nested_numpify(losses_host)
-                    all_losses = (
-                        losses
-                        if all_losses is None
-                        else np.concatenate((all_losses, losses), axis=0)
-                    )
-                if preds_host is not None:
-                    logits = nested_numpify(preds_host)
-                    all_preds = (
-                        logits
-                        if all_preds is None
-                        else nested_concat(all_preds, logits, padding_index=-100)
-                    )
-                if metrics_host is not None:
-                    metrics = nested_numpify(metrics_host)
-                    all_metrics = (
-                        metrics
-                        if all_metrics is None
-                        else nested_concat(
-                            all_metrics, metrics, padding_index=float("nan")
-                        )
-                    )
-                if inputs_host is not None:
-                    inputs_decode = nested_numpify(inputs_host)
-                    all_inputs = (
-                        inputs_decode
-                        if all_inputs is None
-                        else nested_concat(
-                            all_inputs, inputs_decode, padding_index=-100
-                        )
-                    )
-                if labels_host is not None:
-                    labels = nested_numpify(labels_host)
-                    all_labels = (
-                        labels
-                        if all_labels is None
-                        else nested_concat(all_labels, labels, padding_index=-100)
-                    )
-
-                # Set back to None to begin a new accumulation
-                losses_host, preds_host, inputs_host, labels_host = (
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-
-        if args.past_index and hasattr(self, "_past"):
-            # Clean the state at the end of the evaluation loop
-            delattr(self, "_past")
-
-        # Gather all remaining tensors and put them back on the CPU
-        if losses_host is not None:
-            losses = nested_numpify(losses_host)
-            all_losses = (
-                losses
-                if all_losses is None
-                else np.concatenate((all_losses, losses), axis=0)
-            )
-        if preds_host is not None:
-            logits = nested_numpify(preds_host)
-            all_preds = (
-                logits
-                if all_preds is None
-                else nested_concat(all_preds, logits, padding_index=-100)
-            )
-        if inputs_host is not None:
-            inputs_decode = nested_numpify(inputs_host)
-            all_inputs = (
-                inputs_decode
-                if all_inputs is None
-                else nested_concat(all_inputs, inputs_decode, padding_index=-100)
-            )
-        if metrics_host is not None:
-            metrics = nested_numpify(metrics_host)
-            all_metrics = (
-                metrics
-                if all_metrics is None
-                else nested_concat(all_metrics, metrics, padding_index=float("nan"))
-            )
-        if labels_host is not None:
-            labels = nested_numpify(labels_host)
-            all_labels = (
-                labels
-                if all_labels is None
-                else nested_concat(all_labels, labels, padding_index=-100)
-            )
-
-        # Number of samples
-        if has_length(eval_dataset):
-            num_samples = len(eval_dataset)
-        # The instance check is weird and does not actually check for the type, but whether the dataset has the right
-        # methods. Therefore we need to make sure it also has the attribute.
-        elif (
-            isinstance(eval_dataset, IterableDatasetShard)
-            and getattr(eval_dataset, "num_examples", 0) > 0
-        ):
-            num_samples = eval_dataset.num_examples
-        else:
-            if has_length(dataloader):
-                num_samples = self.num_examples(dataloader)
-            else:  # both len(dataloader.dataset) and len(dataloader) fail
-                num_samples = observed_num_examples
-        if num_samples == 0 and observed_num_examples > 0:
-            num_samples = observed_num_examples
-
-        # Number of losses has been rounded to a multiple of batch_size and in a distributed training, the number of
-        # samplers has been rounded to a multiple of batch_size, so we truncate.
-        if all_losses is not None:
-            all_losses = all_losses[:num_samples]
-        if all_preds is not None:
-            all_preds = nested_truncate(all_preds, num_samples)
-        if all_labels is not None:
-            all_labels = nested_truncate(all_labels, num_samples)
-        if all_inputs is not None:
-            all_inputs = nested_truncate(all_inputs, num_samples)
-        # if all_metrics is not None:
-        #     all_metrics = nested_truncate(all_metrics, num_samples)
-
-        # Metrics!
-        if (
-            self.compute_metrics is not None
-            and all_preds is not None
-            and all_labels is not None
-        ):
-            if args.include_inputs_for_metrics:
-                metrics = self.compute_metrics(
-                    EvalPrediction(
-                        predictions=all_preds, label_ids=all_labels, inputs=all_inputs
-                    )
-                )
-            else:
-                metrics = self.compute_metrics(
-                    EvalPrediction(predictions=all_preds, label_ids=all_labels)
-                )
-        else:
-            metrics = {}
-
-        if all_metrics is not None:
-            for key, value in zip(metrics_names, all_metrics):
-                valid = ~np.isnan(value)
-                metrics[key] = value[valid].mean().item()
-                metrics[f"{key}___samples"] = np.sum(valid).item()
-
-        metrics["samples"] = num_samples
-
-        # To be JSON-serializable, we need to remove numpy types or zero-d tensors
-        metrics = denumpify_detensorize(metrics)
-
-        if all_losses is not None:
-            metrics[f"{metric_key_prefix}_loss"] = all_losses.mean().item()
-        if hasattr(self, "jit_compilation_time"):
-            metrics[f"{metric_key_prefix}_jit_compilation_time"] = (
-                self.jit_compilation_time
-            )
-
-        # Prefix all keys with metric_key_prefix + '_'
-        for key in list(metrics.keys()):
-            if not key.startswith(f"{metric_key_prefix}_"):
-                metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
-
-        return EvalLoopOutput(
-            predictions=all_preds,
-            label_ids=all_labels,
-            metrics=metrics,
-            num_samples=num_samples,
-        )
-
-    def evaluate(
-        self,
-        eval_dataset: Optional[Union[Dict[str, Dataset], Dataset]] = None,
-        ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
-    ) -> Dict[str, float]:
-        if eval_dataset is None:
-            eval_dataset = self.eval_dataset
-
-        if isinstance(eval_dataset, dict):
-            metrics = {}
-            for key, dataset in eval_dataset.items():
-                metrics.update(
-                    super().evaluate(
-                        dataset,
-                        ignore_keys=ignore_keys,
-                        metric_key_prefix=f"{metric_key_prefix}_{key}",
-                    )
-                )
-        else:
-            metrics = super().evaluate(
-                eval_dataset,
-                ignore_keys=ignore_keys,
-                metric_key_prefix=metric_key_prefix,
-            )
-
-        return metrics
-
 
     def _save_checkpoint(self, model, trial, metrics=None):
         # A wrapper around the original _save_checkpoint function to save streaming dataset state
