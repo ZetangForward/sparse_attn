@@ -337,12 +337,11 @@ class Trainer(HFTrainer):
         seq_parallel_world_size = (
             dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1
         )
-        
+        #多batch情况下，必须是进行了packing的
         if seq_parallel_world_size > 1:
             seq_parallel_rank = dist.get_rank(self.seq_parallel_group)
 
             input_ids = inputs["input_ids"]
-            assert input_ids.shape[0] == 1#只支持batch_size=1
             labels = inputs["labels"]
 
             shifted_labels = labels.roll(-1, dims=-1)
@@ -435,7 +434,6 @@ class Trainer(HFTrainer):
         # tasks = ["default"] * inputs["input_ids"].size(0)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step, tasks)
         target_sparsity = target_sparsity.to(model.device)  # [B]
-        
         inputs = self.get_sequence_parallel_inputs(inputs)
         
         if dist.get_world_size(self.seq_parallel_group)==0:
@@ -480,8 +478,9 @@ class Trainer(HFTrainer):
         reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
         contrastive_loss = outputs["contrastive_loss"] if isinstance(outputs, dict) else outputs[-1]
         head_contrastive_loss = outputs["head_contrastive_loss"] if isinstance(outputs, dict) else outputs[-3]
-        
+            
         loss = lm_loss + reg_loss + contrastive_loss + head_contrastive_loss
+        
         model_sparsity = outputs["model_sparsity"]
         print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "f"[Step {self.state.global_step}] Task={tasks} | model_sparsity={model_sparsity} | reg_loss={reg_loss}")
         
@@ -647,6 +646,8 @@ class Trainer(HFTrainer):
                     else:
                         optimizer_2_group.append(p)
                         optimized_parameters.append(n)
+                elif "embed_tokens" in n or "lm_head" in n:
+                    p.requires_grad = True
                 else:
                     if self.freeze_non_mask_parameters:
                         p.requires_grad = False
@@ -772,6 +773,8 @@ class Trainer(HFTrainer):
     def get_train_dataloader(self):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
+        # if self.train_dataloader is not None:
+        #     return self.train_dataloader
         # 获取原始数据加载器
         data_loader = super().get_train_dataloader()
         seq_parallel_world_size = (
@@ -1051,3 +1054,50 @@ class Trainer(HFTrainer):
 
     def _fsdp_qlora_plugin_updates(self):
         pass  # This messes with autowrap policy
+    
+    # def get_batch_samples(self, epoch_iterator, num_batches, device):
+    #     batch_samples = []
+    #     num_items_in_batch = None
+
+    #     cnt=0
+    #     while cnt < num_batches:
+    #         temp = next(epoch_iterator)
+    #         if temp['input_ids'][0,-1] == 151643:
+    #             continue
+    #         batch_samples.append(temp)
+    #         cnt+=1
+
+    #     count_num_items_in_batch = (
+    #         len(batch_samples) > 0
+    #         and "labels" in batch_samples[0]
+    #         and (
+    #             # num_items_in_batch is passed to model forward
+    #             # https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/trainer.py#L3757
+    #             self.model_accepts_loss_kwargs
+    #             # num_items_in_batch is passed to compute_loss_func
+    #             # https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/trainer.py#L3773
+    #             or self.compute_loss_func is not None
+    #             # num_items_in_batch is also verified if (self.model_accepts_loss_kwargs or self.compute_loss_func)
+    #             # https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/trainer.py#L3790
+    #         )
+    #     )
+
+    #     if count_num_items_in_batch:
+    #         # For now we don't support object detection
+    #         try:
+    #             num_items_in_batch = sum([(batch["labels"].ne(-100)).sum() for batch in batch_samples])
+    #         except (TypeError, AttributeError):
+    #             pass
+
+    #     if num_items_in_batch is not None:
+    #         if self.args.average_tokens_across_devices:
+    #             num_items_in_batch = self.accelerator.gather(num_items_in_batch).sum()
+
+    #         if torch.is_tensor(num_items_in_batch):
+    #             num_items_in_batch = num_items_in_batch.to(device)
+
+    #             if self.args.n_gpu > 1 and num_items_in_batch.dim() == 0:
+    #                 # In the DataParallel case, convert the scalar tensor into a 1-dim tensor
+    #                 num_items_in_batch = num_items_in_batch.unsqueeze(0)
+
+    #     return batch_samples, num_items_in_batch

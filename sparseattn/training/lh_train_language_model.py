@@ -308,8 +308,7 @@ def main():
             data_args=data_args,
             is_training=True,
         )
-        
-        class_indices = train_dataset.get_class_indices()
+        class_indices = train_dataset.get_class_indices()#返回一个字典，对应不同类别，标记有哪些索引属于对应的类别
         logger.info(f"Using stratified sampling. Class distribution: {[len(v) for v in class_indices.values()]}")
         
         if dist.is_initialized():
@@ -320,12 +319,12 @@ def main():
         try:
             if not dist.is_initialized():
                 raise SamplerConditionError("Distributed environment not initialized.")
-
+            
             custom_sampler = CustomDistributedStratifiedSampler(
                 dataset=train_dataset,
                 class_indices=class_indices,
+                seq_parallel_size=training_args.seq_parallel_size,
                 num_gpus=world_size,
-                required_per_class=2,
                 seed=42,
             )
             sampler = custom_sampler
@@ -402,6 +401,10 @@ def main():
             data_collator=data_collator,
             log_loss=script_args.should_log_loss,
         )
+        
+    if training_args.do_train:
+        trainer.train_dataloader = train_dataloader
+        logger.info("Successfully injected CustomDistributedStratifiedSampler into Trainer.")
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these

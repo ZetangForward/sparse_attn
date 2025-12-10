@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=1,2,3,4
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 # Model and training configuration
 model=${MODEL:-"/data2/hf_models/Qwen3-4B"}
 bsz=${BSZ:-16}
@@ -12,7 +12,7 @@ suffix=${SUFFIX:-""}
 overrides=${OVERRIDES:-""}
 min_lr_ratio=${MIN_LR_RATIO:-1e-7}
 
-seq_parallel_size=${SEQ_PARALLEL_SIZE:-1}
+seq_parallel_size=${SEQ_PARALLEL_SIZE:-8}
 
 # FSDP configuration
 # 0=Disable, 1=FULL_SHARD, 2=SHARD_GRAD_OP, 3=NO_SHARD, 4=HYBRID_SHARD, 5=HYBRID_SHARD_ZERO2
@@ -22,7 +22,7 @@ gc=${GC:-"1"}
 # PruLong-specific arguments
 # max_toks=${MAX_TOKS:-65536}
 # max_toks=${MAX_TOKS:-32768}
-max_toks=${MAX_TOKS:-256}
+max_toks=${MAX_TOKS:-32768}
 start_head_sparsity=${START_HEAD_SPARSITY:-0.0}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.3}
 mask_learning_rate=${MASK_LEARNING_RATE:-1.0}
@@ -82,7 +82,7 @@ else
     num_gpus=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 fi
 #num_gpus=${NUM_GPUS_PER_NODE:-$num_gpus}
-num_gpus=4
+num_gpus=8
 
 num_nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null | wc -l)
 if [ $num_nodes == 0 ]; then

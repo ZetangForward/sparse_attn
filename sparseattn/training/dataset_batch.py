@@ -355,47 +355,39 @@ from typing import Dict, List, Iterator
 class SamplerConditionError(ValueError):
     pass
 
+#需要兼容序列并行
 class CustomDistributedStratifiedSampler(torch.utils.data.Sampler):
     def __init__(
         self,
         dataset,
         class_indices: Dict[int, List[int]],
+        seq_parallel_size: Optional[int] = None,
         num_gpus: int = 8,
-        required_per_class: int = 2,
+        required_per_class: int = 1,
         seed: int = 42,
     ):
         # -------- Distributed setup --------
         if dist.is_initialized():
-            self.rank = dist.get_rank()
+            self.rank = dist.get_rank() // seq_parallel_size#同一个seq_group内的GPUrank是一样的
             self.world_size = dist.get_world_size()
         else:
             self.rank = 0
             self.world_size = num_gpus
 
         self.seed = seed
-        self.required_per_class = required_per_class
+        self.required_per_class = 1
         self.num_classes = len(class_indices)
         self.class_indices = class_indices
 
         self.global_batch_size = self.num_classes * self.required_per_class
 
-        if self.world_size != 8:
-            raise SamplerConditionError(
-                f"❌ Sampler Condition Failed: world_size={self.world_size} is not 8."
-            )
-
-        if self.global_batch_size != self.world_size:
-            raise SamplerConditionError(
-                f"❌ Sampler Condition Failed: global_batch_size={self.global_batch_size} (classes*{required_per_class}) "
-                f"must equal world_size={self.world_size} for this specific sampler."
-            )
         
         min_size = min(len(v) for v in class_indices.values())
         self.num_steps = min_size // required_per_class
 
 
         self.num_samples = self.num_steps
-        if self.rank == 0:
+        if dist.get_rank() == 0:
             print(f"✅ Sampler Initialized: steps={self.num_steps}, samples per rank={self.num_samples}")
 
     def __len__(self):
@@ -410,7 +402,6 @@ class CustomDistributedStratifiedSampler(torch.utils.data.Sampler):
             all_indices.extend(idxs)
 
         final_rank_samples = []
-
         for step in range(self.num_steps):
 
             step_indices = []
@@ -435,11 +426,10 @@ class CustomDistributedStratifiedSampler(torch.utils.data.Sampler):
                     chunk = chunk + borrowed
 
                 step_indices.extend(chunk)
-
             # now step_indices has num_classes * required_per_class items
-            if len(step_indices) != self.world_size:
-                raise RuntimeError("step size mismatches world_size")
-
+            # if len(step_indices) != self.world_size:
+            #     raise RuntimeError("step size mismatches world_size")
+            
             rng.shuffle(step_indices)
             final_rank_samples.append(step_indices[self.rank])
 

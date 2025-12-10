@@ -1787,7 +1787,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
             raise ValueError(
                 "You have to specify either decoder_input_ids or decoder_inputs_embeds"
             )
-
         # position_ids = None
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -1940,7 +1939,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 contrastive_loss = F.cross_entropy(logits, mapped_labels)
             else:
                 contrastive_loss = torch.tensor(0.0, device=hidden_states.device)
-                
             # head contrastive loss
             task_profiles = {}  # t -> [H]
 
@@ -2367,7 +2365,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             unpadded_lengths = (cu_seqlens, max_seqlen)
         else:
             unpadded_lengths = None
-
+        breakpoint()
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
