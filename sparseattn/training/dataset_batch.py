@@ -345,93 +345,15 @@ def build_dataset(paths, data_args, tokenizer=None, is_training=True, model_name
 
     return ParquetDataset(raw, tokenizer, data_args, max_len, is_training)
 
-from torch.utils.data.sampler import Sampler
-import random
-import math
-import torch
-import torch.distributed as dist
-from typing import Dict, List, Iterator
 
-class SamplerConditionError(ValueError):
-    pass
+#现在的任务就是在输入给模型是packing好的数据，然后
 
-#需要兼容序列并行
-class CustomDistributedStratifiedSampler(torch.utils.data.Sampler):
-    def __init__(
-        self,
-        dataset,
-        class_indices: Dict[int, List[int]],
-        seq_parallel_size: Optional[int] = None,
-        num_gpus: int = 8,
-        required_per_class: int = 1,
-        seed: int = 42,
-    ):
-        # -------- Distributed setup --------
-        if dist.is_initialized():
-            self.rank = dist.get_rank() // seq_parallel_size#同一个seq_group内的GPUrank是一样的
-            self.world_size = dist.get_world_size()
-        else:
-            self.rank = 0
-            self.world_size = num_gpus
 
-        self.seed = seed
-        self.required_per_class = 1
-        self.num_classes = len(class_indices)
-        self.class_indices = class_indices
-
-        self.global_batch_size = self.num_classes * self.required_per_class
-
+if __name__ == "__main__":
+    path = "/data2/public_data/mix_sft_64k"
+    data_args = DataArguments(
         
-        min_size = min(len(v) for v in class_indices.values())
-        self.num_steps = min_size // required_per_class
-
-
-        self.num_samples = self.num_steps
-        if dist.get_rank() == 0:
-            print(f"✅ Sampler Initialized: steps={self.num_steps}, samples per rank={self.num_samples}")
-
-    def __len__(self):
-        return self.num_samples
-
-    def __iter__(self):
-        rng = random.Random(self.seed)
-
-        # flatten all samples for other-class borrowing
-        all_indices = []
-        for cls, idxs in self.class_indices.items():
-            all_indices.extend(idxs)
-
-        final_rank_samples = []
-        for step in range(self.num_steps):
-
-            step_indices = []
-
-            for cls, idx_list in self.class_indices.items():
-                # shuffle index list
-                rng.shuffle(idx_list)
-
-                start = step * self.required_per_class
-                end = start + self.required_per_class
-                chunk = idx_list[start:end]
-
-                if len(chunk) < self.required_per_class:
-                    # need extra samples
-                    need = self.required_per_class - len(chunk)
-
-                    # borrow from other classes
-                    candidates = [i for i in all_indices if i not in chunk]
-                    rng.shuffle(candidates)
-
-                    borrowed = candidates[:need]
-                    chunk = chunk + borrowed
-
-                step_indices.extend(chunk)
-            # now step_indices has num_classes * required_per_class items
-            # if len(step_indices) != self.world_size:
-            #     raise RuntimeError("step size mismatches world_size")
-            
-            rng.shuffle(step_indices)
-            final_rank_samples.append(step_indices[self.rank])
-
-        return iter(final_rank_samples)
-
+    )
+    build_dataset(
+        
+    )

@@ -2327,6 +2327,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+        #我们现在保证数据在输入进来的时候就有了seq_length
         if seq_lengths is not None:
             if inputs_embeds is not None:
                 assert len(inputs_embeds.shape) == 2, (
@@ -2365,7 +2366,6 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             unpadded_lengths = (cu_seqlens, max_seqlen)
         else:
             unpadded_lengths = None
-        breakpoint()
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
