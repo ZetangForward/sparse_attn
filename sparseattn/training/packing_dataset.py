@@ -25,18 +25,19 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 
 import ast
+from torch.utils.data import Dataset
+from tqdm import tqdm
+
 
 logger = logging.getLogger(__name__)
 
 import numpy as np
-logger = logging.getLogger(__name__)
-
 
 
 
 
 class SFTStreamPackedDataset(Dataset):
-    def __init__(self, raw_dataset, tokenizer, max_seq_len=128*1024):
+    def __init__(self, raw_dataset, tokenizer, max_seq_len=128*1024, cache_dir=None):
         self.raw_dataset = raw_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -49,10 +50,40 @@ class SFTStreamPackedDataset(Dataset):
             'Summarization': 2, 
             'Code': 3
         }
-        
+
+        # 缓存逻辑
+        # 生成一个唯一的缓存文件名。建议包含原始数据长度和最大序列长度，防止参数变了还读旧缓存。
+        # 如果你有数据集的版本号或 hash，最好也加进去。
+        self.cache_path = None
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+            # 文件名示例: packed_sft_len10000_seq131072.pt
+            cache_filename = f"packed_sft_len{len(raw_dataset)}_seq{max_seq_len}.pt"
+            self.cache_path = os.path.join(cache_dir, cache_filename)
+
+        if self.cache_path and os.path.exists(self.cache_path):
+            logger.info(f"🚀 发现缓存文件: {self.cache_path}")
+            logger.info("正在加载缓存，这可能需要几秒钟...")
+            try:
+                self.packed_data = torch.load(self.cache_path)
+                logger.info(f"✅ 成功加载缓存! 包含 {len(self.packed_data)} 条打包后的序列。")
+                return  # 直接结束 __init__，跳过打包
+            except Exception as e:
+                logger.warning(f"⚠️ 加载缓存失败 ({e})，将重新进行打包...")
+
         logger.info(f"开始进行SFT数据贪心打包 (Packing)... 目标长度: {max_seq_len}")
         logger.info(f"策略: 不截断完整样本。若单个样本超过 {max_seq_len} 则跳过。不生成 Attention Mask。")
+        
         self._pack_dataset()
+
+        # [NEW] 打包完成后保存缓存
+        if self.cache_path:
+            logger.info(f"💾 正在保存缓存到: {self.cache_path} ...")
+            try:
+                torch.save(self.packed_data, self.cache_path)
+                logger.info("✅ 缓存保存成功!")
+            except Exception as e:
+                logger.error(f"❌ 缓存保存失败: {e}")
 
     def _get_task_token(self, task_type):
         if task_type == 'Single QA': return '[TASK_SQA]'
@@ -154,7 +185,11 @@ class SFTStreamPackedDataset(Dataset):
 
         # 4. 生成 Labels (Mask user prompts)
         labels = list(full_input_ids)
-
+        # 将 Answer 之前的部分设为 -100
+        # if a_start > 0:
+        #     for k in range(a_start):
+        #         labels[k] = -100
+        
         # 5. Range IDs [8]
         range_ids = [special_start, special_end, ctx_start, ctx_end, q_start, q_end, a_start, a_end]
 
@@ -176,7 +211,18 @@ class SFTStreamPackedDataset(Dataset):
         buf_task_ids = []    
         buf_task_types = []  
         buf_lengths = []     
-        for i in range(len(self.raw_dataset)):
+
+        for i in tqdm(range(len(self.raw_dataset)), desc="Packing Dataset"):
+            # 处理单条数据
+            processed = self._process_raw_item(self.raw_dataset[i])
+            
+            p_input_ids = processed["input_ids"]
+            p_len = len(p_input_ids)
+
+            # [策略修改] 如果单条数据本身超过 max_seq_len，则直接跳过
+            if p_len > self.max_seq_len:
+                # logger.warning(f"Skipping sample {i}...") # 减少日志刷屏
+                continue
             # 处理单条数据
             processed = self._process_raw_item(self.raw_dataset[i])
             
@@ -250,7 +296,7 @@ class SFTStreamPackedDataset(Dataset):
             "labels": torch.tensor(labels, dtype=torch.long),               # [total_seq]
             # "attention_mask": removed,
             "seq_lengths": torch.tensor(seq_lengths, dtype=torch.int32),    # [bsz+1]
-            "task_type": task_types,                                        # List[str]
+            "task_type": task_types,                                        # List[str] -> [bsz+1]? 
             "segment_ids": torch.tensor(segment_ids, dtype=torch.long),     # [total_seq]
             "range_ids": torch.tensor(range_ids_list, dtype=torch.long),    # [bsz, 8]
             "task_ids": torch.tensor(task_ids, dtype=torch.long),           # [bsz]
@@ -261,7 +307,6 @@ class SFTStreamPackedDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.packed_data[idx]
-    
     
 # =========================================================
 #  Dataset builder
@@ -308,7 +353,7 @@ def build_dataset(paths, data_args, tokenizer=None, is_training=True, model_name
             return l > data_args.min_seq_len
         raw = raw.filter(filter_fn, num_proc=os.cpu_count())
         logger.info(f"Filtered dataset size: {len(raw)}")
-    return SFTStreamPackedDataset(raw, tokenizer)
+    return SFTStreamPackedDataset(raw, tokenizer, max_seq_len = 128*1024, cache_dir="data_cache")
 
 @dataclass
 class DataArguments:
