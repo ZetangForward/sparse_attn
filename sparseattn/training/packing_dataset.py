@@ -85,13 +85,6 @@ class SFTStreamPackedDataset(Dataset):
             except Exception as e:
                 logger.error(f"❌ 缓存保存失败: {e}")
 
-    def _get_task_token(self, task_type):
-        if task_type == 'Single QA': return '[TASK_SQA]'
-        if task_type == 'MultiHop QA': return '[TASK_MHQA]'
-        if task_type == 'Summarization': return '[TASK_SUM]'
-        if task_type == 'Code': return '[TASK_CODE]'
-        return '[TASK_OTHER]'
-
     def _process_raw_item(self, item):
         """
         处理单条数据为 token ids。
@@ -112,15 +105,7 @@ class SFTStreamPackedDataset(Dataset):
         task_type = meta.get('task', 'Other')
         class_id = self.CLASS_MAP.get(task_type, 4) # 4 for Other
 
-        # 2. Tokenize
-        task_token = self._get_task_token(task_type)
         separator = "\n\n"
-
-        # Task IDs
-        task_ids = self.tokenizer(task_token, add_special_tokens=False)["input_ids"]
-        # 移除可能自动添加的 eos/sep
-        if task_ids and (task_ids[-1] == self.tokenizer.eos_token_id or task_ids[-1] == self.tokenizer.sep_token_id):
-            task_ids = task_ids[:-1]
 
         # Context IDs
         if flag == "1" or not ctx:
@@ -145,61 +130,38 @@ class SFTStreamPackedDataset(Dataset):
 
         # 3. 拼接 Input IDs 和 Segment IDs
         full_input_ids = []
-        segment_ids = []
         current_len = 0
 
-        # Segment 0: Task
-        special_start = current_len
-        full_input_ids.extend(task_ids)
-        segment_ids.extend([0] * len(task_ids))
-        current_len += len(task_ids)
-        special_end = current_len - 1 if task_ids else special_start
 
         # Segment 1: Context
-        ctx_start = current_len
         full_input_ids.extend(ctx_ids)
-        segment_ids.extend([1] * len(ctx_ids))
         current_len += len(ctx_ids)
-        ctx_end = current_len - 1 if ctx_ids else ctx_start
 
         # Segment 2: Question
-        q_start = current_len
         full_input_ids.extend(q_ids)
-        segment_ids.extend([2] * len(q_ids))
         current_len += len(q_ids)
-        q_end = current_len - 1 if q_ids else q_start
 
         # Segment 3: Answer
-        a_start = current_len
         full_input_ids.extend(a_ids)
-        segment_ids.extend([3] * len(a_ids))
         current_len += len(a_ids)
-        a_end = current_len - 1 if a_ids else a_start
 
         # Add EOS
         if self.tokenizer.eos_token_id is not None and (not full_input_ids or full_input_ids[-1] != self.tokenizer.eos_token_id):
-            full_input_ids.append(self.tokenizer.eos_token_id)
-            segment_ids.append(3) 
+            full_input_ids.append(self.tokenizer.eos_token_id) 
             current_len += 1
-            a_end = current_len - 1
-
+            
         # 4. 生成 Labels (Mask user prompts)
         labels = list(full_input_ids)
+        
         # 将 Answer 之前的部分设为 -100
         # if a_start > 0:
         #     for k in range(a_start):
         #         labels[k] = -100
         
-        # 5. Range IDs [8]
-        range_ids = [special_start, special_end, ctx_start, ctx_end, q_start, q_end, a_start, a_end]
-
         return {
             "input_ids": full_input_ids,
             "labels": labels,
-            "segment_ids": segment_ids,
-            "range_ids": range_ids,
             "task_id": class_id,
-            "task_type": task_type
         }
 
     def _pack_dataset(self):
@@ -239,11 +201,7 @@ class SFTStreamPackedDataset(Dataset):
                 # Add to buffer
                 buf_input_ids.extend(p_input_ids)
                 buf_labels.extend(processed["labels"])
-                buf_segment_ids.extend(processed["segment_ids"])
-                
-                buf_range_ids.append(processed["range_ids"])
                 buf_task_ids.append(processed["task_id"])
-                buf_task_types.append(processed["task_type"])
                 buf_lengths.append(p_len)
             else:
                 # Buffer 满了，打包并开启新的 buffer
@@ -253,10 +211,7 @@ class SFTStreamPackedDataset(Dataset):
                 # 重置 buffer 并加入当前 item
                 buf_input_ids = list(p_input_ids)
                 buf_labels = list(processed["labels"])
-                buf_segment_ids = list(processed["segment_ids"])
-                buf_range_ids = [processed["range_ids"]]
                 buf_task_ids = [processed["task_id"]]
-                buf_task_types = [processed["task_type"]]
                 buf_lengths = [p_len]
 
         # 处理最后一个 buffer
@@ -278,7 +233,6 @@ class SFTStreamPackedDataset(Dataset):
             
             input_ids.extend([pad_id] * pad_len)
             labels.extend([-100] * pad_len)
-            segment_ids.extend([0] * pad_len) 
             
             # 注意：padding 部分不计入有效长度 lengths，也不在 seq_lengths 的区间内
 
@@ -287,8 +241,6 @@ class SFTStreamPackedDataset(Dataset):
         # seq_lengths 表示的是有效数据的累积索引，不包含最后的 padding (如果有的话)
         seq_lengths = [0] + list(np.cumsum(lengths))
         
-        # 3. [已移除] 构建 Attention Mask
-        # 根据要求移除 mask
             
         # 4. 转 Tensor 并保存
         self.packed_data.append({
@@ -296,9 +248,6 @@ class SFTStreamPackedDataset(Dataset):
             "labels": torch.tensor(labels, dtype=torch.long),               # [total_seq]
             # "attention_mask": removed,
             "seq_lengths": torch.tensor(seq_lengths, dtype=torch.int32),    # [bsz+1]
-            "task_type": task_types,                                        # List[str] -> [bsz+1]? 
-            "segment_ids": torch.tensor(segment_ids, dtype=torch.long),     # [total_seq]
-            "range_ids": torch.tensor(range_ids_list, dtype=torch.long),    # [bsz, 8]
             "task_ids": torch.tensor(task_ids, dtype=torch.long),           # [bsz]
         })
 
@@ -371,8 +320,8 @@ class DataArguments:
 
 
 if __name__ == "__main__":
-    path = "/data2/public_data/mix_sft_64k"
-    data_args = DataArguments(data_cache_dir="/data1/lcm_lab/yy/SparseAttn/sparseattn/data_cache/sft")
+    path = "/data2/public_data/qwen_mix_sft_128K"
+    data_args = DataArguments()
     tokenizer = AutoTokenizer.from_pretrained("/data2/hf_models/Qwen3-4B")
     dataset = build_dataset(
         paths=path,
