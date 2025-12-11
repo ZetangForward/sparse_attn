@@ -346,8 +346,16 @@ def build_dataset(paths, data_args, tokenizer=None, is_training=True, model_name
     return ParquetDataset(raw, tokenizer, data_args, max_len, is_training)
 
 
-#现在的任务就是在输入给模型是packing好的数据，然后
-
+#现在的任务就是在输入给模型是packing好的数据
+#其中一条数据的形式如下：
+# "input_ids": [1,total_seq], total_seq表示最终的长度，是多条数据拼接后的长度。最终的长度需要被8整除，同时<=128k, 然后尽量接近128k。所以每条数据使用的原始数据条数是不固定的。
+# "labels": [1,total_seq], 
+# "attention_mask": [bsz, max_seq] bsz表示的是使用的数据条数
+# "seq_lengths": [bsz+1]  用于表示每条数据的起始位置和终止位置。 
+# "task_type": [bsz], 表示每条数据对应的任务类型
+# "segment_ids": [bsz, ],
+# "range_ids": [bsz, ],
+# "task_ids": [bsz], 表示每条数据的对应的任务id
 
 if __name__ == "__main__":
     path = "/data2/public_data/mix_sft_64k"

@@ -2351,6 +2351,8 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             max_seqlen = seq_lengths.max().item()
 
             unpadded_lengths = (cu_seqlens, max_seqlen)
+            
+            
         elif attention_mask is not None and not use_cache and attention_mask.size(0) != 1:
             if inputs_embeds is not None:
                 bsz = inputs_embeds.size(0)

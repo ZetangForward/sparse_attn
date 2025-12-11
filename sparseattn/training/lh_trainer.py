@@ -377,6 +377,7 @@ class Trainer(HFTrainer):
                 "input_ids": input_ids_chunks[seq_parallel_rank],
                 "shifted_labels": shifted_labels_chunks[seq_parallel_rank],#这边需要考虑清楚是否要进行shifted
                 "attention_mask": inputs['attention_mask'],
+                "seq_lengths": 
                 "task_type": inputs['task_type'],
                 "segment_ids": inputs['segment_ids'],
                 "range_ids": inputs['range_ids'],
