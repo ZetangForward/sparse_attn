@@ -378,6 +378,7 @@ class PackedDataCollator:
             "seq_lengths": seq_lengths, # List[Tensor] Tensor shape: [Bi + 1], Bi is the number of sub-samples in the seq.
             "task_ids": task_ids,       # List[Tensor] Tensor shape: [Bi]
             "task_type": task_types     # List[Tensor] Tensor shape: [Bi]
+            "range_ids": 
         }
 
         return res

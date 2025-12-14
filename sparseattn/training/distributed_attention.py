@@ -83,6 +83,7 @@ class DistributedAttention(torch.nn.Module):
         key_values_heads = SeqAllToAll.apply(key_values, scatter_idx, gather_idx, group)
 
         # out shape : e.g., [s:h/p:]
+        
         output_heads = self.local_attn(query_heads, key_values_heads, *args, **kwargs)
 
         # out e.g., [s/p::h]

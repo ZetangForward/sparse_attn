@@ -128,16 +128,16 @@ class ParquetDataset(Dataset):
         except Exception:
             pass
 
-        if task_type == 'Single QA':
-            task_token = '[TASK_SQA]'
-        elif task_type == 'MultiHop QA': 
-            task_token = '[TASK_MHQA]'
-        elif task_type == 'Summarization':
-            task_token = '[TASK_SUM]'
-        elif task_type == 'Code':
-            task_token = '[TASK_CODE]'
-        else:
-            task_token = '[TASK_OTHER]'
+        # if task_type == 'Single QA':
+        #     task_token = '[TASK_SQA]'
+        # elif task_type == 'MultiHop QA': 
+        #     task_token = '[TASK_MHQA]'
+        # elif task_type == 'Summarization':
+        #     task_token = '[TASK_SUM]'
+        # elif task_type == 'Code':
+        #     task_token = '[TASK_CODE]'
+        # else:
+        #     task_token = '[TASK_OTHER]'
             
         separator = "\n\n"
 

@@ -53,12 +53,16 @@ def _process_single_item(item, tokenizer, class_map):
     q = item.get("question", "") or ""
     a = item.get("answer", "") or ""
     meta = item.get("metadata", {}) or {}
-    
-    if isinstance(meta, str):
-        try:
-            meta = ast.literal_eval(meta)
-        except:
-            meta = {}
+    flag = str(meta.get("flag", "0"))
+
+    task_type = "Other"
+    is_prefix = True
+    try:
+        meta_dict = ast.literal_eval(meta) if isinstance(meta, str) else meta
+        task_type = meta_dict.get('task', 'Other')
+        is_prefix = meta_dict.get('is_prefix', True)
+    except Exception:
+        pass
     
     flag = str(meta.get("flag", "0"))
     task_type = meta.get('task', 'Other')
@@ -66,60 +70,96 @@ def _process_single_item(item, tokenizer, class_map):
 
     separator = "\n\n"
 
-    # Context
+    # Context (Segment ID 1)
     if flag == "1" or not ctx:
         ctx_text = ""
     else:
         ctx_text = "\n" + ctx.rstrip()
     ctx_ids = tokenizer(ctx_text, add_special_tokens=False)["input_ids"]
-
-    # Question
+    
+    # Question (Segment ID 2)
     if flag == "1":
         q_text = "\n" + q.lstrip()
     else:
         q_text = "\n" + q.lstrip() if ctx and q else (q.lstrip() if q and not ctx else "")
     q_ids = tokenizer(q_text, add_special_tokens=False)["input_ids"]
 
-    # Answer
+    # Separator + Answer (Segment ID 3)
     if a:
         a_text = separator + a
         a_ids = tokenizer(a_text, add_special_tokens=False)["input_ids"]
     else:
         a_ids = []
 
+    # --- 3. Construct Full Sequence, Segment IDs, and Ranges ---
+    
+    # [TASK_TOKEN] + [CTX] + [Q] + [SEPARATOR] + [ANSWER]
+    
+    current_len = 0
+    
+    # Task (Segment 0)
     full_input_ids = []
-    # Segment 1: Context
-    full_input_ids.extend(ctx_ids)
-    # Segment 2: Question
-    full_input_ids.extend(q_ids)
-    # Segment 3: Answer
-    full_input_ids.extend(a_ids)
+    # segment_ids = []
+    special_start = special_end = 0
 
-    # Add EOS
-    if tokenizer.eos_token_id is not None and (not full_input_ids or full_input_ids[-1] != tokenizer.eos_token_id):
-        full_input_ids.append(tokenizer.eos_token_id) 
+    if is_prefix:
+        # Question (Segment 2)
+        q_start = current_len
+        full_input_ids.extend(q_ids)
+        # segment_ids.extend([2] * len(q_ids))
+        current_len += len(q_ids)
+        q_end = current_len - 1 if q_ids else q_start
+        
+        # Context (Segment 1)
+        ctx_start = current_len
+        full_input_ids.extend(ctx_ids)
+        # segment_ids.extend([1] * len(ctx_ids))
+        current_len += len(ctx_ids)
+        ctx_end = current_len - 1 if ctx_ids else ctx_start
+        
+    else:
+        # Context (Segment 1)
+        ctx_start = current_len
+        full_input_ids.extend(ctx_ids)
+        # segment_ids.extend([1] * len(ctx_ids))
+        current_len += len(ctx_ids)
+        ctx_end = current_len - 1 if ctx_ids else ctx_start
+        
+        # Question (Segment 2)
+        q_start = current_len
+        full_input_ids.extend(q_ids)
+        # segment_ids.extend([2] * len(q_ids))
+        current_len += len(q_ids)
+        q_end = current_len - 1 if q_ids else q_start
+    
+    # Answer (Segment 3) + Separator
+    a_start = current_len
+    full_input_ids.extend(a_ids)
+    # segment_ids.extend([3] * len(a_ids))
+    current_len += len(a_ids)
+    a_end = current_len - 1 if a_ids else a_start
+
+    # Add EOS token at the very end
+    if tokenizer.eos_token_id is not None and full_input_ids[-1] != tokenizer.eos_token_id:
+        full_input_ids.append(tokenizer.eos_token_id)
+        # segment_ids.append(3) 
+        current_len += 1
+        a_end = current_len - 1
         
     labels = list(full_input_ids)
-    # (如果需要mask answer前面的部分，可以在这里加逻辑)
+    
+    range_ids = [special_start, special_end, ctx_start, ctx_end, q_start, q_end, a_start, a_end]
 
     return {
         "input_ids": full_input_ids,
         "labels": labels,
         "task_id": class_id,
         "task_type": task_type,
+        "range_ids": range_ids,
     }
 
-def _finalize_pack(tokenizer, input_ids, labels, task_ids, lengths, task_types):
+def _finalize_pack(tokenizer, input_ids, labels, task_ids, lengths, task_types, range_ids):
     """打包收尾：Padding并转换为Tensor结构"""
-    curr_len = len(input_ids)
-    remainder = curr_len % 8
-    if remainder != 0:
-        pad_len = 8 - remainder
-        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-        
-        input_ids.extend([pad_id] * pad_len)
-        labels.extend([-100] * pad_len)
-    
     seq_lengths = [0] + list(np.cumsum(lengths))
     
     return {
@@ -128,6 +168,7 @@ def _finalize_pack(tokenizer, input_ids, labels, task_ids, lengths, task_types):
         "seq_lengths": seq_lengths,      # List[int]
         "task_ids": task_ids,            # List[int]
         "task_type": task_types,         # List[str]
+        "range_ids": range_ids,          # List[int] [8]
     }
 
 def worker_pack_chunk(chunk_dataset, tokenizer, max_seq_len, worker_id):
@@ -145,6 +186,7 @@ def worker_pack_chunk(chunk_dataset, tokenizer, max_seq_len, worker_id):
     buf_task_ids = []    
     buf_lengths = []     
     buf_task_types = []
+    buf_range_ids = []
 
     # 遍历当前 chunk 的数据
     # 使用 tqdm 需要指定 position 避免多进程打印混乱，或者直接去掉
@@ -169,9 +211,10 @@ def worker_pack_chunk(chunk_dataset, tokenizer, max_seq_len, worker_id):
             buf_task_ids.append(processed["task_id"])
             buf_lengths.append(p_len)
             buf_task_types.append(processed["task_type"])
+            buf_range_ids.append(processed["range_ids"])
         else:
             # Buffer 满了，finalize
-            packed_item = _finalize_pack(tokenizer, buf_input_ids, buf_labels, buf_task_ids, buf_lengths, buf_task_types)
+            packed_item = _finalize_pack(tokenizer, buf_input_ids, buf_labels, buf_task_ids, buf_lengths, buf_task_types, buf_range_ids)
             local_packed_data.append(packed_item)
             
             # Reset buffer
@@ -180,10 +223,11 @@ def worker_pack_chunk(chunk_dataset, tokenizer, max_seq_len, worker_id):
             buf_task_ids = [processed["task_id"]]
             buf_lengths = [p_len]
             buf_task_types = [processed["task_type"]]
+            buf_range_ids = [processed["range_ids"]]
 
     # 处理最后一个 buffer
     if buf_input_ids:
-        packed_item = _finalize_pack(tokenizer, buf_input_ids, buf_labels, buf_task_ids, buf_lengths, buf_task_types)
+        packed_item = _finalize_pack(tokenizer, buf_input_ids, buf_labels, buf_task_ids, buf_lengths, buf_task_types, buf_range_ids)
         local_packed_data.append(packed_item)
     
     return local_packed_data
@@ -276,7 +320,8 @@ class PackedDataset(Dataset):
             "labels": torch.tensor(item["labels"], dtype=torch.long),
             "seq_lengths": torch.tensor(item["seq_lengths"], dtype=torch.int32),
             "task_ids": torch.tensor(item["task_ids"], dtype=torch.long),
-            "task_type": item["task_type"] # 字符串列表保持原样
+            "task_type": item["task_type"], # 字符串列表保持原样
+            "range_ids": torch.tensor(item["range_ids"], dtype=torch.long),
         }
 
 # =========================================================
@@ -334,53 +379,54 @@ def build_packed_dataset(paths, data_args, tokenizer=None):
         num_proc=data_args.preprocessing_num_workers # 使用参数控制核数
     )
 
-class PackedDataCollator:
-    def __init__(self, tokenizer=None, data_args=None, max_seq_len=None):
-        # 保留接口兼容性，但在 Packing 模式下通常不需要 pad，因为都已经 pack 满或 pad 好了
-        self.tokenizer = tokenizer 
-        self.data_args = data_args
-        self.max_seq_len = max_seq_len
+# 已弃用
+# class PackedDataCollator:
+#     def __init__(self, tokenizer=None, data_args=None, max_seq_len=None):
+#         # 保留接口兼容性，但在 Packing 模式下通常不需要 pad，因为都已经 pack 满或 pad 好了
+#         self.tokenizer = tokenizer 
+#         self.data_args = data_args
+#         self.max_seq_len = max_seq_len
 
-    def __call__(self, batch: List[Dict]):
-        # batch 是一个 list，包含多个 dataset[i] 的结果
+#     def __call__(self, batch: List[Dict]):
+#         # batch 是一个 list，包含多个 dataset[i] 的结果
         
-        # 1. 确保 input_ids 和 labels 是 Tensor
-        input_ids_list = [item['input_ids'] for item in batch]
-        labels_list = [item['labels'] for item in batch]
+#         # 1. 确保 input_ids 和 labels 是 Tensor
+#         input_ids_list = [item['input_ids'] for item in batch]
+#         labels_list = [item['labels'] for item in batch]
         
-        # 如果 __getitem__ 没有转 Tensor，这里进行转换
-        if not isinstance(input_ids_list[0], torch.Tensor):
-            input_ids = torch.tensor(input_ids_list, dtype=torch.long)
-            labels = torch.tensor(labels_list, dtype=torch.long)
-        else:
-            input_ids = torch.stack(input_ids_list, dim=0)
-            labels = torch.stack(labels_list, dim=0)
+#         # 如果 __getitem__ 没有转 Tensor，这里进行转换
+#         if not isinstance(input_ids_list[0], torch.Tensor):
+#             input_ids = torch.tensor(input_ids_list, dtype=torch.long)
+#             labels = torch.tensor(labels_list, dtype=torch.long)
+#         else:
+#             input_ids = torch.stack(input_ids_list, dim=0)
+#             labels = torch.stack(labels_list, dim=0)
         
-        # 2. 处理变长字段 (seq_lengths, task_ids)
-        # 它们是 List[Tensor] 或 List[List]，Collator 最终通常不 Stack 变长字段
-        # 或者 Flatten 它们（取决于你的模型 FlashAttn 实现）
+#         # 2. 处理变长字段 (seq_lengths, task_ids)
+#         # 它们是 List[Tensor] 或 List[List]，Collator 最终通常不 Stack 变长字段
+#         # 或者 Flatten 它们（取决于你的模型 FlashAttn 实现）
         
-        seq_lengths = [item['seq_lengths'] for item in batch]
-        task_ids = [item['task_ids'] for item in batch]
+#         seq_lengths = [item['seq_lengths'] for item in batch]
+#         task_ids = [item['task_ids'] for item in batch]
         
-        # 确保内部也是 Tensor (针对变长部分)
-        if not isinstance(seq_lengths[0], torch.Tensor):
-             seq_lengths = [torch.tensor(s, dtype=torch.int32) for s in seq_lengths]
+#         # 确保内部也是 Tensor (针对变长部分)
+#         if not isinstance(seq_lengths[0], torch.Tensor):
+#              seq_lengths = [torch.tensor(s, dtype=torch.int32) for s in seq_lengths]
              
-        if not isinstance(task_ids[0], torch.Tensor):
-             task_ids = [torch.tensor(t, dtype=torch.long) for t in task_ids]
+#         if not isinstance(task_ids[0], torch.Tensor):
+#              task_ids = [torch.tensor(t, dtype=torch.long) for t in task_ids]
 
-        task_types = [item['task_type'] for item in batch]
+#         task_types = [item['task_type'] for item in batch]
         
-        res = {
-            "input_ids": input_ids,     # [B, S], B == 1 
-            "labels": labels,           # [B, S]
-            "seq_lengths": seq_lengths, # List[Tensor] Tensor shape: [Bi + 1], Bi is the number of sub-samples in the seq.
-            "task_ids": task_ids,       # List[Tensor] Tensor shape: [Bi]
-            "task_type": task_types     # List[Tensor] Tensor shape: [Bi]
-        }
+#         res = {
+#             "input_ids": input_ids,     # [B, S], B == 1 
+#             "labels": labels,           # [B, S]
+#             "seq_lengths": seq_lengths, # List[Tensor] Tensor shape: [Bi + 1], Bi is the number of sub-samples in the seq.
+#             "task_ids": task_ids,       # List[Tensor] Tensor shape: [Bi]
+#             "task_type": task_types     # List[Tensor] Tensor shape: [Bi]
+#         }
 
-        return res
+#         return res
 
 if __name__ == "__main__":
     # 1. 多进程启动方式设置 (CUDA环境必备)
@@ -421,18 +467,6 @@ if __name__ == "__main__":
     print(f"Input IDs Shape: {item0['input_ids'].shape}")
     print(f"Task Types: {item0['task_type']}")
     print(f"Seq Lengths (cum): {item0['seq_lengths']}")
-
-    # 6. 【验证环节 2】检查 Collator (模拟 DataLoader 行为)
-    # 因为 Parquet 存的是 List，Dataset 输出的是 Tensor，Collator 需要能处理
-    print("\n--- Collator Check ---")
-    collator = PackedDataCollator(tokenizer=tokenizer)
-    
-    # 模拟一个 Batch
-    batch_input = [dataset[1000]]
-    batch_output = collator(batch_input)
-    
-    print(f"Batch Input IDs Shape: {batch_output['input_ids'].shape}") # 应该是 [2, max_seq_len]
-    print(f"Batch Labels Shape:    {batch_output['labels'].shape}")
     
 
-    # breakpoint() # 如果需要手动调试解开此行
+    breakpoint() 

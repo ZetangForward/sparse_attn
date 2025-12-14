@@ -333,7 +333,6 @@ def main():
     if training_args.do_train:
         if training_args.seq_parallel_size <= 1:
             data_collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
-            multiprocessing.set_start_method("spawn", force=True) 
             train_dataset = build_dataset(
                 script_args.tokenized_mds_train,
                 tokenizer=tokenizer,
@@ -374,7 +373,7 @@ def main():
                 dataset=train_dataset,
                 batch_size=training_args.per_device_train_batch_size,
                 sampler=sampler,
-                collate_fn=data_collator,
+                collate_fn=None,
                 num_workers=training_args.dataloader_num_workers,
                 pin_memory=training_args.dataloader_pin_memory,
                 drop_last=True, 

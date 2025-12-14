@@ -17,6 +17,98 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+import torch
+
+from typing import Any, Tuple
+from torch import Tensor
+from torch.nn import Module
+
+import torch.distributed as dist
+
+
+class SeqAllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: Any, input: Tensor, scatter_idx: int, gather_idx: int, group: Any
+    ) -> Tensor:
+        ctx.scatter_idx = scatter_idx
+        ctx.gather_idx = gather_idx
+        ctx.group = group
+
+        world_size = dist.get_world_size(group)
+
+        input_list = [
+            t.contiguous() for t in torch.tensor_split(input, world_size, scatter_idx)
+        ]
+        output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
+
+        dist.all_to_all(output_list, input_list, group=group)
+        return torch.cat(output_list, dim=gather_idx).contiguous()
+
+    @staticmethod
+    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[Tensor, None, None, None]:
+        return (
+            SeqAllToAll.apply(*grad_output, ctx.gather_idx, ctx.scatter_idx, ctx.group),
+            None,
+            None,
+            None,
+        )
+
+
+class DistributedAttention(torch.nn.Module):
+    """Initialization.
+
+    Arguments:
+        local_attention (Module): local attention with q,k,v
+        scatter_idx (int): scatter_idx for all2all comm
+        gather_idx (int): gather_idx for all2all comm
+    """
+
+    def __init__(
+        self,
+        local_attention: Module,
+    ) -> None:
+        super(DistributedAttention, self).__init__()
+        self.local_attn = local_attention
+
+    def forward(
+        self,
+        query: Tensor,
+        key_values: Tensor,
+        *args,
+        group: Any = None,
+        scatter_idx: int = -2,
+        gather_idx: int = 1,
+        **kwargs,
+    ) -> Tensor:
+        """forward
+
+        Arguments:
+            query (Tensor): query input to the layer
+            key (Tensor): key input to the layer
+            value (Tensor): value input to the layer
+            args: other args
+
+        Returns:
+            * output (Tensor): context output
+        """
+        # in shape : e.g.,  [s/p:h:]
+        query_heads = SeqAllToAll.apply(query, scatter_idx, gather_idx, group)
+        key_values_heads = SeqAllToAll.apply(key_values, scatter_idx, gather_idx, group)
+
+        # out shape : e.g., [s:h/p:]
+        
+        output_heads = self.local_attn(query_heads, key_values_heads, *args, **kwargs)
+
+        # out e.g., [s/p::h]
+        return SeqAllToAll.apply(output_heads, gather_idx, scatter_idx, group)
+
 """PyTorch Qwen3 model."""
 
 from typing import List, Optional, Tuple, Union, Any
@@ -699,14 +791,14 @@ class AttentionRouter(nn.Module):
         """
         x: [cu_seq_len, H, D]
         cu_seq_len: [0, seq_len_1, seq_len_2 + seq_len_1, ...]
-        range_ids: [B, 6]
+        range_ids: [B, 8]
         task_ids: [B]
         
         return:
             {
               'decisions': [B, H],
               'hard_decisions': [B, H, 2],
-              'sparse_mask': [B, H],
+              'sparse_mask': [B, H, 1],
               'logits': [B, H, 1]
             }
         """
@@ -773,7 +865,7 @@ class AttentionRouter(nn.Module):
                 z = z[..., 1]  # [B, H]
                 z_soft = z_soft[..., 1]
                 z_soft = z_soft.unsqueeze(-1)
-                z = z.unsqueeze(-1)
+                z = z.unsqueeze(-1) # [B, H, 1]
                 entropy = -(z_soft * torch.log(z_soft + eps)).sum(dim=-1).mean() 
         else:
             # 推理阶段：直接根据 Logit 确定 (相当于 tau -> 0)
@@ -792,7 +884,7 @@ class AttentionRouter(nn.Module):
             'pooled_hidden_states': pooled_hidden_states, # [B, H, D]
             'decisions': z_soft,
             'hard_decisions': z_hard,
-            'sparse_mask': z, # [B, H], 这是一个 STE Tensor
+            'sparse_mask': z, # [B, H, 1], 这是一个 STE Tensor
             'logits': binary_logits,
             'entropy': entropy
         }
@@ -1354,30 +1446,30 @@ class Qwen3Attention(nn.Module):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
+        input_shape = hidden_states.shape[:-1] # [S_local, ]
+        hidden_shape = (*input_shape, -1, self.head_dim) # [S_local, nhead, head_dim]
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
         k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
         v = self.v_proj(hidden_states).view(hidden_shape)
-        if not self.config.enable_ada_sparsity:
-            z_kv = get_mask(
-                self.attn_mask_log_alphas,
-                training=self.training,
-                threshold_for_deterministic=self.threshold_for_deterministic,
-            )  # (num_key_value_heads,)
-            # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
-            z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
-        else:
-            if unpadded_lengths is not None:
-                res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids)
-            else:
-                res = self.mask_allocator(k, None, range_ids, task_ids)
+        # if not self.config.enable_ada_sparsity:
+        #     z_kv = get_mask(
+        #         self.attn_mask_log_alphas,
+        #         training=self.training,
+        #         threshold_for_deterministic=self.threshold_for_deterministic,
+        #     )  # (num_key_value_heads,)
+        #     # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
+        #     z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
+        # else:
+        #     if unpadded_lengths is not None:
+        #         res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids)
+        #     else:
+        #         res = self.mask_allocator(k, None, range_ids, task_ids)
             
-            z_kv_batch, entropy, pooled_hidden_states = res['sparse_mask'], res['entropy'], res['pooled_hidden_states']
-            z_constrast = res['decisions']
+        #     z_kv_batch, entropy, pooled_hidden_states = res['sparse_mask'], res['entropy'], res['pooled_hidden_states']
+        #     z_constrast = res['decisions']
 
-            if z_kv_batch.shape[-2] == self.num_key_value_heads:
-                z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, 1)
+        #     if z_kv_batch.shape[-2] == self.num_key_value_heads:
+        #         z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, 1)
 
         has_layer_past = past_key_value is not None
         if has_layer_past:
@@ -1420,36 +1512,109 @@ class Qwen3Attention(nn.Module):
             past_kv = kv
         past_key_value = (past_kv, past_len + q.size(1)) if use_cache else None
 
-        if (
+        # Context Parallel Transform (Ulysses All2All)
+        # 当前形状: [S_local, H_total, D]
+        # 目标形状: [S_global, H_local, D]
+        is_cp_enabled = (
             seq_parallel_group is not None
             and dist.is_initialized()
             and dist.get_world_size(seq_parallel_group) > 1
-        ):
-            attention_func = self.distributed_attn_func
-            kwargs = {
-                "group": seq_parallel_group,
-                "gather_idx": (0 if unpadded_lengths is not None else 1),
-            }
-            if not self.config.enable_ada_sparsity:
-                z = torch.split(
-                    z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
-                )[dist.get_rank(seq_parallel_group)]
-            else:
-                z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
-                z = z_splits[dist.get_rank(seq_parallel_group)]
-        else:
-            attention_func = self.interpolated_attention
-            kwargs = {}
+        )
 
-        attn_output = attention_func(q, kv, k, v, unpadded_lengths, z_kv_batch, **kwargs)
+        if is_cp_enabled:
+            # attention_func = self.distributed_attn_func
+            # kwargs = {
+            #     "group": seq_parallel_group,
+            #     "gather_idx": (0 if unpadded_lengths is not None else 1),
+            # }
+            # if not self.config.enable_ada_sparsity:
+            #     z = torch.split(
+            #         z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=0
+            #     )[dist.get_rank(seq_parallel_group)]
+            # else:
+            #     z_splits = torch.split(z, self.num_heads // dist.get_world_size(seq_parallel_group), dim=1)
+            #     z = z_splits[dist.get_rank(seq_parallel_group)]
+            # Scatter dim 1 (Heads), Gather dim 0 (Seq)
+            # 因为输入是 3D: [Seq, Head, Dim]
+            q = SeqAllToAll.apply(q, 1, 0, seq_parallel_group)
+            k = SeqAllToAll.apply(k, 1, 0, seq_parallel_group)
+            v = SeqAllToAll.apply(v, 1, 0, seq_parallel_group)
+            
+            # 此时 q, k, v 变成了 [S_global, H_local, D]
+            # unpadded_lengths (cu_seqlens) 是全局的，现在正好匹配 S_global
+            
+        # Attention Router
+        # Router 需要全局序列信息来做 Pooling (first_token / ctx)
+        # k: [S_global, H_local, D] -> Router -> z: [B, H_local]
+        
+        if not self.config.enable_ada_sparsity:
+            # 静态 Mask 逻辑
+            z_kv = get_mask(
+                self.attn_mask_log_alphas,
+                training=self.training,
+                threshold_for_deterministic=self.threshold_for_deterministic,
+            )
+            # 如果开启 CP，需要手动切分静态 mask 给当前 rank 的 heads
+            if is_cp_enabled:
+                rank = dist.get_rank(seq_parallel_group)
+                world_size = dist.get_world_size(seq_parallel_group)
+                # z_kv 形状是 [H_total_kv]，在 dim 0 切分
+                z_kv = torch.tensor_split(z_kv, world_size, dim=0)[rank]
+            
+            # Expand to Group & Flatten
+            z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1) #[H_local_q]
+            z_kv_batch = z 
+            entropy = torch.tensor(0.0, device=q.device)
+            pooled_hidden_states = None
+            z_constrast = None
+        else:
+            # 动态 Router
+            # 注意：range_ids, task_ids 通常是 [B, ...] 的，B 与 Global Seq 是一致的
+            if unpadded_lengths is not None:
+                # unpadded_lengths[0] 是 cu_seqlens
+                res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids)
+            else:
+                # 如果没有 varlen info，Router 可能无法工作，或者退化为 single batch
+                res = self.mask_allocator(k, None, range_ids, task_ids)
+            
+            z_kv_batch, entropy, pooled_hidden_states = res['sparse_mask'], res['entropy'], res['pooled_hidden_states']
+            z_constrast = res['decisions']
+            # z_kv_batch: [B, H_local_kv, 1]
+
+            # GQA 适配: [B, H_local_kv] -> [B, H_local]
+            # 注意：这里的 self.num_key_value_heads 在初始化时是 Total 的
+            # 我们需要判断 z_kv_batch 是否已经是 local 大小
+            local_kv_heads = self.num_key_value_heads // (dist.get_world_size(seq_parallel_group) if is_cp_enabled else 1)
+            
+            if z_kv_batch.shape[1] == local_kv_heads:
+                 # Expand GQA groups
+                 z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, dim=1)
+            
+        # Attention Computation (Flash Attn)
+        # 输入: [S_global, H_local, D]
+        # Mask: z_kv_batch [B, H_local, 1] -> interpolated_attention 内部会广播
+        
+        # 注意：调用 interpolated_attention 时不需要再传入 Group，因为它处理的是本地切片
+        # 我们传入 None 作为 z_kv_batch 之外的额外参数
+        attn_output = self.interpolated_attention(q, None, k, v, unpadded_lengths, z_kv_batch)
+        # attn_output: [S_global, H_local, D]
+
+        # Context Parallel Reverse Transform
+        if is_cp_enabled:
+            # Scatter dim 0 (Seq), Gather dim 1 (Heads)
+            # 变回: [S_local, H_total, D]
+            attn_output = SeqAllToAll.apply(attn_output, 0, 1, seq_parallel_group)
+
+        # Output Projection
+        # [S_local, H_total, D] -> [S_local, Hidden]
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))
 
-        attn_weights = None        
-        # print(f"task id: {task_ids}, layer sparsity: {z.squeeze(-1).sum(dim=-1)}")
-        # z: [B, H, 1] -> [B, H] -> [B]
-        return z_kv_batch.squeeze(-1).sum(dim=-1), entropy.mean(), pooled_hidden_states, z_constrast.squeeze(-1), attn_output, attn_weights, past_key_value
-
+        attn_weights = None
+        
+        # z_kv_batch 是 [B, H_local, 1] (Dynamic) -> [B, ]
+        # 在 Model 层需要 reduce
+        return z_kv_batch.squeeze(-1).sum(dim=-1), entropy.mean(), pooled_hidden_states, z_constrast.squeeze(-1), attn_output, attn_weights, None
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
@@ -2050,34 +2215,54 @@ class Qwen3Model(Qwen3PreTrainedModel):
         
         if compute_sparsity:
             
+            # # model_sparsity = 1 - (z_sum / self.total_num_heads)
+            # if (
+            #     seq_parallel_group is not None
+            #     and dist.is_initialized()
+            #     and dist.get_world_size(seq_parallel_group) > 1
+            # ):
+            #     # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
+
+            #     z_sums = [
+            #         torch.zeros_like(z_sum)
+            #         for _ in range(dist.get_world_size(seq_parallel_group))
+            #     ]
+            #     dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
+            #     z_sum = sum(z_sums)
+
+            #     gathered_layer_z_sums = []
+            #     for z_l in layer_z_sums:
+            #         tmp = [
+            #             torch.zeros_like(z_l)
+            #             for _ in range(dist.get_world_size(seq_parallel_group))
+            #         ]
+            #         dist.all_gather(tmp, z_l, group=seq_parallel_group)
+            #         gathered_layer_z_sums.append(sum(tmp))
+            #     layer_z_sums = gathered_layer_z_sums
+
+            # # 1. z_sum / H 表示full attn占所有head的比例
+            # # 2. 1 - z_sum / H 表示当前模型稀疏度
             # model_sparsity = 1 - (z_sum / self.total_num_heads)
             if (
                 seq_parallel_group is not None
                 and dist.is_initialized()
                 and dist.get_world_size(seq_parallel_group) > 1
             ):
-                # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
-
-                z_sums = [
-                    torch.zeros_like(z_sum)
-                    for _ in range(dist.get_world_size(seq_parallel_group))
-                ]
-                dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
-                z_sum = sum(z_sums)
-
-                gathered_layer_z_sums = []
-                for z_l in layer_z_sums:
-                    tmp = [
-                        torch.zeros_like(z_l)
-                        for _ in range(dist.get_world_size(seq_parallel_group))
-                    ]
-                    dist.all_gather(tmp, z_l, group=seq_parallel_group)
-                    gathered_layer_z_sums.append(sum(tmp))
-                layer_z_sums = gathered_layer_z_sums
-
-            # 1. z_sum / H 表示full attn占所有head的比例
-            # 2. 1 - z_sum / H 表示当前模型稀疏度
-            model_sparsity = 1 - (z_sum / self.total_num_heads)
+                # z_sum: [B, ]
+                # # 因为不同 Rank 负责不同 Heads，所有 Rank 的 z_sum 相加 = 全局 Active Heads 数量
+                dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+                
+                # layer_z_sums 是 list of tensors
+                # 堆叠 -> AllReduce -> 解开
+                if layer_z_sums:
+                    stacked_layer_z = torch.stack(layer_z_sums) # [L, B]
+                    dist.all_reduce(stacked_layer_z, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+                    # 重新拆回 list，如果不拆也可以直接用 stacked_layer_z 计算 layerwise_model_sparsity
+                    layer_z_sums = list(stacked_layer_z)
+                
+                # total_num_heads 是全局的总 Head 数，z_sum 现在也是全局的 Active Head 数
+                model_sparsity = 1 - (z_sum / self.total_num_heads)
+                
         else:
             model_sparsity = None
             z_loss = None
@@ -2373,11 +2558,8 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             )
             assert not use_cache, "use_cache is not supported with `seq_lengths`"
 
-            cu_seqlens = F.pad(
-                torch.cumsum(seq_lengths, dim=0, dtype=torch.torch.int32), (1, 0)
-            )
-            max_seqlen = seq_lengths.max().item()
-
+            cu_seqlens = seq_lengths
+            max_seqlen = (seq_lengths[1:] - seq_lengths[:-1]).max()
             unpadded_lengths = (cu_seqlens, max_seqlen)
         elif attention_mask is not None and not use_cache and attention_mask.size(0) != 1:
             if inputs_embeds is not None:
