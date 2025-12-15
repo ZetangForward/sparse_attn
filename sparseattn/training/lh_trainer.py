@@ -434,7 +434,7 @@ class Trainer(HFTrainer):
                 "task_type": task_type,
                 "task_ids": task_ids,
             }
-
+            
         else:
             # 单卡 / DP 模式
             model_inputs = {

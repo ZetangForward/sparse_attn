@@ -391,6 +391,7 @@ def main():
     
     # load_datasets
     if training_args.do_train:
+        set_seed(training_args.seed)
         train_dataset = build_packed_dataset(
             script_args.tokenized_mds_train[0],  # FIXME: 这里只能传入一个文件，不支持多个文件传入
             tokenizer=tokenizer,
@@ -468,7 +469,9 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        #FIXME：debug时暂时不加载ckpt
+        # train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        train_result = trainer.train()
         trainer.save_model()
 
         metrics = train_result.metrics

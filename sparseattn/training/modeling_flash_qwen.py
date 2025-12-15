@@ -571,7 +571,135 @@ class FlashRotaryEmbedding(torch.nn.Module):
         else:
             assert False
 
+# 不支持，弃用
+class Qwen3RotaryEmbeddingOrigin(nn.Module):
+    def __init__(
+        self,
+        dim=None,
+        max_position_embeddings=2048,
+        base=10000,
+        device=None,
+        scaling_factor=1.0,
+        rope_type="default",
+        interleaved=False,
+        config: Optional[PawQwen3Config] = None,
+    ):
+        super().__init__()
+        self.rope_kwargs = {}
+        self.scaling_factor = scaling_factor
+        self.interleaved = interleaved
+        self.pos_idx_in_fp32 = True
 
+        if config is None:
+            self.rope_kwargs = {
+                "rope_type": rope_type,
+                "factor": scaling_factor,
+                "dim": dim,
+                "base": base,
+                "max_position_embeddings": max_position_embeddings,
+            }
+            self.rope_type = rope_type
+        else:
+            # BC: "rope_type" was originally "type"
+            if config.rope_scaling is not None:
+                self.rope_type = config.rope_scaling.get(
+                    "rope_type", config.rope_scaling.get("type")
+                )
+            else:
+                self.rope_type = "default"
+
+        self._seq_len_cached = 0
+
+        self.config = config
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+        inv_freq, self.attention_scaling = self.rope_init_fn(
+            self.config, device, **self.rope_kwargs
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @torch.no_grad()
+    def _update_cos_sin_cache(self, seq_len, device=None, dtype=None):
+        # Reset the tables if the sequence length has changed,
+        # if we're on a new device (possibly due to tracing for instance),
+        # or if we're switching from inference mode to training
+        if (
+            seq_len > self._seq_len_cached
+            or self._cos_cached.device != device
+            or self._cos_cached.dtype != dtype
+            or (self.training and self._cos_cached.is_inference())
+        ):
+            self._seq_len_cached = seq_len
+
+            if "dynamic" in self.rope_type:
+                inv_freq, self.attention_scaling = self.rope_init_fn(
+                    self.config, device, seq_len=seq_len, **self.rope_kwargs
+                )
+                self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+            # We want fp32 here, not self.inv_freq.dtype, since the model could be loaded in bf16
+            # And the output of arange can be quite large, so bf16 would lose a lot of precision.
+            # However, for compatibility reason, we add an option to use the dtype of self.inv_freq.
+            if self.pos_idx_in_fp32:
+                t = torch.arange(seq_len, device=device, dtype=torch.float32)
+                t /= self.scaling_factor
+                # We want fp32 here as well since inv_freq will be multiplied with t, and the output
+                # will be large. Having it in bf16 will lose a lot of precision and cause the
+                # cos & sin output to change significantly.
+                # We want to recompute self.inv_freq if it was not loaded in fp32
+                if self.inv_freq.dtype != torch.float32:
+                    inv_freq = self.inv_freq.to(torch.float32)
+                else:
+                    inv_freq = self.inv_freq
+            else:
+                t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+                t /= self.scaling_factor
+                inv_freq = self.inv_freq
+
+            # Don't do einsum, it converts fp32 to fp16 under AMP
+            # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+            freqs = torch.outer(t, inv_freq)
+            self._cos_cached = (torch.cos(freqs) * self.attention_scaling).to(dtype)
+            self._sin_cached = (torch.sin(freqs) * self.attention_scaling).to(dtype)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        seqlen_offset: int = 0,  # Used in sequence parallelism where each device sees only a chunk of the full sequence
+        unpadded_lengths: Optional[Tuple[torch.Tensor]] = None,
+    ):
+        if unpadded_lengths is not None:
+            cu_seqlens, max_seqlen = unpadded_lengths
+            if seqlen_offset > 0:
+                raise ValueError("seqlen_offset is not supported with unpadded_lengths")
+        else:
+            cu_seqlens, max_seqlen = None, q.shape[1]
+
+        self._update_cos_sin_cache(max_seqlen + seqlen_offset, q.device, q.dtype)
+
+        rope_q = apply_rotary_emb_func(
+            q,
+            self._cos_cached[seqlen_offset:],
+            self._sin_cached[seqlen_offset:],
+            self.interleaved,
+            True,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        rope_k = apply_rotary_emb_func(
+            k,
+            self._cos_cached[seqlen_offset:],
+            self._sin_cached[seqlen_offset:],
+            self.interleaved,
+            True,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        return rope_q, rope_k
+    
+    
+    
 class Qwen3RotaryEmbedding(nn.Module):
     def __init__(
         self,
@@ -1593,7 +1721,7 @@ class Qwen3Attention(nn.Module):
         # Router 需要全局序列信息来做 Pooling (first_token / ctx)
         # k: [S_global, H_local, D] -> Router -> z: [B, H_local]
         
-        if not self.config.enable_ada_sparsity:
+        if not self.config.enable_ada_sparsity: # 暂时不用
             # 静态 Mask 逻辑
             z_kv = get_mask(
                 self.attn_mask_log_alphas,
