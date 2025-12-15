@@ -31,6 +31,36 @@ from torch.nn import Module
 
 import torch.distributed as dist
 
+import math
+from typing import Optional, Tuple, Union
+
+from einops import rearrange, repeat
+
+def rotate_half(x, interleaved=False):
+    if not interleaved:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+    else:
+        x1, x2 = x[..., ::2], x[..., 1::2]
+        return rearrange(torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2)
+
+def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
+    """
+    x: (batch_size, seqlen, nheads, headdim)
+    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
+    """
+    ro_dim = cos.shape[-1] * 2
+    assert ro_dim <= x.shape[-1]
+    cos = repeat(cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    sin = repeat(sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    return torch.cat(
+        [x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]],
+        dim=-1,
+    ) 
+
+# mode="max-autotune" 会尝试生成最快的 Triton 代码
+# fullgraph=True 告诉编译器这里没有 Python 控制流，可以全图优化
+fast_apply_rotary = torch.compile(apply_rotary_emb_torch, mode="max-autotune")
 
 class SeqAllToAll(torch.autograd.Function):
     @staticmethod
@@ -146,6 +176,7 @@ except ImportError:
     raise ImportError(
         "Please install RoPE kernels: `pip install git+https://github.com/HazyResearch/flash-attention.git#subdirectory=csrc/rotary`"
     )
+
 from block_sparse_attn import block_streaming_attn_func
 
 from dataclasses import dataclass
@@ -622,37 +653,56 @@ class Qwen3RotaryEmbedding(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        seqlen_offset: int = 0,  # Used in sequence parallelism where each device sees only a chunk of the full sequence
+        seqlen_offset: int = 0,
         unpadded_lengths: Optional[Tuple[torch.Tensor]] = None,
+        position_ids: Optional[torch.LongTensor] = None, # [CRITICAL] 必须传入
     ):
-        if unpadded_lengths is not None:
-            cu_seqlens, max_seqlen = unpadded_lengths
-            if seqlen_offset > 0:
-                raise ValueError("seqlen_offset is not supported with unpadded_lengths")
+        """
+        使用 apply_rotary_emb_torch 绕过 Triton Kernel 的 Shape 检查
+        完美支持 [S, H, D] 格式的 Context Parallel
+        """
+        # 1. 更新 Cache (确定最大长度)
+        if position_ids is not None:
+            max_seqlen_in_batch = position_ids.max().item() + 1
+        elif unpadded_lengths is not None:
+            _, max_seqlen = unpadded_lengths
+            max_seqlen_in_batch = max_seqlen + seqlen_offset
         else:
-            cu_seqlens, max_seqlen = None, q.shape[1]
+            max_seqlen_in_batch = q.shape[-2] + seqlen_offset
 
-        self._update_cos_sin_cache(max_seqlen + seqlen_offset, q.device, q.dtype)
+        self._update_cos_sin_cache(max_seqlen_in_batch, q.device, q.dtype)
 
-        rope_q = apply_rotary_emb_func(
-            q,
-            self._cos_cached[seqlen_offset:],
-            self._sin_cached[seqlen_offset:],
-            self.interleaved,
-            True,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        rope_k = apply_rotary_emb_func(
-            k,
-            self._cos_cached[seqlen_offset:],
-            self._sin_cached[seqlen_offset:],
-            self.interleaved,
-            True,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        return rope_q, rope_k
+        # 2. 选取对应的 Cos/Sin
+        if position_ids is not None:
+            # [Case A] Context Parallel / Varlen (推荐)
+            # 根据全局 position_ids 取出对应的 cos/sin
+            # position_ids: [S_total]
+            # cos/sin: [S_total, Dim/2]
+            cos = self._cos_cached[position_ids]
+            sin = self._sin_cached[position_ids]
+            
+        elif unpadded_lengths is not None:
+            # [Case B] Varlen without IDs (Standard DP)
+            # 如果没有 position_ids，我们无法处理 CP 切分的情况
+            # 但如果是纯 DP，我们可以尝试让 apply_rotary_emb_torch 广播
+            # 不过为了安全，建议强制要求 position_ids
+            raise ValueError("Context Parallel / Varlen requires explicit `position_ids`.")
+            
+        else:
+            # [Case C] Dense [B, S, H, D]
+            # 切片取当前窗口的 cos/sin
+            seq_len = q.shape[-2]
+            cos = self._cos_cached[seqlen_offset : seqlen_offset + seq_len]
+            sin = self._sin_cached[seqlen_offset : seqlen_offset + seq_len]
+
+        # 3. 执行计算 (使用 Pure PyTorch 版本)
+        # apply_rotary_emb_torch 会自动处理广播：
+        # q: [S, H, D], cos: [S, D/2] -> 自动广播 H 维度 -> 成功
+        
+        q_embed = fast_apply_rotary(q, cos, sin, interleaved=self.interleaved)
+        k_embed = fast_apply_rotary(k, cos, sin, interleaved=self.interleaved)
+        
+        return q_embed, k_embed
 
 
 class Qwen3MLP(nn.Module):
@@ -671,38 +721,38 @@ class Qwen3MLP(nn.Module):
         return down_proj
 
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+# def rotate_half(x):
+#     """Rotates half the hidden dims of the input."""
+#     x1 = x[..., : x.shape[-1] // 2]
+#     x2 = x[..., x.shape[-1] // 2 :]
+#     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
+# def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+#     """Applies Rotary Position Embedding to the query and key tensors.
 
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+#     Args:
+#         q (`torch.Tensor`): The query tensor.
+#         k (`torch.Tensor`): The key tensor.
+#         cos (`torch.Tensor`): The cosine part of the rotary embedding.
+#         sin (`torch.Tensor`): The sine part of the rotary embedding.
+#         position_ids (`torch.Tensor`, *optional*):
+#             Deprecated and unused.
+#         unsqueeze_dim (`int`, *optional*, defaults to 1):
+#             The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+#             sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+#             that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+#             k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+#             cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+#             the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+#     Returns:
+#         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+#     """
+#     cos = cos.unsqueeze(unsqueeze_dim)
+#     sin = sin.unsqueeze(unsqueeze_dim)
+#     q_embed = (q * cos) + (rotate_half(q) * sin)
+#     k_embed = (k * cos) + (rotate_half(k) * sin)
+#     return q_embed, k_embed
 
 
 @torch.jit.script
@@ -722,7 +772,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 class AttentionRouter(nn.Module):
     def __init__(self, input_dim, num_key_value_heads, d_feature=128,
-                 use_task_emb=False, temp=3/2, hard=False, 
+                 use_task_emb=False, temp=0.2, hard=False, 
                  router_type='mlp', use_gumbel=True, learnable_temp=False,
                  dropout=0.1, use_softmax=True, pooling_mode='ctx_q'):
         super().__init__()
@@ -786,19 +836,20 @@ class AttentionRouter(nn.Module):
         x, 
         cu_seq_len=None,
         range_ids: torch.Tensor = None, 
-        task_ids: Optional[torch.Tensor] = None
+        task_ids: Optional[torch.Tensor] = None,
+        current_tau: Optional[torch.Tensor] = None,
     ):
         """
         x: [cu_seq_len, H, D]
         cu_seq_len: [0, seq_len_1, seq_len_2 + seq_len_1, ...]
-        range_ids: [B, 8]
+        range_ids: [B, 6]
         task_ids: [B]
         
         return:
             {
               'decisions': [B, H],
               'hard_decisions': [B, H, 2],
-              'sparse_mask': [B, H, 1],
+              'sparse_mask': [B, H],
               'logits': [B, H, 1]
             }
         """
@@ -845,13 +896,14 @@ class AttentionRouter(nn.Module):
         if self.learnable_temp:
             tau = torch.exp(self.log_temp).clamp(0.3, 1.0)
         else:
-            tau = self.tau
+            tau = current_tau if current_tau is not None else self.tau
 
         # --- Gumbel or Softmax routing ---
         if self.training:
             u = torch.rand_like(binary_logits)
             eps = 1e-8
-            g = -torch.log(-torch.log(u + eps) + eps)
+            # g = -torch.log(-torch.log(u + eps) + eps) # NOTE: parallel 验证阶段关闭噪声
+            g = 0
             
             if not self.use_softmax:
                 z_soft = torch.sigmoid((binary_logits + g) / tau)
@@ -865,7 +917,7 @@ class AttentionRouter(nn.Module):
                 z = z[..., 1]  # [B, H]
                 z_soft = z_soft[..., 1]
                 z_soft = z_soft.unsqueeze(-1)
-                z = z.unsqueeze(-1) # [B, H, 1]
+                z = z.unsqueeze(-1)
                 entropy = -(z_soft * torch.log(z_soft + eps)).sum(dim=-1).mean() 
         else:
             # 推理阶段：直接根据 Logit 确定 (相当于 tau -> 0)
@@ -884,7 +936,7 @@ class AttentionRouter(nn.Module):
             'pooled_hidden_states': pooled_hidden_states, # [B, H, D]
             'decisions': z_soft,
             'hard_decisions': z_hard,
-            'sparse_mask': z, # [B, H, 1], 这是一个 STE Tensor
+            'sparse_mask': z, # [B, H], 这是一个 STE Tensor
             'logits': binary_logits,
             'entropy': entropy
         }
@@ -901,8 +953,11 @@ class AttentionRouter(nn.Module):
                 start_idx, end_idx = POOL_MAP[seg]
                 start, end = range_ids[i, start_idx:end_idx + 1].tolist()[0], range_ids[i, start_idx:end_idx + 1].tolist()[-1]
                 if end >= start:
-                    seg_slice = pooled_input[i, start : end + 1, :, :]
-                    seg_pooled = seg_slice.mean(dim=0)  # [H, D]
+                    # seg_slice = pooled_input[i, start : end + 1, :, :]
+                    start_slice = pooled_input[i, start : start + 100, :, :]
+                    end_slice = pooled_input[i, end - 100 : end + 1, :, :]
+                    combined_slice = torch.cat((start_slice, end_slice), dim=0)
+                    seg_pooled = combined_slice.mean(dim=0)  # [H, D]
                 else:
                     seg_pooled = torch.zeros(H, D, device=pooled_input.device)
                 
@@ -937,31 +992,32 @@ class AttentionRouter(nn.Module):
             torch.Tensor: _description_
         """
         POOL_MAP = {'first_token': (0, 1),'ctx': (2, 3), 'q': (4, 5), 'a': (6, 7), 'ctx_q': (2, 5)} 
-        
+
         B = cu_seq_len.shape[0] - 1
         H, D = x.shape[1:]
         pooled_features_list = []
-        
+
         for i in range(B):
             sample_features = []
             x_s, x_e = cu_seq_len[i], cu_seq_len[i + 1]
             for seg in segments:
                 start_idx, end_idx = POOL_MAP[seg]
                 start, end = range_ids[i, start_idx:end_idx + 1].tolist()[0], range_ids[i, start_idx:end_idx + 1].tolist()[-1]
-
                 if end >= start:
-                    seg_slice = x[x_s + start: x_s + end + 1,  : , :]
-                    seg_pooled = seg_slice.mean(dim=0)  # [H, D]
+                    prefix_seg_slice = x[x_s + start: x_s + start + 100,  : , :]
+                    suffix_seg_slice = x[x_s + end - 99: x_s + end + 1,  : , :]
+                    combined_slice = torch.cat((prefix_seg_slice, suffix_seg_slice), dim=0)
+                    seg_pooled = combined_slice.mean(dim=0)  # [H, D]
                 else:
                     seg_pooled = torch.zeros(H, D, device=x.device)
-                
+
                 sample_features.append(seg_pooled)
 
             if sample_features:
                 combined_feature = torch.stack(sample_features, dim=0).mean(dim=0) # [H, D]
             else:
                 combined_feature = torch.zeros(H, D, device=x.device)
-                
+
             pooled_features_list.append(combined_feature)
 
         return torch.stack(pooled_features_list, dim=0) # [B, H, D]
@@ -1470,18 +1526,22 @@ class Qwen3Attention(nn.Module):
 
         #     if z_kv_batch.shape[-2] == self.num_key_value_heads:
         #         z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, 1)
-
         has_layer_past = past_key_value is not None
-        if has_layer_past:
-            past_kv = past_key_value[0]
-            past_len = past_key_value[1]
+        
+        if position_ids is None:
+            
+            past_len = past_key_value[1] if has_layer_past else 0
+            seqlen_offset = past_len
         else:
-            past_len = 0
-
-        if position_ids is not None:
-            past_len += position_ids.min()
-
-        q, k = self.rotary_emb(q, k, past_len, unpadded_lengths)
+            seqlen_offset = 0 # 有 position_ids 则 offset 无意义
+            
+        q, k = self.rotary_emb(
+            q, 
+            k, 
+            seqlen_offset=seqlen_offset, 
+            unpadded_lengths=unpadded_lengths,
+            position_ids=position_ids 
+        )
         
         kv = torch.stack([k, v], -3)
         if self.num_key_value_groups > 1:
@@ -1577,11 +1637,15 @@ class Qwen3Attention(nn.Module):
                 # 如果没有 varlen info，Router 可能无法工作，或者退化为 single batch
                 res = self.mask_allocator(k, None, range_ids, task_ids)
             
+            # z_kv_batch: [B, H_local_kv, ]
+            # entropy:  标量
+            # pooled_hidden_states: [B, H_local_kv, D]
+            # z_constrast: [B, H_local_kv, 1]
             z_kv_batch, entropy, pooled_hidden_states = res['sparse_mask'], res['entropy'], res['pooled_hidden_states']
             z_constrast = res['decisions']
-            # z_kv_batch: [B, H_local_kv, 1]
+            
 
-            # GQA 适配: [B, H_local_kv] -> [B, H_local]
+            # GQA 适配: [B, H_local_kv, 1] -> [B, H_local, 1]
             # 注意：这里的 self.num_key_value_heads 在初始化时是 Total 的
             # 我们需要判断 z_kv_batch 是否已经是 local 大小
             local_kv_heads = self.num_key_value_heads // (dist.get_world_size(seq_parallel_group) if is_cp_enabled else 1)
@@ -1589,14 +1653,15 @@ class Qwen3Attention(nn.Module):
             if z_kv_batch.shape[1] == local_kv_heads:
                  # Expand GQA groups
                  z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, dim=1)
-            
+            # breakpoint()
         # Attention Computation (Flash Attn)
         # 输入: [S_global, H_local, D]
         # Mask: z_kv_batch [B, H_local, 1] -> interpolated_attention 内部会广播
         
         # 注意：调用 interpolated_attention 时不需要再传入 Group，因为它处理的是本地切片
-        # 我们传入 None 作为 z_kv_batch 之外的额外参数
-        attn_output = self.interpolated_attention(q, None, k, v, unpadded_lengths, z_kv_batch)
+        kv_packed = torch.stack([k, v], dim=1)
+        # breakpoint()
+        attn_output = self.interpolated_attention(q, kv_packed, k, v, unpadded_lengths, z_kv_batch)
         # attn_output: [S_global, H_local, D]
 
         # Context Parallel Reverse Transform
@@ -1612,7 +1677,10 @@ class Qwen3Attention(nn.Module):
 
         attn_weights = None
         
-        # z_kv_batch 是 [B, H_local, 1] (Dynamic) -> [B, ]
+        # z_kv_batch: [B, H_local, 1] (Dynamic) -> [B, ]
+        # entropy: [B, H_local_kv, 1] -> 标量
+        # pooled_hidden_states: [B, H_local_kv, D]
+        # z_constrast: [B, H_local, ]
         # 在 Model 层需要 reduce
         return z_kv_batch.squeeze(-1).sum(dim=-1), entropy.mean(), pooled_hidden_states, z_constrast.squeeze(-1), attn_output, attn_weights, None
 
@@ -2000,7 +2068,12 @@ class Qwen3Model(Qwen3PreTrainedModel):
         # position_ids = None
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-
+        # if dist.get_rank() == 0:
+        #     breakpoint()
+        # else:
+        #     import time
+        #     time.sleep()
+            
         hidden_states = inputs_embeds
 
         if self.gradient_checkpointing and self.training:
@@ -2061,12 +2134,15 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     range_ids=range_ids,
                     task_ids=task_ids,
                 )
-
+            # z_layer_sum: [B, ]
+            # entropy: 标量
+            # pooled_hidden_states: [B, H_local_kv, D]
+            # z_constrast: [B, H_local, ]
             z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = layer_outputs[0], layer_outputs[1], layer_outputs[2], layer_outputs[3], layer_outputs[4]
 
             if compute_sparsity:
-                z_sum += z_layer_sum
-                head_entropy = (head_entropy + entropy) / 2
+                z_sum += z_layer_sum # [B, ]
+                head_entropy = (head_entropy + entropy) / 2 # 标量 为什么这样平均？
             layer_z_sums.append(z_layer_sum)
             layer_z_constrast.append(z_constrast)
 
@@ -2075,7 +2151,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[4],)
-        
+        # 暂时不用
         if enable_contrastive_loss:
             
             def jsd(p, q, eps=1e-8):
@@ -2214,43 +2290,18 @@ class Qwen3Model(Qwen3PreTrainedModel):
         next_cache = next_decoder_cache if use_cache else None
         
         if compute_sparsity:
-            
-            # # model_sparsity = 1 - (z_sum / self.total_num_heads)
-            # if (
-            #     seq_parallel_group is not None
-            #     and dist.is_initialized()
-            #     and dist.get_world_size(seq_parallel_group) > 1
-            # ):
-            #     # Collect z_sum across GPUs in sequence parallel group (i.e., across all the heads during attention)
-
-            #     z_sums = [
-            #         torch.zeros_like(z_sum)
-            #         for _ in range(dist.get_world_size(seq_parallel_group))
-            #     ]
-            #     dist.all_gather(z_sums, z_sum, group=seq_parallel_group)
-            #     z_sum = sum(z_sums)
-
-            #     gathered_layer_z_sums = []
-            #     for z_l in layer_z_sums:
-            #         tmp = [
-            #             torch.zeros_like(z_l)
-            #             for _ in range(dist.get_world_size(seq_parallel_group))
-            #         ]
-            #         dist.all_gather(tmp, z_l, group=seq_parallel_group)
-            #         gathered_layer_z_sums.append(sum(tmp))
-            #     layer_z_sums = gathered_layer_z_sums
-
-            # # 1. z_sum / H 表示full attn占所有head的比例
-            # # 2. 1 - z_sum / H 表示当前模型稀疏度
-            # model_sparsity = 1 - (z_sum / self.total_num_heads)
             if (
                 seq_parallel_group is not None
                 and dist.is_initialized()
                 and dist.get_world_size(seq_parallel_group) > 1
             ):
+                # breakpoint()
                 # z_sum: [B, ]
                 # # 因为不同 Rank 负责不同 Heads，所有 Rank 的 z_sum 相加 = 全局 Active Heads 数量
                 dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+                # head_entropy 标量
+                dist.all_reduce(head_entropy, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+                head_entropy = head_entropy / dist.get_world_size(seq_parallel_group)
                 
                 # layer_z_sums 是 list of tensors
                 # 堆叠 -> AllReduce -> 解开
@@ -2262,7 +2313,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 
                 # total_num_heads 是全局的总 Head 数，z_sum 现在也是全局的 Active Head 数
                 model_sparsity = 1 - (z_sum / self.total_num_heads)
-                
+                # breakpoint()
         else:
             model_sparsity = None
             z_loss = None

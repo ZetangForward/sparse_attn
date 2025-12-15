@@ -37,12 +37,67 @@ import json
 
 from csv import reader
 
-from .dataset_packing import build_packed_dataset, PackedDataCollator 
+from .dataset_packing import build_packed_dataset 
 import multiprocessing
 
 # from fla.models.nsa import AutoModelForCausalLM as NSAAutoModelForCausalLM
 
+# ================= Color Logging Utility =================
+class ColorFormatter(logging.Formatter):
+    # ANSI Color Codes
+    grey = "\x1b[38;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    green = "\x1b[32;20m"
+    blue = "\x1b[34;20m"
+    cyan = "\x1b[36;20m"
+    magenta = "\x1b[35;20m"
+    reset = "\x1b[0m"
+
+    # Define formats for different levels or keywords
+    def format(self, record):
+        log_fmt = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+        
+        # 1. 根据 Log Level 染色
+        if record.levelno == logging.DEBUG:
+            color = self.grey
+        elif record.levelno == logging.INFO:
+            color = self.green
+        elif record.levelno == logging.WARNING:
+            color = self.yellow
+        elif record.levelno == logging.ERROR:
+            color = self.red
+        elif record.levelno == logging.CRITICAL:
+            color = self.bold_red
+        else:
+            color = self.reset
+
+        # 2. 根据内容关键字自定义染色 (这是你最需要的)
+        msg = record.msg
+        if isinstance(msg, str):
+            # [Step ...] -> 蓝色高亮
+            if "[Step" in msg:
+                record.msg = f"{self.blue}{msg}{self.reset}"
+                return super().format(record)
+            
+            # Loss / Sparsity -> 洋红色高亮
+            if "Loss:" in msg or "Sparsity:" in msg:
+                # 还可以更细粒度：把数字变成黄色
+                # record.msg = f"{self.magenta}{msg}{self.reset}"
+                # 或者只高亮这一行
+                color = self.magenta
+
+            # Checkpoint -> 青色
+            if "Checkpoint" in msg or "Saving" in msg:
+                color = self.cyan
+
+        formatter = logging.Formatter(f"{color}{log_fmt}{self.reset}", datefmt="%m/%d/%Y %H:%M:%S")
+        return formatter.format(record)
+
 logger = logging.getLogger(__name__)
+
+
 
 
 def load_masks_from_tsv_file(
@@ -72,10 +127,12 @@ def main():
     script_args, training_args, data_args = parser.parse_args_into_dataclasses()
     
     # Setup logging
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(ColorFormatter())
+    
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        level=logging.INFO,
+        handlers=[handler]
     )
     log_level = training_args.get_process_log_level()
     logger.setLevel(log_level)
@@ -216,6 +273,7 @@ def main():
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
                 enable_contrastive_loss=training_args.enable_contrastive_loss,
+                torch_dtype=torch.bfloat16,
             )
         elif "llama" in script_args.model_name_or_path.lower():
             model = PawLlamaForCausalLM.from_pretrained(
@@ -225,6 +283,7 @@ def main():
                 cache_dir=script_args.cache_dir,
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
+                torch_dtype=torch.bfloat16,
             )
         elif "phi" in script_args.model_name_or_path.lower():
             model = PawPhi3ForCausalLM.from_pretrained(
@@ -234,6 +293,7 @@ def main():
                 cache_dir=script_args.cache_dir,
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
+                torch_dtype=torch.bfloat16,
             )
         else:
             raise ValueError(
@@ -331,105 +391,40 @@ def main():
     
     # load_datasets
     if training_args.do_train:
-        if training_args.seq_parallel_size <= 1:
-            data_collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
-            train_dataset = build_dataset(
-                script_args.tokenized_mds_train,
-                tokenizer=tokenizer,
-                data_args=data_args,
-                is_training=True,
-            )
-            # breakpoint()
-            class_indices = train_dataset.get_class_indices()
-            logger.info(f"Using stratified sampling. Class distribution: {[len(v) for v in class_indices.values()]}")
-            
-            if dist.is_initialized():
-                world_size = torch.distributed.get_world_size()
-            else:
-                world_size = training_args.n_gpu
+        train_dataset = build_packed_dataset(
+            script_args.tokenized_mds_train[0],  # FIXME: 这里只能传入一个文件，不支持多个文件传入
+            tokenizer=tokenizer,
+            data_args=data_args,
+        )
+        
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+        sp_size = training_args.seq_parallel_size
 
-            try:
-                if not dist.is_initialized():
-                    raise SamplerConditionError("Distributed environment not initialized.")
-
-                custom_sampler = CustomDistributedStratifiedSampler(
-                    dataset=train_dataset,
-                    class_indices=class_indices,
-                    num_gpus=world_size,
-                    required_per_class=2,
-                    seed=42,
-                )
-                sampler = custom_sampler
-                
-            except SamplerConditionError as e:
-                print(f"⚠️ Sampler fallback triggered: {e}. Using default DistributedSampler instead.")
-                from torch.utils.data.distributed import DistributedSampler
-                sampler = DistributedSampler(
-                    dataset=train_dataset,
-                    shuffle=True,
-                )
-                
-            train_dataloader = torch.utils.data.DataLoader(
-                dataset=train_dataset,
-                batch_size=training_args.per_device_train_batch_size,
-                sampler=sampler,
-                collate_fn=None,
-                num_workers=training_args.dataloader_num_workers,
-                pin_memory=training_args.dataloader_pin_memory,
-                drop_last=True, 
-            )
-        else:
-            # =========================================================
-            # Sequence Parallelism > 1 的处理逻辑
-            # 目标：SP 组内的 GPU 必须加载相同的数据 (Batch=1)
-            # =========================================================
-            logger.info(f"Setting up dataset for Sequence Parallelism (Size={training_args.seq_parallel_size})")
-            # breakpoint()
-            # 1. 构建 Dataset (与单卡逻辑相同)
-            data_collator = PackedDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
-            train_dataset = build_packed_dataset(
-                script_args.tokenized_mds_train,
-                tokenizer=tokenizer,
-                data_args=data_args,
-            )
-            # breakpoint()
-            
-            if not dist.is_initialized():
-                 raise SamplerConditionError("Sequence Parallelism requires distributed environment.")
-            
-            world_size = dist.get_world_size()
-            global_rank = dist.get_rank()
-            sp_size = training_args.seq_parallel_size
-            
-            if world_size % sp_size != 0:
-                raise ValueError(f"World size ({world_size}) must be divisible by SP size ({sp_size})")
-
-            # 计算逻辑上的 DP 组数量和当前 rank 所属的 DP 组 ID
-            # 举例: 4卡, SP=2. Rank0,1 -> dp_rank 0; Rank2,3 -> dp_rank 1
-            dp_size = world_size // sp_size
-            dp_rank = global_rank // sp_size
-            
-            from torch.utils.data.distributed import DistributedSampler
-            sampler = DistributedSampler(
-                dataset=train_dataset,
-                num_replicas=dp_size,   # 这里告诉 Sampler 总共有 dp_size 个分片
-                rank=dp_rank,           # 这里告诉 Sampler 我是第 dp_rank 个分片
-                shuffle=True,
-                seed=training_args.seed,
-                drop_last=True,
-            )
-            
-            train_dataloader = torch.utils.data.DataLoader(
-                dataset=train_dataset,
-                batch_size=1, # 组内批次大小
-                sampler=sampler,
-                collate_fn=data_collator,
-                num_workers=training_args.dataloader_num_workers,
-                pin_memory=training_args.dataloader_pin_memory,
-                drop_last=True, 
-            )
-            # breakpoint()
-    
+        # 计算逻辑上的 DP 组数量和当前 rank 所属的 DP 组 ID
+        # 举例: 4卡, SP=2. Rank0,1 -> dp_rank 0; Rank2,3 -> dp_rank 1
+        dp_size = world_size // sp_size
+        dp_rank = global_rank // sp_size
+        
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(
+            dataset=train_dataset,
+            num_replicas=dp_size,   # 这里告诉 Sampler 总共有 dp_size 个分片
+            rank=dp_rank,           # 这里告诉 Sampler 我是第 dp_rank 个分片
+            shuffle=True,
+            seed=training_args.seed,
+            drop_last=True,
+        )
+        
+        train_dataloader = torch.utils.data.DataLoader(
+            dataset=train_dataset,
+            batch_size=1,
+            sampler=sampler,
+            collate_fn=None,
+            num_workers=training_args.dataloader_num_workers,
+            pin_memory=training_args.dataloader_pin_memory,
+            drop_last=True, 
+        )
 
     # Initialize our Trainer
     if training_args.attention_type is not None and "nsa" in training_args.attention_type :
@@ -449,7 +444,7 @@ def main():
             args=training_args,
             train_dataset=train_dataset if training_args.do_train else None,
             tokenizer=tokenizer,
-            data_collator=data_collator,
+            # data_collator=data_collator,
             log_loss=script_args.should_log_loss,
         )
     if training_args.do_train:

@@ -1,3 +1,11 @@
+#!/bin/bash
+# qwen_parallel_ref.sh - Single GPU Reference Run
+
+export CUDA_VISIBLE_DEVICES=0  # 只见一张卡
+seq_parallel_size=1            # 关闭序列并行
+num_gpus=1                     # 显式设为1
+num_nodes=1
+
 # Model and training configuration
 model=${MODEL:-"/data2/hf_models/Qwen3-4B"}
 bsz=${BSZ:-1}
@@ -10,7 +18,7 @@ warmup=${WARMUP:-0.3}
 
 overrides=${OVERRIDES:-""}
 min_lr_ratio=${MIN_LR_RATIO:-1e-7}
-seq_parallel_size=${SEQ_PARALLEL_SIZE:-8}
+seq_parallel_size=${SEQ_PARALLEL_SIZE:-1}
 
 # FSDP configuration
 # 0=Disable, 1=FULL_SHARD, 2=SHARD_GRAD_OP, 3=NO_SHARD, 4=HYBRID_SHARD, 5=HYBRID_SHARD_ZERO2
@@ -63,7 +71,7 @@ enable_lambda_task=false
 use_softmax=true
 
 # Create run name
-suffix=${SUFFIX:-"qwen_parallel"}
+suffix=${SUFFIX:-"qwen_parallel_ref"}
 extra_name="seqlen4k"
 # extra_name="debug_12.5"
 if [[ $freeze_weights == "true" ]]; then

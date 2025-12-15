@@ -29,10 +29,10 @@ CLASS_MAP = {
 }
 
 @dataclass
-class DataArguments:
+class PackedDataArguments:
     single_seq: bool = False
     subsplit_length: Optional[int] = None
-    per_device_max_tokens: int = 128*1024
+    per_device_max_tokens: int = 4*1024
     apply_instruct_masks: bool = False
     prepack: bool = False
     streaming: bool = False
@@ -53,8 +53,6 @@ def _process_single_item(item, tokenizer, class_map):
     q = item.get("question", "") or ""
     a = item.get("answer", "") or ""
     meta = item.get("metadata", {}) or {}
-    flag = str(meta.get("flag", "0"))
-
     task_type = "Other"
     is_prefix = True
     try:
@@ -63,31 +61,54 @@ def _process_single_item(item, tokenizer, class_map):
         is_prefix = meta_dict.get('is_prefix', True)
     except Exception:
         pass
-    
-    flag = str(meta.get("flag", "0"))
-    task_type = meta.get('task', 'Other')
-    class_id = class_map.get(task_type, 4) # 4 for Other
 
+        
     separator = "\n\n"
 
+    
     # Context (Segment ID 1)
-    if flag == "1" or not ctx:
-        ctx_text = ""
-    else:
-        ctx_text = "\n" + ctx.rstrip()
-    ctx_ids = tokenizer(ctx_text, add_special_tokens=False)["input_ids"]
+    ctx_text = "\n" + ctx.rstrip()
+    # ctx_ids = tokenizer(ctx_text, add_special_tokens=False)["input_ids"]
     
     # Question (Segment ID 2)
-    if flag == "1":
-        q_text = "\n" + q.lstrip()
+    q_text = "\n" + q.lstrip()
+    # q_ids = tokenizer(q_text, add_special_tokens=False)["input_ids"]
+    
+    if is_prefix:
+        user_text = q_text + "\n" + ctx_text
+        
     else:
-        q_text = "\n" + q.lstrip() if ctx and q else (q.lstrip() if q and not ctx else "")
-    q_ids = tokenizer(q_text, add_special_tokens=False)["input_ids"]
+        user_text = ctx_text + "\n" + q_text
+    
+    if task_type == 'Single QA' or task_type == 'MultiHop QA':
+        messages = [
+            {"role": "user", "content": user_text}
+        ]
+        user_text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            enable_thinking=False,
+        )
+        user_text_ids = tokenizer(user_text, add_special_tokens=False)["input_ids"]
+    else:
+        user_text_ids = tokenizer(user_text, add_special_tokens=False)["input_ids"]        
 
     # Separator + Answer (Segment ID 3)
     if a:
-        a_text = separator + a
-        a_ids = tokenizer(a_text, add_special_tokens=False)["input_ids"]
+        if task_type == 'Single QA' or task_type == 'MultiHop QA':
+            messages = [
+                {"role": "assistant", "content": a}
+            ]
+            a_text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                enable_thinking=False,
+            )
+            a_text = separator + a_text
+            a_ids = tokenizer(a_text, add_special_tokens=False)["input_ids"]
+        else:
+            a_text = separator + a
+            a_ids = tokenizer(a_text, add_special_tokens=False)["input_ids"]
     else:
         a_ids = []
 
@@ -99,56 +120,41 @@ def _process_single_item(item, tokenizer, class_map):
     
     # Task (Segment 0)
     full_input_ids = []
-    # segment_ids = []
+    segment_ids = []
     special_start = special_end = 0
 
-    if is_prefix:
-        # Question (Segment 2)
-        q_start = current_len
-        full_input_ids.extend(q_ids)
-        # segment_ids.extend([2] * len(q_ids))
-        current_len += len(q_ids)
-        q_end = current_len - 1 if q_ids else q_start
-        
-        # Context (Segment 1)
-        ctx_start = current_len
-        full_input_ids.extend(ctx_ids)
-        # segment_ids.extend([1] * len(ctx_ids))
-        current_len += len(ctx_ids)
-        ctx_end = current_len - 1 if ctx_ids else ctx_start
-        
-    else:
-        # Context (Segment 1)
-        ctx_start = current_len
-        full_input_ids.extend(ctx_ids)
-        # segment_ids.extend([1] * len(ctx_ids))
-        current_len += len(ctx_ids)
-        ctx_end = current_len - 1 if ctx_ids else ctx_start
-        
-        # Question (Segment 2)
-        q_start = current_len
-        full_input_ids.extend(q_ids)
-        # segment_ids.extend([2] * len(q_ids))
-        current_len += len(q_ids)
-        q_end = current_len - 1 if q_ids else q_start
+    user_text_start = current_len
+    full_input_ids.extend(user_text_ids)
+    segment_ids.extend([1] * len(user_text_ids))
+    current_len += len(user_text_ids)
+    user_text_end = current_len - 1
     
     # Answer (Segment 3) + Separator
     a_start = current_len
     full_input_ids.extend(a_ids)
-    # segment_ids.extend([3] * len(a_ids))
+    segment_ids.extend([3] * len(a_ids))
     current_len += len(a_ids)
     a_end = current_len - 1 if a_ids else a_start
 
     # Add EOS token at the very end
     if tokenizer.eos_token_id is not None and full_input_ids[-1] != tokenizer.eos_token_id:
         full_input_ids.append(tokenizer.eos_token_id)
-        # segment_ids.append(3) 
+        segment_ids.append(3) 
         current_len += 1
         a_end = current_len - 1
         
-    labels = list(full_input_ids)
+    # --- 4. Apply Truncation ---
+    original_len = len(full_input_ids)
+        
+    # labels = [-100] * len(full_input_ids)
+    # if a_ids:
+    #     labels[a_start:len(full_input_ids)] = full_input_ids[a_start:len(full_input_ids)]
+    labels = full_input_ids.copy()
+
+    range_ids = [special_start, special_end, user_text_start, user_text_end, user_text_start, user_text_end, a_start, a_end]
     
-    range_ids = [special_start, special_end, ctx_start, ctx_end, q_start, q_end, a_start, a_end]
+    class_id = class_map.get(task_type, 4) # 4 for Other
+    labels = list(full_input_ids)
 
     return {
         "input_ids": full_input_ids,
@@ -237,7 +243,7 @@ def worker_pack_chunk(chunk_dataset, tokenizer, max_seq_len, worker_id):
 # =========================================================
 
 class PackedDataset(Dataset):
-    def __init__(self, raw_dataset, tokenizer, max_seq_len=128*1024, cache_dir=None, num_proc=8):
+    def __init__(self, raw_dataset, tokenizer, max_seq_len=128*1024, cache_dir=None, num_proc=8, raw_path = None):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.packed_data = None
@@ -247,7 +253,7 @@ class PackedDataset(Dataset):
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
             # 这里的后缀改为 .parquet
-            cache_filename = f"packed_sft_len{len(raw_dataset)}_seq{max_seq_len}.parquet"
+            cache_filename = f"{os.path.basename(raw_path)}_packed_maxseq{max_seq_len}.parquet"
             self.cache_path = os.path.join(cache_dir, cache_filename)
 
         if self.cache_path and os.path.exists(self.cache_path):
@@ -329,16 +335,16 @@ class PackedDataset(Dataset):
 # =========================================================
 
 
-def build_packed_dataset(paths, data_args, tokenizer=None):
-    if isinstance(paths, str):
-        paths = [paths]
+def build_packed_dataset(paths: str, data_args, tokenizer=None):
+    # if isinstance(paths, str):
+    #     paths = [paths]
     
     parquet_files = []
-    for p in paths:
-        if os.path.isdir(p):
-            parquet_files.extend(glob.glob(os.path.join(p, "*.parquet")))
-        elif os.path.isfile(p) and p.endswith(".parquet"):
-            parquet_files.append(p)
+    # for p in paths:
+    if os.path.isdir(paths):
+        parquet_files.extend(glob.glob(os.path.join(paths, "*.parquet")))
+    elif os.path.isfile(paths) and paths.endswith(".parquet"):
+        parquet_files.append(paths)
     
     if not parquet_files:
         raise ValueError("No parquet files found")
@@ -375,8 +381,9 @@ def build_packed_dataset(paths, data_args, tokenizer=None):
         raw, 
         tokenizer, 
         max_seq_len=max_len, # 根据需要调整
-        cache_dir="data_cache",
-        num_proc=data_args.preprocessing_num_workers # 使用参数控制核数
+        cache_dir="/data2/public_data/data_cache",
+        num_proc=data_args.preprocessing_num_workers, # 使用参数控制核数
+        raw_path = paths,
     )
 
 # 已弃用
@@ -434,8 +441,8 @@ if __name__ == "__main__":
 
     # 2. 配置参数
     # 建议先用小数据或少量 worker 测试，跑通后再调大
-    path = "/data2/public_data/qwen_mix_sft_128K" 
-    data_args = DataArguments(
+    path = "/data2/public_data/qwen_mix_sft_32K" 
+    data_args = PackedDataArguments(
         preprocessing_num_workers=32, 
     )
     
@@ -467,6 +474,7 @@ if __name__ == "__main__":
     print(f"Input IDs Shape: {item0['input_ids'].shape}")
     print(f"Task Types: {item0['task_type']}")
     print(f"Seq Lengths (cum): {item0['seq_lengths']}")
+    print(f"Range ids: {item0['range_ids']}")
     
 
-    breakpoint() 
+    # breakpoint() 

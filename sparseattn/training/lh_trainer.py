@@ -326,15 +326,17 @@ class Trainer(HFTrainer):
             inputs: Dict from DataCollator.
                 - input_ids: [1, S] -> 需要变成 [S] 然后切分
                 - labels: [1, S] -> 需要变成 [S] 然后切分
-                - seq_lengths: List[Tensor] (len=1, tensor=[Bi+1]) -> 取出变成 [Bi+1], 保持全局
+                - seq_lengths: [1, Bi + 1]
+                - range_ids: [1, Bi, 8] 
         """
+        # breakpoint()
         input_ids = inputs["input_ids"]
         if len(input_ids.shape) == 2:
             input_ids = inputs["input_ids"].squeeze(0) 
             labels = inputs["labels"].squeeze(0)
-            global_seq_lengths = inputs["seq_lengths"][0] 
-        else:
-            global_seq_lengths = inputs["seq_lengths"]
+            global_seq_lengths = inputs["seq_lengths"].squeeze(0)
+            range_ids = inputs["range_ids"].squeeze(0)
+            
 
         if dist.is_initialized():
             seq_parallel_world_size = dist.get_world_size(self.seq_parallel_group)
@@ -365,6 +367,7 @@ class Trainer(HFTrainer):
                 "labels": labels_chunks[seq_parallel_rank],          # Local [S_local]
                 "seq_lengths": global_seq_lengths,                   # Global [Bi+1]
                 "seq_parallel_group": self.seq_parallel_group,
+                "range_ids": range_ids,                              # Global [Bi, 8]
             }
             
             # 可选：计算 position_ids 起始位置，如果模型需要
@@ -380,7 +383,8 @@ class Trainer(HFTrainer):
                 "input_ids": input_ids,             # Global [S]
                 "labels": labels,                   # Global [S]
                 "seq_lengths": global_seq_lengths,  # Global [Bi+1]
-                "seq_parallel_group": None
+                "seq_parallel_group": None,
+                "range_ids": range_ids,             # Global [Bi, 8]
             }
 
         return model_inputs
@@ -398,13 +402,9 @@ class Trainer(HFTrainer):
 
         Subclass and override for custom behavior.
         """
-        tasks = inputs.get("task_type", None) #if sp, List[Tensor] Tensor shape:[Bi, ]; else, Tensor
+        tasks = inputs.get("task_type", None) # [1, Bi]
         
-        if isinstance(tasks, list):
-            tasks = tasks[0] # Tensor, [Bi, ]
-        else:
-            tasks = inputs.get("task_type", ["default"] * inputs["input_ids"].size(0))
-        breakpoint()
+        tasks = tasks[0]
         
         # tasks = ["default"] * inputs["input_ids"].size(0)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step, tasks)
@@ -416,7 +416,6 @@ class Trainer(HFTrainer):
         
         # attention_mask = inputs.get("attention_mask")
         # valid_tokens = attention_mask.sum(dim=1)
-
         outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
 
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
@@ -453,44 +452,42 @@ class Trainer(HFTrainer):
 
         reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
         
-        # gather_list = [
-        #     torch.zeros_like(reg_loss, device=reg_loss.device)
-        #     for _ in range(dist.get_world_size(group=self.seq_parallel_group))
-        # ]
-        # # detached gather —— 但保留本 rank 的梯度
-        # dist.all_gather(gather_list, reg_loss.detach())
-        # gather_list[dist.get_rank(group=self.seq_parallel_group)] = reg_loss
-        # reg_loss = sum(gather_list)
-        
-        contrastive_loss = outputs["contrastive_loss"] if isinstance(outputs, dict) else outputs[-1]
-        head_contrastive_loss = outputs["head_contrastive_loss"] if isinstance(outputs, dict) else outputs[-3]
-        
-        if self.use_softmax:
-            loss = lm_loss + reg_loss + contrastive_loss + head_contrastive_loss 
-        else:
-            loss = lm_loss + reg_loss + contrastive_loss + head_contrastive_loss - 0.5 * head_entropy
-        
+        loss = lm_loss + 10 * reg_loss
+       
         model_sparsity = outputs["model_sparsity"]
         
         print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "f"[Step {self.state.global_step}] Task={tasks} | model_sparsity={model_sparsity} | reg_loss={reg_loss}")
         
-        task_ids = outputs['task_ids']
+        # task_ids = outputs['task_ids']
         log_z_loss = outputs['log_z_loss']
         task_sparsity_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
         task_sparsity_loss_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
         task_target_sparsity_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
         
         # all gather task ids and model_sparsity
-        distributed_log_z_loss = self.accelerator.gather(log_z_loss)
-        distributed_task_ids = self.accelerator.gather(task_ids)
-        distributed_model_sparsity = self.accelerator.gather(model_sparsity)
+        # distributed_log_z_loss = self.accelerator.gather(log_z_loss)
+        # distributed_task_ids = self.accelerator.gather(task_ids)
+        # distributed_model_sparsity = self.accelerator.gather(model_sparsity)
+        # distributed_target_sparsity = self.accelerator.gather(target_sparsity)
+        
+        distributed_log_z_loss = [None for _ in range(dist.get_world_size())]
+        distributed_task_ids = [None for _ in range(dist.get_world_size())]
+        distributed_model_sparsity = [None for _ in range(dist.get_world_size())]
+        distributed_target_sparsity = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(distributed_log_z_loss, log_z_loss.cpu())
+        dist.all_gather_object(distributed_task_ids, task_ids.cpu())
+        dist.all_gather_object(distributed_model_sparsity, model_sparsity.cpu())
+        dist.all_gather_object(distributed_target_sparsity, target_sparsity.cpu())
+        distributed_log_z_loss = torch.cat(distributed_log_z_loss)
+        distributed_task_ids = torch.cat(distributed_task_ids)
+        distributed_model_sparsity = torch.cat(distributed_model_sparsity)
+        distributed_target_sparsity = torch.cat(distributed_target_sparsity)
+        
         distributed_loss = self.accelerator.gather(loss).mean()
         distributed_lm_loss = self.accelerator.gather(lm_loss).mean()
         distributed_reg_loss = self.accelerator.gather(reg_loss).mean()
-        distributed_contrastive_loss = self.accelerator.gather(contrastive_loss).mean()
-        distributed_head_contrastive_loss = self.accelerator.gather(head_contrastive_loss).mean()
-        distributed_target_sparsity = self.accelerator.gather(target_sparsity)
-            
+        
+
         if self.log_loss and self.accelerator.is_main_process:
             model_sparsity = (
                 outputs["model_sparsity"] if isinstance(outputs, dict) else outputs[-3]
@@ -510,8 +507,8 @@ class Trainer(HFTrainer):
                 )
 
             logger.info(
-                f"@ {self.state.global_step} | Loss: {distributed_loss} | LM Loss: {distributed_lm_loss} | "
-                f"Reg Loss: {distributed_reg_loss} | contrastive_loss: {distributed_contrastive_loss} | head_contrastive_loss: {distributed_head_contrastive_loss} | Head Entropy: {head_entropy}"
+                f"@ {self.state.global_step} | Loss: {distributed_loss} | LM Loss: {distributed_lm_loss} | Tau:{current_tau} | "
+                f"Reg Loss: {distributed_reg_loss} | Head Entropy: {head_entropy}"
                 + (" | " + " | ".join(extra) if len(extra) else "")
             )
             
@@ -593,17 +590,8 @@ class Trainer(HFTrainer):
                     "loss": float(
                         distributed_loss.detach().item() if isinstance(distributed_loss, torch.Tensor) else distributed_loss
                     ),
-                    "contrastive_loss": float(
-                        distributed_contrastive_loss.detach().item()
-                        if isinstance(distributed_contrastive_loss, torch.Tensor)
-                        else distributed_contrastive_loss
-                    ),
-                    "head_contrastive_loss": float(
-                        distributed_head_contrastive_loss.detach().item()
-                        if isinstance(distributed_head_contrastive_loss, torch.Tensor)
-                        else distributed_head_contrastive_loss
-                    ),
                     "head_entropy": head_entropy.detach().item(),
+                    "current_tau": current_tau.detach().item(),
                     "target_sparsity(avg)": distributed_target_sparsity.detach().float().mean().item(),
                     "model_sparsity(avg)": distributed_model_sparsity.detach().float().mean().item(),
                     "step": self.state.global_step,
