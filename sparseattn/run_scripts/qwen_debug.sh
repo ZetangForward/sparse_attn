@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=0
 
 # Model and training configuration
 model=${MODEL:-"/data2/hf_models/Qwen3-4B"}
@@ -20,7 +20,7 @@ fsdp=${FSDP:-"5"}
 gc=${GC:-"1"}
 
 # PruLong-specific arguments
-max_toks=${MAX_TOKS:-32768}
+max_toks=${MAX_TOKS:-65536}
 # max_toks=${MAX_TOKS:-256}
 start_head_sparsity=${START_HEAD_SPARSITY:-0.5}
 end_head_sparsity=${END_HEAD_SPARSITY:-0.3}
@@ -51,7 +51,7 @@ layerwise_sparsity_weight=${LAYERWISE_SPARSITY_WEIGHT:-1.0}
 erank_analysis_path="/"
 
 # Dataset configuration
-dataset=${DATASET:-"/data2/public_data/qwen_mix_sft_32K_4task"}
+dataset=${DATASET:-"/data2/public_data/qwen_mix_sft_64K2"} #  qwen_mix_sft_32K_4task qwen_mix_sft_64K2
 task_type="sft" # pretrain or sft
 
 run_name="overfit_quick_sparsity_v2"
@@ -77,8 +77,8 @@ header="torchrun \
 
 # header="python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m training.lh_train_language_model"
 
-# accu=$(($bsz / $seq / $num_gpus / $num_nodes))
-accu=1
+accu=$(($bsz / $seq / $num_gpus / $num_nodes))
+# accu=1
 
 # Environment variables
 export OMP_NUM_THREADS=$num_gpus
@@ -116,6 +116,7 @@ base_arguments=(
     --save_steps $save_steps
     --save_total_limit $save_total_limit
     --dataloader_num_workers 0
+    --preprocessing_num_workers 48
     --disable_tqdm true
     --use_fast_tokenizer false
     --remove_unused_columns false
@@ -155,7 +156,7 @@ base_arguments=(
     --layerwise_sparsity_weight $layerwise_sparsity_weight
     --erank_analysis_path $erank_analysis_path
     --data_cache_dir "/data2/public_data/data_cache"
-    --pooling_mode 'first_token'
+    --pooling_mode 'ctx_q'
 )
 
 # FSDP configuration

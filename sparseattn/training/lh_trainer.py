@@ -280,14 +280,19 @@ class Trainer(HFTrainer):
         self.num_sparsity_warmup_steps = math.ceil(self.sparsity_warmup_ratio * self.args.max_steps)
         self.task_sparsity_config = {
             "default": {"start": self.start_head_sparsity, "end": self.end_head_sparsity},
-            "Code": {"start": 0, "end": 0.4},
+            "Code": {"start": 0, "end": 0.5},
             "Math": {"start": 0, "end": 0.6},
-            "MultiHop QA": {"start": 0, "end": 0.2},
-            "Single QA": {"start": 0, "end": 0.2},
-            "Summarization": {"start": 0, "end": 0.5},
+            "MultiHop QA": {"start": 0, "end": 0.3},
+            "Single QA": {"start": 0, "end": 0.3},
+            "Summarization": {"start": 0, "end": 0.7},
         }
         self.reverse_class_map = {0: 'Single QA', 1: 'MultiHop QA', 2: 'Summarization', 3: 'Code'}
         self.use_softmax = args.use_softmax
+        
+        self.tau_max = 1.5  # 初始 tau
+        self.tau_min = 0.2  # 最终/保持 tau
+
+        self.tau_decay_steps = math.ceil(self.args.max_steps * 0.6)
 
         if not dist.is_initialized() or args.seq_parallel_size == dist.get_world_size():
             logger.info(f"Using world as sequence parallel group")
@@ -319,24 +324,42 @@ class Trainer(HFTrainer):
             sparsities.append(sp)
 
         return torch.tensor(sparsities, dtype=torch.float32)  # shape: [B]
+    
+    def get_current_tau(self, global_step: int) -> torch.Tensor:
+        
+        tau_max = self.tau_max
+        tau_min = self.tau_min
+        T_max = self.tau_decay_steps
+        
+        t = torch.tensor(global_step, dtype=torch.float32)
+        T_max_tensor = torch.tensor(T_max, dtype=torch.float32)
+        
+        if global_step < T_max:
+            cosine_factor = torch.cos(torch.pi * t / T_max_tensor) 
 
+            current_tau = tau_min + 0.5 * (tau_max - tau_min) * (1 + cosine_factor)
+            return current_tau.to(torch.float32)
+        else:
+            # 保持 0.2
+            return torch.tensor(tau_min, dtype=torch.float32)
     def get_sequence_parallel_inputs(self, inputs):
         """
         Args:
             inputs: Dict from DataCollator.
                 - input_ids: [1, S] -> 需要变成 [S] 然后切分
                 - labels: [1, S] -> 需要变成 [S] 然后切分
-                - seq_lengths: [1, Bi + 1]
-                - range_ids: [1, Bi, 8] 
+                - seq_lengths: List[Tensor] (len=1, tensor=[Bi+1]) -> 取出变成 [Bi+1], 保持全局
         """
-        # breakpoint()
         input_ids = inputs["input_ids"]
         if len(input_ids.shape) == 2:
             input_ids = inputs["input_ids"].squeeze(0) 
             labels = inputs["labels"].squeeze(0)
-            global_seq_lengths = inputs["seq_lengths"].squeeze(0)
-            range_ids = inputs["range_ids"].squeeze(0)
-            
+            global_seq_lengths = inputs["seq_lengths"][0] 
+            task_ids = inputs["task_ids"][0]
+            range_ids = inputs["range_ids"][0]
+            task_type = [i[0] for i in inputs['task_type']]
+        else:
+            global_seq_lengths = inputs["seq_lengths"]
 
         if dist.is_initialized():
             seq_parallel_world_size = dist.get_world_size(self.seq_parallel_group)
@@ -347,7 +370,7 @@ class Trainer(HFTrainer):
 
         if seq_parallel_world_size > 1:
             total_seq_len = input_ids.size(0)
-            
+
             # 计算 Padding (保证能被 world_size 整除)
             if total_seq_len % seq_parallel_world_size != 0:
                 padding = seq_parallel_world_size - (total_seq_len % seq_parallel_world_size)
@@ -357,7 +380,7 @@ class Trainer(HFTrainer):
                 input_ids = torch.cat([input_ids, padding_zeros], dim=0)
                 # labels padding: 补 -100
                 labels = torch.cat([labels, padding_zeros - 100], dim=0)
-            
+
             # input_ids_chunks: tuple of [S / world_size]
             input_ids_chunks = torch.tensor_split(input_ids, seq_parallel_world_size, dim=0)
             labels_chunks = torch.tensor_split(labels, seq_parallel_world_size, dim=0)
@@ -367,9 +390,8 @@ class Trainer(HFTrainer):
                 "labels": labels_chunks[seq_parallel_rank],          # Local [S_local]
                 "seq_lengths": global_seq_lengths,                   # Global [Bi+1]
                 "seq_parallel_group": self.seq_parallel_group,
-                "range_ids": range_ids,                              # Global [Bi, 8]
             }
-            
+
             # 可选：计算 position_ids 起始位置，如果模型需要
             start_index = sum(chunk.size(0) for chunk in input_ids_chunks[:seq_parallel_rank])
             model_inputs["position_ids"] = torch.arange(
@@ -378,13 +400,14 @@ class Trainer(HFTrainer):
             )
 
         else:
-            # 非并行模式 (单卡或纯 DP)
             model_inputs = {
                 "input_ids": input_ids,             # Global [S]
                 "labels": labels,                   # Global [S]
+                "task_ids": task_ids,
+                "range_ids": range_ids,
                 "seq_lengths": global_seq_lengths,  # Global [Bi+1]
-                "seq_parallel_group": None,
-                "range_ids": range_ids,             # Global [Bi, 8]
+                "task_type": task_type,
+                "seq_parallel_group": None
             }
 
         return model_inputs
@@ -402,21 +425,16 @@ class Trainer(HFTrainer):
 
         Subclass and override for custom behavior.
         """
-        tasks = inputs.get("task_type", None) # [1, Bi]
-        
-        tasks = tasks[0]
-        
+        inputs = self.get_sequence_parallel_inputs(inputs)
+        tasks = inputs.get("task_type", ["default"] * inputs["range_ids"].size(0)) #[B]
         # tasks = ["default"] * inputs["input_ids"].size(0)
         target_sparsity = self.get_current_target_sparsity(self.state.global_step, tasks)
-        target_sparsity = target_sparsity.to(model.device)  # [Bi, ]
+        target_sparsity = target_sparsity.to(model.device)  # [B]
+        current_tau = self.get_current_tau(self.state.global_step)
         
-        inputs = self.get_sequence_parallel_inputs(inputs)
-        
-        print(f"[Step {self.state.global_step}] Sample tasks: {tasks} → Target Sparsity: {[f'{s:.3f}' for s in target_sparsity.tolist()]}")
-        
-        # attention_mask = inputs.get("attention_mask")
-        # valid_tokens = attention_mask.sum(dim=1)
-        outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity)
+        print(f"[Step {self.state.global_step} / Rank {dist.get_rank()}] Sample tasks: {tasks} → Target Sparsity: {[f'{s:.3f}' for s in target_sparsity.tolist()]}")
+
+        outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity, current_tau=current_tau)
 
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
         head_entropy = outputs["head_entropy"]
@@ -452,13 +470,22 @@ class Trainer(HFTrainer):
 
         reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
         
+        # gather_list = [
+        #     torch.zeros_like(reg_loss, device=reg_loss.device)
+        #     for _ in range(dist.get_world_size(group=self.seq_parallel_group))
+        # ]
+        # # detached gather —— 但保留本 rank 的梯度
+        # dist.all_gather(gather_list, reg_loss.detach())
+        # gather_list[dist.get_rank(group=self.seq_parallel_group)] = reg_loss
+        # reg_loss = sum(gather_list)
+        
         loss = lm_loss + 10 * reg_loss
        
         model_sparsity = outputs["model_sparsity"]
         
         print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "f"[Step {self.state.global_step}] Task={tasks} | model_sparsity={model_sparsity} | reg_loss={reg_loss}")
         
-        # task_ids = outputs['task_ids']
+        task_ids = outputs['task_ids']
         log_z_loss = outputs['log_z_loss']
         task_sparsity_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
         task_sparsity_loss_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
