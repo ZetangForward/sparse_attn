@@ -342,6 +342,7 @@ class Trainer(HFTrainer):
         else:
             # 保持 0.2
             return torch.tensor(tau_min, dtype=torch.float32)
+        
     def get_sequence_parallel_inputs(self, inputs):
         """
         Args:
@@ -351,16 +352,54 @@ class Trainer(HFTrainer):
                 - seq_lengths: List[Tensor] (len=1, tensor=[Bi+1]) -> 取出变成 [Bi+1], 保持全局
         """
         input_ids = inputs["input_ids"]
+        # 处理 batch 维度 (通常 CP 模式下 batch=1)
         if len(input_ids.shape) == 2:
             input_ids = inputs["input_ids"].squeeze(0) 
             labels = inputs["labels"].squeeze(0)
-            global_seq_lengths = inputs["seq_lengths"][0] 
+            global_seq_lengths = inputs["seq_lengths"][0] # [Bi+1] (cu_seqlens)
             task_ids = inputs["task_ids"][0]
             range_ids = inputs["range_ids"][0]
             task_type = [i[0] for i in inputs['task_type']]
+            
+            raw_position_ids = inputs.get("position_ids", None)
+            if raw_position_ids is not None:
+                raw_position_ids = raw_position_ids.squeeze(0)
         else:
+            # 可能是 StreamingDataset 等其他格式
             global_seq_lengths = inputs["seq_lengths"]
+            raw_position_ids = inputs.get("position_ids")
+            # ... 其他字段获取 ...
+            task_ids = inputs["task_ids"]
+            range_ids = inputs["range_ids"]
+            task_type = inputs['task_type']
 
+        if raw_position_ids is not None:
+            # Case A: Dataset 已经算好了 (Best)
+            global_position_ids = raw_position_ids
+        elif global_seq_lengths is not None:
+            # Case B: Packed 模式，根据 cu_seqlens 重建 [0, 1, 0, 1...]
+            # global_seq_lengths 格式如 [0, 512, 1024...]
+            # 我们需要生成 0..511, 0..511...
+            pos_segments = []
+            # 转换为 list 避免 tensor 索引慢
+            cu_seqlens_list = global_seq_lengths.tolist()
+            for i in range(len(cu_seqlens_list) - 1):
+                start = cu_seqlens_list[i]
+                end = cu_seqlens_list[i+1]
+                length = end - start
+                # 每个片段都从 0 开始计数
+                pos_segments.append(torch.arange(0, length, device=input_ids.device, dtype=torch.long))
+            
+            if len(pos_segments) > 0:
+                global_position_ids = torch.cat(pos_segments)
+            else:
+                # Fallback
+                global_position_ids = torch.arange(0, input_ids.size(0), device=input_ids.device, dtype=torch.long)
+        else:
+            # Case C: 单序列模式 (Single Doc)
+            global_position_ids = torch.arange(0, input_ids.size(0), device=input_ids.device, dtype=torch.long)
+
+        
         if dist.is_initialized():
             seq_parallel_world_size = dist.get_world_size(self.seq_parallel_group)
             seq_parallel_rank = dist.get_rank(self.seq_parallel_group)
@@ -371,41 +410,40 @@ class Trainer(HFTrainer):
         if seq_parallel_world_size > 1:
             total_seq_len = input_ids.size(0)
 
-            # 计算 Padding (保证能被 world_size 整除)
+            # Padding (保证被 world_size 整除)
             if total_seq_len % seq_parallel_world_size != 0:
                 padding = seq_parallel_world_size - (total_seq_len % seq_parallel_world_size)
-                padding_zeros = torch.full(
-                    (padding,), 0, dtype=input_ids.dtype, device=input_ids.device
-                )
+                padding_zeros = torch.full((padding,), 0, dtype=input_ids.dtype, device=input_ids.device)
+                
                 input_ids = torch.cat([input_ids, padding_zeros], dim=0)
-                # labels padding: 补 -100
                 labels = torch.cat([labels, padding_zeros - 100], dim=0)
+                # Position IDs 也要 Pad (补0即可)
+                global_position_ids = torch.cat([global_position_ids, torch.zeros(padding, dtype=torch.long, device=input_ids.device)], dim=0)
 
-            # input_ids_chunks: tuple of [S / world_size]
             input_ids_chunks = torch.tensor_split(input_ids, seq_parallel_world_size, dim=0)
             labels_chunks = torch.tensor_split(labels, seq_parallel_world_size, dim=0)
+            pos_ids_chunks = torch.tensor_split(global_position_ids, seq_parallel_world_size, dim=0)
 
             model_inputs = {
-                "input_ids": input_ids_chunks[seq_parallel_rank],    # Local [S_local]
-                "labels": labels_chunks[seq_parallel_rank],          # Local [S_local]
-                "seq_lengths": global_seq_lengths,                   # Global [Bi+1]
+                "input_ids": input_ids_chunks[seq_parallel_rank],    # Local chunk
+                "labels": labels_chunks[seq_parallel_rank],          # Local chunk
+                "position_ids": pos_ids_chunks[seq_parallel_rank],   # [CRITICAL] 切分后的正确位置
+                "seq_lengths": global_seq_lengths,                   # Global
                 "seq_parallel_group": self.seq_parallel_group,
+                "range_ids": range_ids,
+                "task_type": task_type,
+                "task_ids": task_ids,
             }
 
-            # 可选：计算 position_ids 起始位置，如果模型需要
-            start_index = sum(chunk.size(0) for chunk in input_ids_chunks[:seq_parallel_rank])
-            model_inputs["position_ids"] = torch.arange(
-                start_index, start_index + model_inputs["input_ids"].size(0), 
-                device=input_ids.device
-            )
-
         else:
+            # 单卡 / DP 模式
             model_inputs = {
-                "input_ids": input_ids,             # Global [S]
-                "labels": labels,                   # Global [S]
+                "input_ids": input_ids,             
+                "labels": labels,                   
+                "position_ids": global_position_ids, # 直接使用构建好的全局 ID
                 "task_ids": task_ids,
                 "range_ids": range_ids,
-                "seq_lengths": global_seq_lengths,  # Global [Bi+1]
+                "seq_lengths": global_seq_lengths,  
                 "task_type": task_type,
                 "seq_parallel_group": None
             }

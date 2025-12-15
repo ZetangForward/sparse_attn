@@ -60,7 +60,8 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
 
 # mode="max-autotune" 会尝试生成最快的 Triton 代码
 # fullgraph=True 告诉编译器这里没有 Python 控制流，可以全图优化
-fast_apply_rotary = torch.compile(apply_rotary_emb_torch, mode="max-autotune")
+# fast_apply_rotary = torch.compile(apply_rotary_emb_torch, mode="max-autotune") FIXME: 不能和 Gradient Checkpointing 混用
+fast_apply_rotary = apply_rotary_emb_torch
 
 class SeqAllToAll(torch.autograd.Function):
     @staticmethod
@@ -77,8 +78,20 @@ class SeqAllToAll(torch.autograd.Function):
             t.contiguous() for t in torch.tensor_split(input, world_size, scatter_idx)
         ]
         output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
+        # if(dist.get_rank() == 0):
+            # 打印input_list中每个张量的shape
+            # print("\n\n==============================================\n \
+                # input_list 中各张量shape: ", [t.shape for t in input_list])
+            # 打印output_list中每个张量的shape
+            # print("output_list 中各张量shape: ", [t.shape for t in output_list])
+            # （可选）打印列表第一个张量的shape（代表所有分片的shape，因为torch.tensor_split是均分）
+            # print("input_list 第一个张量shape: ", input_list[0].shape)
+            # print("output_list 第一个张量shape: ", output_list[0].shape)
 
+            # print("scatter_idx:", scatter_idx)
+            # print("gather_idx:", gather_idx)
         dist.all_to_all(output_list, input_list, group=group)
+
         return torch.cat(output_list, dim=gather_idx).contiguous()
 
     @staticmethod
@@ -661,7 +674,6 @@ class Qwen3RotaryEmbedding(nn.Module):
         使用 apply_rotary_emb_torch 绕过 Triton Kernel 的 Shape 检查
         完美支持 [S, H, D] 格式的 Context Parallel
         """
-        # 1. 更新 Cache (确定最大长度)
         if position_ids is not None:
             max_seqlen_in_batch = position_ids.max().item() + 1
         elif unpadded_lengths is not None:
@@ -672,7 +684,6 @@ class Qwen3RotaryEmbedding(nn.Module):
 
         self._update_cos_sin_cache(max_seqlen_in_batch, q.device, q.dtype)
 
-        # 2. 选取对应的 Cos/Sin
         if position_ids is not None:
             # [Case A] Context Parallel / Varlen (推荐)
             # 根据全局 position_ids 取出对应的 cos/sin
@@ -694,10 +705,6 @@ class Qwen3RotaryEmbedding(nn.Module):
             seq_len = q.shape[-2]
             cos = self._cos_cached[seqlen_offset : seqlen_offset + seq_len]
             sin = self._sin_cached[seqlen_offset : seqlen_offset + seq_len]
-
-        # 3. 执行计算 (使用 Pure PyTorch 版本)
-        # apply_rotary_emb_torch 会自动处理广播：
-        # q: [S, H, D], cos: [S, D/2] -> 自动广播 H 维度 -> 成功
         
         q_embed = fast_apply_rotary(q, cos, sin, interleaved=self.interleaved)
         k_embed = fast_apply_rotary(k, cos, sin, interleaved=self.interleaved)
@@ -1567,9 +1574,17 @@ class Qwen3Attention(nn.Module):
         if is_cp_enabled:
             # Scatter dim 1 (Heads), Gather dim 0 (Seq)
             # 因为输入是 3D: [Seq, Head, Dim]
-            q = SeqAllToAll.apply(q, 1, 0, seq_parallel_group)
-            k = SeqAllToAll.apply(k, 1, 0, seq_parallel_group)
-            v = SeqAllToAll.apply(v, 1, 0, seq_parallel_group)
+            if dist.get_rank() == 0:
+                # print("------------- q SeqAllToAll ---------------")
+                q = SeqAllToAll.apply(q, 1, 0, seq_parallel_group)
+                # print("------------- k SeqAllToAll ---------------")
+                k = SeqAllToAll.apply(k, 1, 0, seq_parallel_group)
+                # print("------------- v SeqAllToAll ---------------")
+                v = SeqAllToAll.apply(v, 1, 0, seq_parallel_group)
+            else:
+                q = SeqAllToAll.apply(q, 1, 0, seq_parallel_group)
+                k = SeqAllToAll.apply(k, 1, 0, seq_parallel_group)
+                v = SeqAllToAll.apply(v, 1, 0, seq_parallel_group)
             
             # 此时 q, k, v 变成了 [S_global, H_local, D]
             # unpadded_lengths (cu_seqlens) 是全局的，现在正好匹配 S_global
@@ -1629,7 +1644,6 @@ class Qwen3Attention(nn.Module):
         # 输入: [S_global, H_local, D]
         # Mask: z_kv_batch [B, H_local, 1] -> interpolated_attention 内部会广播
         
-        # 注意：调用 interpolated_attention 时不需要再传入 Group，因为它处理的是本地切片
         kv_packed = torch.stack([k, v], dim=1)
         # breakpoint()
         attn_output = self.interpolated_attention(q, kv_packed, k, v, unpadded_lengths, z_kv_batch)
@@ -1637,6 +1651,15 @@ class Qwen3Attention(nn.Module):
 
         # Context Parallel Reverse Transform
         if is_cp_enabled:
+            # 这里的 q 经历了 SeqAllToAll，已经是 S_global 长度 
+            # 而 attn_output 长度可能小于 S_global (被 FlashAttn Unpad 了)
+            expected_global_len = q.shape[0]
+            actual_len = attn_output.shape[0]
+            
+            if actual_len < expected_global_len:
+                pad_len = expected_global_len - actual_len
+                # 在 Dim 0 (Seq) 的末尾补 pad_len 个 0
+                attn_output = torch.nn.functional.pad(attn_output, (0, 0, 0, 0, 0, pad_len))
             # Scatter dim 0 (Seq), Gather dim 1 (Heads)
             # 变回: [S_local, H_total, D]
             attn_output = SeqAllToAll.apply(attn_output, 0, 1, seq_parallel_group)
@@ -1932,7 +1955,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         if key in self._erank_cache:
             return self._erank_cache[key]
         erank_res = torch.load(key, map_location="cpu")
-        print(f"Loaded e-rank results from {key}: {erank_res}")
+        # print(f"Loaded e-rank results from {key}: {erank_res}")
         avg_erank = erank_res["avg_erank"]
         self._erank_cache[key] = avg_erank
         return avg_erank
@@ -2447,6 +2470,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             unpadded_lengths = (seq_lengths, max_seqlen)
         
         elif attention_mask is not None and not use_cache and attention_mask.size(0) != 1:
+            # breakpoint()
             if inputs_embeds is not None:
                 bsz = inputs_embeds.size(0)
                 inputs_embeds, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
