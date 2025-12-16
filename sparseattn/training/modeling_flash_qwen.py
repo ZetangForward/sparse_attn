@@ -2308,7 +2308,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     layer_z_sums = list(stacked_layer_z)
                 
                 # total_num_heads 是全局的总 Head 数，z_sum 现在也是全局的 Active Head 数
-                model_sparsity = 1 - (z_sum / self.total_num_heads)
+            model_sparsity = 1 - (z_sum / self.total_num_heads)
                 # breakpoint()
         else:
             model_sparsity = None

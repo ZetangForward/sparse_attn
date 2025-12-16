@@ -517,7 +517,8 @@ class Trainer(HFTrainer):
         # gather_list[dist.get_rank(group=self.seq_parallel_group)] = reg_loss
         # reg_loss = sum(gather_list)
         
-        loss = lm_loss + 10 * reg_loss
+        # loss = lm_loss + 10 * reg_loss
+        loss = lm_loss
        
         model_sparsity = outputs["model_sparsity"]
         

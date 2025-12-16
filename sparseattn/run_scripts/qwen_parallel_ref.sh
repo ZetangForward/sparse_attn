@@ -186,7 +186,7 @@ base_arguments=(
     --disable_tqdm true
     --use_fast_tokenizer false
     --remove_unused_columns false
-    --ddp_find_unused_parameters false
+    --ddp_find_unused_parameters true
 
     --cuda_empty_cache
 
