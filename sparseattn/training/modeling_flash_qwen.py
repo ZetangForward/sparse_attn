@@ -63,45 +63,65 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
 # fast_apply_rotary = torch.compile(apply_rotary_emb_torch, mode="max-autotune") FIXME: 不能和 Gradient Checkpointing 混用
 fast_apply_rotary = apply_rotary_emb_torch
 
+class AllReduceSum(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, group: Any = None) -> torch.Tensor:
+        ctx.group = group
+        # 必须 clone 且 contiguous，防止 In-place 修改和内存不连续
+        output = input.clone().contiguous()
+        dist.all_reduce(output, op=dist.ReduceOp.SUM, group=group)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        # 反向传播：梯度也需要 AllReduce (Sum)
+        if ctx.group is not None and dist.get_world_size(ctx.group) > 1:
+            grad_input = grad_output.clone().contiguous()
+            dist.all_reduce(grad_input, op=dist.ReduceOp.SUM, group=ctx.group)
+            return grad_input, None
+        return grad_output, None
+
 class SeqAllToAll(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx: Any, input: Tensor, scatter_idx: int, gather_idx: int, group: Any
-    ) -> Tensor:
+    def forward(ctx, input: Tensor, scatter_idx: int, gather_idx: int, group: Any) -> Tensor:
         ctx.scatter_idx = scatter_idx
         ctx.gather_idx = gather_idx
         ctx.group = group
-
+        
         world_size = dist.get_world_size(group)
-
-        input_list = [
-            t.contiguous() for t in torch.tensor_split(input, world_size, scatter_idx)
-        ]
+        
+        # [CRITICAL] Pre-communication NaN check
+        if torch.isnan(input).any() or torch.isinf(input).any():
+            rank = dist.get_rank(group)
+            print(f"[RANK {rank}] PRE-COMM NaN DETECTED! Zeroing.")
+            input = torch.nan_to_num(input, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Ensure contiguous with correct memory format
+        input = input.contiguous(memory_format=torch.contiguous_format)
+        
+        # Split with explicit copy to avoid view issues
+        input_list = [t.clone() for t in torch.tensor_split(input, world_size, scatter_idx)]
+        
+        # [CRITICAL] Barrier to prevent race condition
+        dist.barrier(group=group)
+        
         output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
-        # if(dist.get_rank() == 0):
-            # 打印input_list中每个张量的shape
-            # print("\n\n==============================================\n \
-                # input_list 中各张量shape: ", [t.shape for t in input_list])
-            # 打印output_list中每个张量的shape
-            # print("output_list 中各张量shape: ", [t.shape for t in output_list])
-            # （可选）打印列表第一个张量的shape（代表所有分片的shape，因为torch.tensor_split是均分）
-            # print("input_list 第一个张量shape: ", input_list[0].shape)
-            # print("output_list 第一个张量shape: ", output_list[0].shape)
-
-            # print("scatter_idx:", scatter_idx)
-            # print("gather_idx:", gather_idx)
         dist.all_to_all(output_list, input_list, group=group)
-
+        
         return torch.cat(output_list, dim=gather_idx).contiguous()
-
-    @staticmethod
+    
+    @staticmethod 
     def backward(ctx: Any, *grad_output: Tensor) -> Tuple[Tensor, None, None, None]:
-        return (
-            SeqAllToAll.apply(*grad_output, ctx.gather_idx, ctx.scatter_idx, ctx.group),
-            None,
-            None,
-            None,
-        )
+        grad = grad_output[0]
+        
+        # [CRITICAL] Post-receive NaN sanitization
+        grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+        grad = grad.contiguous(memory_format=torch.contiguous_format)
+        
+        # Apply reverse communication with same guards
+        safe_grad = SeqAllToAll.apply(grad, ctx.gather_idx, ctx.scatter_idx, ctx.group)
+        
+        return safe_grad, None, None, None
 
 
 class DistributedAttention(torch.nn.Module):
@@ -1028,6 +1048,8 @@ class AttentionRouter(nn.Module):
 
         binary_logits = self.cls_router_head_agnostic(pooled_hidden_states)
         
+        binary_logits = torch.clamp(binary_logits, min=-10.0, max=10.0) #FIXME
+        
         if self.learnable_temp:
             tau = torch.exp(self.log_temp).clamp(0.3, 1.0)
         else:
@@ -1042,11 +1064,13 @@ class AttentionRouter(nn.Module):
             
             if not self.use_softmax:
                 z_soft = torch.sigmoid((binary_logits + g) / tau)
+                z_soft = torch.clamp(z_soft, min=0.01, max=0.99) # FIXME
                 z_hard = (z_soft > 0.5).float()
                 z = z_hard + (z_soft - z_soft.detach())  # [B, H, 1]
                 entropy = -(z_soft * torch.log(z_soft + eps) + (1 - z_soft) * torch.log(1 - z_soft + eps))
             else:
                 z_soft = F.softmax((binary_logits + g) / tau, dim=-1)
+                z_soft = torch.clamp(z_soft, min=0.01, max=0.99) # FIXME
                 z_hard = torch.zeros_like(z_soft).scatter_(-1, z_soft.argmax(-1, keepdim=True), 1.0)
                 z = z_hard + (z_soft - z_soft.detach())  # [B, H, 2]
                 z = z[..., 1]  # [B, H]
@@ -1054,6 +1078,12 @@ class AttentionRouter(nn.Module):
                 z_soft = z_soft.unsqueeze(-1)
                 z = z.unsqueeze(-1)
                 entropy = -(z_soft * torch.log(z_soft + eps)).sum(dim=-1).mean() 
+            
+            # [CRITICAL FIX 1] 梯度截断 (Gradient Clipping Hook)
+            # 防止某个 Rank 的 Loss 爆炸导致回传给 Router 的梯度变成 NaN/Inf
+            if z_soft.requires_grad:
+                # 将回传给 Router 的梯度限制在 [-1, 1] 范围内
+                z_soft.register_hook(lambda grad: torch.nan_to_num(grad).clamp(min=-1.0, max=1.0))
         else:
             # 推理阶段：直接根据 Logit 确定 (相当于 tau -> 0)
             # 或者也可以用 sigmoid(logit/tau) > 0.5，但在 deterministic 模式下 logit > 0 即可
@@ -1522,7 +1552,7 @@ class Qwen3Attention(nn.Module):
             if self.training or seq_len != 1:
 
                 is_vlen_input = (q.dim() == 3) and (unpadded_lengths is not None)
-
+                # breakpoint()
                 if is_vlen_input:
                     k = k.repeat_interleave(self.num_key_value_groups, dim=1)
                     v = v.repeat_interleave(self.num_key_value_groups, dim=1)
@@ -1742,14 +1772,46 @@ class Qwen3Attention(nn.Module):
             pooled_hidden_states = None
             z_constrast = None
         else:
+            # [CRITICAL FIX 2] Detach k before feeding to router
+            # 阻断 Loss -> Router -> SeqAllToAll(Backward) 的路径
+            # Router 自己的参数依然会通过 z (mask) 接收来自 lm_loss 的梯度
+            # 同时也接收来自 z_loss 的梯度
+            k_for_router = k.detach()
+            # ✅ FIX: 添加梯度预处理hook
+            def router_grad_precondition(grad):
+                # 1. NaN/Inf清理
+                if not torch.isfinite(grad).all():
+                    rank = dist.get_rank(seq_parallel_group) if dist.is_initialized() else 0
+                    print(f"[RANK {rank}] Router梯度异常，已清零")
+                    return torch.zeros_like(grad)
+                
+                # 2. 逐头归一化（防止单个head爆炸污染所有head）
+                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                grad = grad / grad_norm * torch.clamp(grad_norm, max=1.0)
+                
+                # 3. Rank-local梯度裁剪
+                total_norm = torch.norm(grad)
+                if total_norm > 10.0:  # 可调整阈值
+                    grad = grad / total_norm * 10.0
+                
+                return grad
+            
+            k_for_router.requires_grad_()
+            k_for_router.register_hook(router_grad_precondition)
             # 动态 Router
             # 注意：range_ids, task_ids 通常是 [B, ...] 的，B 与 Global Seq 是一致的
             if unpadded_lengths is not None:
                 # unpadded_lengths[0] 是 cu_seqlens
-                res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids, current_tau)
+                res = self.mask_allocator(k_for_router, unpadded_lengths[0], range_ids, task_ids, current_tau)
             else:
                 # 如果没有 varlen info，Router 可能无法工作，或者退化为 single batch
-                res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids, current_tau)
+                res = self.mask_allocator(k_for_router, unpadded_lengths[0], range_ids, task_ids, current_tau)
+            # if unpadded_lengths is not None:
+            #     # unpadded_lengths[0] 是 cu_seqlens
+            #     res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids, current_tau)
+            # else:
+            #     # 如果没有 varlen info，Router 可能无法工作，或者退化为 single batch
+            #     res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids, current_tau)
             
             # z_kv_batch: [B, H_local_kv, ]
             # entropy:  标量
@@ -2213,9 +2275,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         z_sum = 0 if compute_sparsity else None
 
-        layer_z_sums = []  # 收集每层 z_sum 以计算逐层稀疏度
-        # all_pooled_hidden_states = []
-        head_entropy = 0 if compute_sparsity else None
+        layer_z_sums = [] 
+        layer_head_entropies = []
         layer_z_constrast = []
 
         for idx, decoder_layer in enumerate(self.layers):
@@ -2266,9 +2327,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
             z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = layer_outputs[0], layer_outputs[1], layer_outputs[2], layer_outputs[3], layer_outputs[4]
 
             if compute_sparsity:
-                z_sum += z_layer_sum # [B, ]
-                head_entropy = (head_entropy + entropy) / 2 # 标量 为什么这样平均？
-            layer_z_sums.append(z_layer_sum)
+                # [FIX 2] 避免 In-place +=，只做收集
+                layer_z_sums.append(z_layer_sum)
+                layer_head_entropies.append(entropy)
+            
             layer_z_constrast.append(z_constrast)
 
             if use_cache:
@@ -2285,51 +2347,140 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         
+        # if compute_sparsity:
+        #     if (
+        #         seq_parallel_group is not None
+        #         and dist.is_initialized()
+        #         and dist.get_world_size(seq_parallel_group) > 1
+        #     ):
+        #         # breakpoint()
+        #         # z_sum: [B, ]
+        #         # # 因为不同 Rank 负责不同 Heads，所有 Rank 的 z_sum 相加 = 全局 Active Heads 数量
+        #         dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+        #         # head_entropy 标量
+        #         dist.all_reduce(head_entropy, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+        #         head_entropy = head_entropy / dist.get_world_size(seq_parallel_group)
+                
+        #         # layer_z_sums 是 list of tensors
+        #         # 堆叠 -> AllReduce -> 解开
+        #         if layer_z_sums:
+        #             stacked_layer_z = torch.stack(layer_z_sums) # [L, B]
+        #             dist.all_reduce(stacked_layer_z, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+        #             # 重新拆回 list，如果不拆也可以直接用 stacked_layer_z 计算 layerwise_model_sparsity
+        #             layer_z_sums = list(stacked_layer_z)
+                
+        #         # total_num_heads 是全局的总 Head 数，z_sum 现在也是全局的 Active Head 数
+        #     model_sparsity = 1 - (z_sum / self.total_num_heads)
+        #         # breakpoint()
+        # else:
+        #     model_sparsity = None
+        #     z_loss = None
+        
+        # if compute_sparsity:
+        #     layerwise_model_sparsity = None
+        #     layerwise_target = None
+
+        #     if len(layer_z_sums) > 0:
+        #         per_layer_heads = self.config.num_attention_heads
+        #         layerwise_model_sparsity = (
+        #             1.0 - torch.stack(layer_z_sums) / per_layer_heads
+        #         )  # (num_layers,)
+
+        #     if target_sparsity is None:
+        #         z_loss = None
+        #     else:
+        #         if self.config.enable_lambda_task:
+        #             diff = (model_sparsity - target_sparsity)
+
+        #             # per-sample lambda
+        #             lambda1_per_sample = self.sparsity_lambda1_task[task_ids]   # [B]
+        #             lambda2_per_sample = self.sparsity_lambda2_task[task_ids]   # [B]
+
+        #             # per-sample loss
+        #             per_sample_loss = (
+        #                 lambda1_per_sample * diff
+        #                 + lambda2_per_sample * diff.pow(2)
+        #             )
+
+        #             log_z_loss = per_sample_loss.detach()
+
+        #             task_losses = []
+        #             for task_id in range(self.num_tasks):
+        #                 mask = (task_ids == task_id)
+        #                 if mask.sum() > 0:
+        #                     task_losses.append(per_sample_loss[mask].mean())
+
+        #             z_loss = torch.stack(task_losses).mean()
+        #         else:
+        #             z_loss = (model_sparsity - target_sparsity).abs()
+        #             log_z_loss = z_loss.detach()
+        #             z_loss = z_loss.mean() 
+        # else:
+        #     layerwise_model_sparsity = None
+        #     layerwise_target = None
+        
+        # if z_loss is not None:
+        #     z_loss = z_loss.sum()
+        model_sparsity = None
+        z_loss = None
+        
         if compute_sparsity:
+            layerwise_model_sparsity = None
+            layerwise_target = None
+            # 1. 本地聚合 (Stack + Sum)
+            # layer_z_sums: List[Tensor] -> Tensor [L, B]
+            # 这里的 z_sum 是 "本地 Rank 所有层 Active Heads 的总和"
+            if layer_z_sums:
+                stacked_z = torch.stack(layer_z_sums) 
+                local_z_sum = stacked_z.sum().view(1) # [1] 标量 Tensor
+                
+                stacked_entropy = torch.stack(layer_head_entropies)
+                local_head_entropy_sum = stacked_entropy.sum() # 暂时先求和，后面再平均
+            else:
+                local_z_sum = torch.tensor(0.0, device=hidden_states.device)
+                local_head_entropy_sum = torch.tensor(0.0, device=hidden_states.device)
+
+            # 2. 执行 CP 通信 (Global Aggregation)
             if (
                 seq_parallel_group is not None
                 and dist.is_initialized()
                 and dist.get_world_size(seq_parallel_group) > 1
             ):
-                # breakpoint()
-                # z_sum: [B, ]
-                # # 因为不同 Rank 负责不同 Heads，所有 Rank 的 z_sum 相加 = 全局 Active Heads 数量
-                dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
-                # head_entropy 标量
-                dist.all_reduce(head_entropy, op=dist.ReduceOp.SUM, group=seq_parallel_group)
-                head_entropy = head_entropy / dist.get_world_size(seq_parallel_group)
+                # [CRITICAL FIX] 使用自定义 Autograd Function
+                # 逻辑：
+                # Rank 0: 负责 Heads 0-7, 算出 active_heads=50
+                # Rank 1: 负责 Heads 8-15, 算出 active_heads=30
+                # AllReduceSum -> global_z_sum = 80
+                global_z_sum = AllReduceSum.apply(local_z_sum, seq_parallel_group)
                 
-                # layer_z_sums 是 list of tensors
-                # 堆叠 -> AllReduce -> 解开
-                if layer_z_sums:
-                    stacked_layer_z = torch.stack(layer_z_sums) # [L, B]
-                    dist.all_reduce(stacked_layer_z, op=dist.ReduceOp.SUM, group=seq_parallel_group)
-                    # 重新拆回 list，如果不拆也可以直接用 stacked_layer_z 计算 layerwise_model_sparsity
-                    layer_z_sums = list(stacked_layer_z)
+                # Entropy 同理
+                global_head_entropy_sum = AllReduceSum.apply(local_head_entropy_sum, seq_parallel_group)
                 
-                # total_num_heads 是全局的总 Head 数，z_sum 现在也是全局的 Active Head 数
-            model_sparsity = 1 - (z_sum / self.total_num_heads)
-                # breakpoint()
-        else:
-            model_sparsity = None
-            z_loss = None
-        
-        if compute_sparsity:
-            layerwise_model_sparsity = None
-            layerwise_target = None
+                # 如果需要 Layer-wise 的全局信息
+                stacked_layer_z = AllReduceSum.apply(stacked_z, seq_parallel_group) # [L, B]
+                
+            else:
+                global_z_sum = local_z_sum
+                global_head_entropy_sum = local_head_entropy_sum
+                stacked_layer_z = stacked_z
 
-            if len(layer_z_sums) > 0:
-                per_layer_heads = self.config.num_attention_heads
-                layerwise_model_sparsity = (
-                    1.0 - torch.stack(layer_z_sums) / per_layer_heads
-                )  # (num_layers,)
+            # 3. 计算最终指标
+            # total_num_heads 是 Config 里的全局层数 * 全局头数
+            model_sparsity = 1.0 - (global_z_sum / self.total_num_heads)
+            
+            # Entropy 平均值 (除以 全局总头数: num_layers * num_heads_global)
+            head_entropy = global_head_entropy_sum / self.total_num_heads # 假设 entropy 是 per-head 的
 
+            # Layer-wise sparsity
+            per_layer_heads = self.config.num_attention_heads # 全局头数
+            layerwise_model_sparsity = 1.0 - stacked_layer_z.mean(dim=1) / per_layer_heads
+            # breakpoint()
+            # 4. 计算 Loss (梯度现在可以正确回传给 global_z_sum -> local_z_sum -> Router)
             if target_sparsity is None:
                 z_loss = None
             else:
                 if self.config.enable_lambda_task:
                     diff = (model_sparsity - target_sparsity)
-
                     # per-sample lambda
                     lambda1_per_sample = self.sparsity_lambda1_task[task_ids]   # [B]
                     lambda2_per_sample = self.sparsity_lambda2_task[task_ids]   # [B]
@@ -2359,7 +2510,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
         
         if z_loss is not None:
             z_loss = z_loss.sum()
-        
         if not return_dict:
             # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)
             return tuple(

@@ -3,8 +3,8 @@ model=${MODEL:-"/data2/hf_models/Qwen3-4B"}
 bsz=${BSZ:-1}
 seq=${SEQ:-1}
 lr=${LR:-1e-5}
-steps=${STEPS:-5}
-save_steps=${SAVE:-1}
+steps=${STEPS:-100}
+save_steps=${SAVE:-5}
 save_total_limit=3
 warmup=${WARMUP:-0.3}
 
@@ -29,7 +29,7 @@ sparsity_warmup_ratio=${SPARSITY_WARMUP_RATIO:-0.0}
 disable_linear_reg_term=${DISABLE_LINEAR_REG_TERM:-false}
 # topk
 context_window_if_toggled=${CONTEXT_WINDOW_IF_TOGGLED:-2048}
-freeze_weights=${FREEZE_WEIGHTS:-false}
+freeze_weights=${FREEZE_WEIGHTS:-true}
 freeze_masks=${FREEZE_MASKS:-false}
 warmup_type=${WARMUP_TYPE:-"linear"}
 
@@ -73,7 +73,7 @@ if [[ $freeze_masks == "true" ]]; then
     extra_name="${extra_name}_mfrozen"
 fi
 
-run_name="${suffix}steps${steps}_${extra_name}"
+run_name="${suffix}_steps${steps}_${extra_name}"
 
 out_dir="checkpoints/$run_name"
 mkdir -p $out_dir

@@ -472,41 +472,41 @@ class Trainer(HFTrainer):
         
         print(f"[Step {self.state.global_step} / Rank {dist.get_rank()}] Sample tasks: {tasks} → Target Sparsity: {[f'{s:.3f}' for s in target_sparsity.tolist()]}")
 
-        outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity, current_tau=current_tau)
+        # outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity, current_tau=current_tau)
 
-        lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-        head_entropy = outputs["head_entropy"]
-        target_sparsity = outputs["target_sparsity"]
+        # lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+        # head_entropy = outputs["head_entropy"]
+        # target_sparsity = outputs["target_sparsity"]
         
-        if getattr(self.args, "token_scaled_loss", False):
-            seq_parallel_world_size = (
-                dist.get_world_size(self.seq_parallel_group)
-                if dist.is_initialized()
-                else 1
-            )
-            if seq_parallel_world_size > 1:  # Sequence parallelism
-                device_num_valid_tokens = (
-                    (inputs["shifted_labels"] != -100).sum().float()
-                )
-            else:
-                device_num_valid_tokens = (inputs["labels"] != -100).sum().float()
+        # if getattr(self.args, "token_scaled_loss", False):
+        #     seq_parallel_world_size = (
+        #         dist.get_world_size(self.seq_parallel_group)
+        #         if dist.is_initialized()
+        #         else 1
+        #     )
+        #     if seq_parallel_world_size > 1:  # Sequence parallelism
+        #         device_num_valid_tokens = (
+        #             (inputs["shifted_labels"] != -100).sum().float()
+        #         )
+        #     else:
+        #         device_num_valid_tokens = (inputs["labels"] != -100).sum().float()
 
-            avg_device_num_valid_tokens = torch.mean(
-                self.accelerator.gather(device_num_valid_tokens)
-            ).item()
-            if not hasattr(self.state, "count_step_for_num_valid_tokens"):
-                self.state.count_step_for_num_valid_tokens = 1
-                self.state.avg_num_valid_tokens_per_device = avg_device_num_valid_tokens
-            else:
-                self.state.count_step_for_num_valid_tokens += 1
-                steps = self.state.count_step_for_num_valid_tokens
-                self.state.avg_num_valid_tokens_per_device = (
-                    self.state.avg_num_valid_tokens_per_device * ((steps - 1) / steps)
-                    + avg_device_num_valid_tokens / steps
-                )  # moving avg
-            lm_loss = lm_loss / self.state.avg_num_valid_tokens_per_device
+        #     avg_device_num_valid_tokens = torch.mean(
+        #         self.accelerator.gather(device_num_valid_tokens)
+        #     ).item()
+        #     if not hasattr(self.state, "count_step_for_num_valid_tokens"):
+        #         self.state.count_step_for_num_valid_tokens = 1
+        #         self.state.avg_num_valid_tokens_per_device = avg_device_num_valid_tokens
+        #     else:
+        #         self.state.count_step_for_num_valid_tokens += 1
+        #         steps = self.state.count_step_for_num_valid_tokens
+        #         self.state.avg_num_valid_tokens_per_device = (
+        #             self.state.avg_num_valid_tokens_per_device * ((steps - 1) / steps)
+        #             + avg_device_num_valid_tokens / steps
+        #         )  # moving avg
+        #     lm_loss = lm_loss / self.state.avg_num_valid_tokens_per_device
 
-        reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
+        # reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
         
         # gather_list = [
         #     torch.zeros_like(reg_loss, device=reg_loss.device)
@@ -518,7 +518,39 @@ class Trainer(HFTrainer):
         # reg_loss = sum(gather_list)
         
         # loss = lm_loss + 10 * reg_loss
-        loss = lm_loss
+        # loss = reg_loss
+        
+        # 1. 统计本地有效 Token 数
+        local_labels = inputs["labels"]
+        local_valid_tokens = (local_labels != -100).sum().float()
+
+        # 2. 前向传播
+        outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity, current_tau=current_tau)
+        
+        # 此时得到的 loss 是 sum 形式
+        lm_loss_sum = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+        head_entropy = outputs["head_entropy"]
+        target_sparsity = outputs["target_sparsity"]
+        
+        # 3. [CRITICAL FIX 4] 全局聚合 Token 数并手动平均
+        if self.seq_parallel_group is not None and dist.is_initialized():
+            # 将所有卡的有效 Token 数加起来
+            dist.all_reduce(local_valid_tokens, op=dist.ReduceOp.SUM, group=self.seq_parallel_group)
+            global_valid_tokens = local_valid_tokens
+        else:
+            global_valid_tokens = local_valid_tokens
+
+        # 防止除零
+        global_valid_tokens = torch.max(global_valid_tokens, torch.tensor(1.0, device=lm_loss_sum.device))
+        
+        # 计算全局正确的平均 Loss
+        lm_loss = lm_loss_sum / global_valid_tokens
+        
+        # 4. 加上正则 Loss (如果有)
+        reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
+        
+        # 建议给 reg_loss 一个系数，防止它太小被 lm_loss 淹没
+        loss = lm_loss + 10 * reg_loss
        
         model_sparsity = outputs["model_sparsity"]
         
