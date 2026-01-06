@@ -17,7 +17,12 @@ import torch
 from transformers import LlamaForCausalLM, AutoTokenizer
 
 from .modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
-from .modeling_flash_qwen_full import PawQwen3ForCausalLM, PawQwen3Config, Qwen3Model, AttentionRouter
+from .modeling_flash_qwen_full import (
+    PawQwen3ForCausalLM,
+    PawQwen3Config,
+    Qwen3Model,
+    AttentionRouter,
+)
 
 from .modeling_flash_phi import PawPhi3ForCausalLM, PawPhi3Config
 from .lh_trainer_full import Trainer
@@ -37,10 +42,11 @@ import json
 
 from csv import reader
 
-from .dataset_packing import build_packed_dataset 
+from .dataset_packing import build_packed_dataset
 import multiprocessing
 
 # from fla.models.nsa import AutoModelForCausalLM as NSAAutoModelForCausalLM
+
 
 # ================= Color Logging Utility =================
 class ColorFormatter(logging.Formatter):
@@ -58,7 +64,7 @@ class ColorFormatter(logging.Formatter):
     # Define formats for different levels or keywords
     def format(self, record):
         log_fmt = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
-        
+
         # 1. 根据 Log Level 染色
         if record.levelno == logging.DEBUG:
             color = self.grey
@@ -80,7 +86,7 @@ class ColorFormatter(logging.Formatter):
             if "[Step" in msg:
                 record.msg = f"{self.blue}{msg}{self.reset}"
                 return super().format(record)
-            
+
             # Loss / Sparsity -> 洋红色高亮
             if "Loss:" in msg or "Sparsity:" in msg:
                 # 还可以更细粒度：把数字变成黄色
@@ -92,12 +98,13 @@ class ColorFormatter(logging.Formatter):
             if "Checkpoint" in msg or "Saving" in msg:
                 color = self.cyan
 
-        formatter = logging.Formatter(f"{color}{log_fmt}{self.reset}", datefmt="%m/%d/%Y %H:%M:%S")
+        formatter = logging.Formatter(
+            f"{color}{log_fmt}{self.reset}", datefmt="%m/%d/%Y %H:%M:%S"
+        )
         return formatter.format(record)
 
+
 logger = logging.getLogger(__name__)
-
-
 
 
 def load_masks_from_tsv_file(
@@ -125,15 +132,12 @@ def main():
     # We now keep distinct sets of script_args, for a cleaner separation of concerns.
     parser = HfArgumentParser((ScriptArguments, TrainingArguments, DataArguments))
     script_args, training_args, data_args = parser.parse_args_into_dataclasses()
-    
+
     # Setup logging
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColorFormatter())
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[handler]
-    )
+
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     log_level = training_args.get_process_log_level()
     logger.setLevel(log_level)
     dataset_logger.setLevel(log_level)
@@ -170,7 +174,7 @@ def main():
         use_auth_token=True if script_args.use_auth_token else None,
         enable_thinking=True if script_args.use_thinking else False,
     )
-    
+
     # Determine model type and load appropriate config
     if "qwen" in script_args.model_name_or_path.lower():
         config = PawQwen3Config.from_pretrained(
@@ -208,11 +212,9 @@ def main():
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
             pooling_mode=training_args.pooling_mode,
             enable_contrastive_loss=training_args.enable_contrastive_loss,
-            
             enable_lambda_task=training_args.enable_lambda_task,
             retrieval_mode=training_args.retrieval_mode,
             use_softmax=training_args.use_softmax,
-            
             enable_ada_sparsity=training_args.enable_ada_sparsity,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
             erank_analysis_path=training_args.erank_analysis_path
@@ -232,7 +234,6 @@ def main():
             disable_linear_regularization_term=training_args.disable_linear_regularization_term,
             pooling_mode=training_args.pooling_mode,
             enable_contrastive_loss=training_args.enable_contrastive_loss,
-            
             enable_ada_sparsity=training_args.enable_ada_sparsity,
             enable_layerwise_sparsity=training_args.enable_layerwise_sparsity,
             erank_analysis_path=training_args.erank_analysis_path
@@ -258,7 +259,10 @@ def main():
 
     if script_args.model_name_or_path:
         # Determine model type and load appropriate model
-        if training_args.attention_type is not None and "nsa" in training_args.attention_type :
+        if (
+            training_args.attention_type is not None
+            and "nsa" in training_args.attention_type
+        ):
             model = LlamaForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
                 from_tf=bool(".ckpt" in script_args.model_name_or_path),
@@ -318,7 +322,6 @@ def main():
                 f"Model name {script_args.model_name_or_path} does not contain. "
                 "Please provide a valid model name."
             )
-            
 
     if training_args.stripe_init_width_1 is not None:
         # We should initialize with a striped pattern
@@ -340,7 +343,9 @@ def main():
                 start_with_keep=training_args.stripe_init_start_with_keep,
             )
         else:
-            logger.warning("skipping stripe initialization -- model does not support it")
+            logger.warning(
+                "skipping stripe initialization -- model does not support it"
+            )
     elif training_args.load_masks_from is not None:
         logger.info(f"Loading masks from {training_args.load_masks_from}")
         if hasattr(model, "load_masks"):
@@ -367,16 +372,18 @@ def main():
             logger.warning("skipping token_scaled_loss -- model does not support it")
 
     assert training_args.max_steps is not None, "max_steps must be set!"
-    
+
     # load_datasets
     if training_args.do_train:
         set_seed(training_args.seed)
         train_dataset = build_packed_dataset(
-            script_args.tokenized_mds_train[0],  # FIXME: 这里只能传入一个文件，不支持多个文件传入
+            script_args.tokenized_mds_train[
+                0
+            ],  # FIXME: 这里只能传入一个文件，不支持多个文件传入
             tokenizer=tokenizer,
             data_args=data_args,
         )
-        
+
         world_size = dist.get_world_size()
         global_rank = dist.get_rank()
         sp_size = training_args.seq_parallel_size
@@ -385,17 +392,18 @@ def main():
         # 举例: 4卡, SP=2. Rank0,1 -> dp_rank 0; Rank2,3 -> dp_rank 1
         dp_size = world_size // sp_size
         dp_rank = global_rank // sp_size
-        
+
         from torch.utils.data.distributed import DistributedSampler
+
         sampler = DistributedSampler(
             dataset=train_dataset,
-            num_replicas=dp_size,   # 这里告诉 Sampler 总共有 dp_size 个分片
-            rank=dp_rank,           # 这里告诉 Sampler 我是第 dp_rank 个分片
+            num_replicas=dp_size,  # 这里告诉 Sampler 总共有 dp_size 个分片
+            rank=dp_rank,  # 这里告诉 Sampler 我是第 dp_rank 个分片
             shuffle=True,
             seed=training_args.seed,
             drop_last=True,
         )
-        
+
         train_dataloader = torch.utils.data.DataLoader(
             dataset=train_dataset,
             batch_size=1,
@@ -403,11 +411,14 @@ def main():
             collate_fn=None,
             num_workers=training_args.dataloader_num_workers,
             pin_memory=training_args.dataloader_pin_memory,
-            drop_last=True, 
+            drop_last=True,
         )
 
     # Initialize our Trainer
-    if training_args.attention_type is not None and "nsa" in training_args.attention_type :
+    if (
+        training_args.attention_type is not None
+        and "nsa" in training_args.attention_type
+    ):
         # trainer = NSATrainer(
         #     model=model,
         #     args=training_args,
@@ -429,7 +440,9 @@ def main():
         )
     if training_args.do_train:
         trainer.train_dataloader = train_dataloader
-        logger.info("Successfully injected CustomDistributedStratifiedSampler into Trainer.")
+        logger.info(
+            "Successfully injected CustomDistributedStratifiedSampler into Trainer."
+        )
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these
@@ -448,8 +461,8 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
-        #FIXME：debug时暂时不加载ckpt
-        #train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        # FIXME：debug时暂时不加载ckpt
+        # train_result = trainer.train(resume_from_checkpoint=checkpoint)
         train_result = trainer.train()
         trainer.save_model()
 
@@ -457,7 +470,6 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
-
 
 
 if __name__ == "__main__":

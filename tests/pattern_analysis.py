@@ -2,12 +2,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
 def extract_sparsity_mask(head_array):
     """
     输入: [num_layers, num_heads], 1=full, 0=sparse
     输出: [num_layers, num_heads], 1=该 head 是 sparsity
     """
     return (head_array == 0).astype(int)
+
 
 def jaccard_similarity(mask_a, mask_b):
     """
@@ -17,25 +19,28 @@ def jaccard_similarity(mask_a, mask_b):
     inter = np.logical_and(mask_a, mask_b).sum(axis=1)
     union = np.logical_or(mask_a, mask_b).sum(axis=1)
     return np.mean(inter / (union + 1e-8))
+
+
 def parse_head_data(data_text):
     """解析头部开关数据"""
     layers = []
     current_layer = None
-    
-    lines = data_text.strip().split('\n')
+
+    lines = data_text.strip().split("\n")
     for line in lines:
-        if 'head allocate:' in line:
+        if "head allocate:" in line:
             # 提取头部分配数据
-            start_idx = line.find('head allocate:') + len('head allocate: ')
+            start_idx = line.find("head allocate:") + len("head allocate: ")
             data_str = line[start_idx:].strip()
-            
+
             # 解析为列表
             data = eval(data_str)
             # 提取32个头的数据
             heads = [item[0] for item in data[0]]
             layers.append(heads)
-    
+
     return np.array(layers, dtype=float)
+
 
 single_qa_training = """
 task_ids: None, head allocate: [[[0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0]]]
@@ -351,7 +356,6 @@ task_ids: None, head allocate: [[[0.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0]
 """
 
 
-
 # 训练
 train_data = {
     "single_qa": parse_head_data(single_qa_training),
@@ -370,7 +374,7 @@ test_data = {
 
 # 转为 sparsity mask
 train_mask = {k: extract_sparsity_mask(v) for k, v in train_data.items()}
-test_mask  = {k: extract_sparsity_mask(v) for k, v in test_data.items()}
+test_mask = {k: extract_sparsity_mask(v) for k, v in test_data.items()}
 
 
 tasks = ["single_qa", "multihop", "code", "sum"]
@@ -380,10 +384,7 @@ sim_test = np.zeros((n, n))
 
 for i, t1 in enumerate(tasks):
     for j, t2 in enumerate(tasks):
-        sim_test[i, j] = jaccard_similarity(
-            test_mask[t1],
-            test_mask[t2]
-        )
+        sim_test[i, j] = jaccard_similarity(test_mask[t1], test_mask[t2])
 
 plt.figure(figsize=(6, 5))
 sns.heatmap(
@@ -392,7 +393,8 @@ sns.heatmap(
     yticklabels=tasks,
     annot=True,
     cmap="YlOrRd",
-    vmin=0, vmax=1
+    vmin=0,
+    vmax=1,
 )
 plt.title("Inference: Sparsity-Head Pattern Similarity (Jaccard)")
 plt.tight_layout()
@@ -403,10 +405,7 @@ plt.show()
 sim_train_test = []
 
 for t in tasks:
-    sim = jaccard_similarity(
-        train_mask[t],
-        test_mask[t]
-    )
+    sim = jaccard_similarity(train_mask[t], test_mask[t])
     sim_train_test.append(sim)
 
 sim_train_test = np.array(sim_train_test).reshape(-1, 1)
@@ -418,7 +417,8 @@ sns.heatmap(
     xticklabels=["Train vs Test"],
     annot=True,
     cmap="YlGn",
-    vmin=0, vmax=1
+    vmin=0,
+    vmax=1,
 )
 plt.title("Train–Inference Sparsity-Head Consistency")
 plt.tight_layout()

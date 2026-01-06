@@ -307,6 +307,7 @@ def _upad_input(self, query_layer, key_layer, value_layer, padding_mask, query_l
         (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
     )
 
+
 def old_qwen_for_causal_lm_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -382,7 +383,6 @@ def old_qwen_for_causal_lm_forward(
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
     )
-
 
 
 def old_qwen_model_forward(
@@ -608,7 +608,6 @@ from tensor_parallel.pretrained_model import TensorParallelPreTrainedModel
 from flash_attn import flash_attn_func, flash_attn_with_kvcache
 
 
-
 def qwen_duo_attention_forward_one_way_reordered(
     self,
     hidden_states: torch.Tensor,
@@ -761,7 +760,8 @@ def qwen_duo_attention_forward_one_way_reordered(
     attn_output = attn_output.reshape(
         bsz,
         q_len,
-        self.num_heads if hasattr(self, "num_heads")
+        self.num_heads
+        if hasattr(self, "num_heads")
         else self.config.num_attention_heads * self.head_dim,
     )
 
@@ -802,7 +802,8 @@ def qwen_duo_attention_forward_one_way_reordered(
 
     return attn_output, attn_weights, past_key_value
 
-# Qwen 
+
+# Qwen
 def enable_qwen_duo_attention_eval(
     model: Qwen3ForCausalLM,
     full_attention_heads,
@@ -951,7 +952,9 @@ def llama_duo_attention_forward_two_way(
         full_attn_output = full_attn_output.reshape(bsz, q_len, self.config.hidden_size)
         full_attn_output = self.o_proj(full_attn_output)
 
-    streaming_attn_output = streaming_attn_output.reshape(bsz, q_len, self.config.hidden_size)
+    streaming_attn_output = streaming_attn_output.reshape(
+        bsz, q_len, self.config.hidden_size
+    )
     streaming_attn_output = self.o_proj(streaming_attn_output)
 
     attn_output = torch.cat([full_attn_output, streaming_attn_output], dim=0)
@@ -979,8 +982,12 @@ def llama_duo_attention_forward_one_way_reordered(
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.config.num_attention_heads, self.head_dim)
-    key_states = key_states.view(bsz, q_len, self.config.num_key_value_heads, self.head_dim)
+    query_states = query_states.view(
+        bsz, q_len, self.config.num_attention_heads, self.head_dim
+    )
+    key_states = key_states.view(
+        bsz, q_len, self.config.num_key_value_heads, self.head_dim
+    )
     value_states = value_states.view(
         bsz, q_len, self.config.num_key_value_heads, self.head_dim
     )
@@ -1011,7 +1018,9 @@ def llama_duo_attention_forward_one_way_reordered(
         )
 
         self.num_full_query_head = self.num_full_attn_head * self.num_key_value_groups
-        self.num_streaming_query_head = self.config.num_attention_heads - self.num_full_query_head
+        self.num_streaming_query_head = (
+            self.config.num_attention_heads - self.num_full_query_head
+        )
 
     full_key_states = key_states[:, :, : self.num_full_attn_head, :]
     full_value_states = value_states[:, :, : self.num_full_attn_head, :]
@@ -1143,8 +1152,12 @@ def llama_duo_attention_forward_one_way_reordered_static(
     key_states = self.k_proj(hidden_states)
     value_states = self.v_proj(hidden_states)
 
-    query_states = query_states.view(bsz, q_len, self.config.num_attention_heads, self.head_dim)
-    key_states = key_states.view(bsz, q_len, self.config.num_key_value_heads, self.head_dim)
+    query_states = query_states.view(
+        bsz, q_len, self.config.num_attention_heads, self.head_dim
+    )
+    key_states = key_states.view(
+        bsz, q_len, self.config.num_key_value_heads, self.head_dim
+    )
     value_states = value_states.view(
         bsz, q_len, self.config.num_key_value_heads, self.head_dim
     )
@@ -1336,7 +1349,7 @@ def old_llama_model_forward(
     )
 
     hidden_states = inputs_embeds
-    
+
     position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
     # decoder layers
@@ -1388,7 +1401,6 @@ def old_llama_model_forward(
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
     )
-    
 
 
 # From Huggingface's Transformers v4.34.0. This is the forward method of LlamaDecoderLayer using the tuple style KV cache.
@@ -1435,6 +1447,7 @@ def old_llama_decoder_layer_forward(
         outputs += (present_key_value,)
 
     return outputs
+
 
 # From Huggingface's Transformers v4.34.0. This is the forward method of LlamaForCausalLM using the tuple style KV cache.
 def old_llama_for_causal_lm_forward(
@@ -1512,6 +1525,7 @@ def old_llama_for_causal_lm_forward(
         attentions=outputs.attentions,
     )
 
+
 def enable_tuple_kv_cache_for_llama(model: LlamaForCausalLM):
     print("Enabling tuple KV cache for Llama")
     model.model._prepare_decoder_attention_mask = lambda *args, **kwargs: None
@@ -1530,6 +1544,7 @@ def enable_tuple_kv_cache_for_llama(model: LlamaForCausalLM):
             _flash_attention_forward, model.model.layers[idx].self_attn
         )
     model.forward = types.MethodType(old_llama_for_causal_lm_forward, model)
+
 
 def enable_llama_duo_attention_eval(
     model: LlamaForCausalLM,

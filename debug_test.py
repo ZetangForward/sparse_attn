@@ -1,5 +1,6 @@
 import time
 
+
 def main():
     print("Program started. Waiting for VSCode debugger to attach...")
 
@@ -9,6 +10,7 @@ def main():
         time.sleep(1)  # 慢一点方便观察
 
     print("Program finished.")
+
 
 if __name__ == "__main__":
     main()

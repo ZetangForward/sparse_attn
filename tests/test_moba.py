@@ -7,7 +7,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="/data1/hf_model/Meta-Llama-3.1-8B-Instruct")
+    parser.add_argument(
+        "--model", type=str, default="/data1/hf_model/Meta-Llama-3.1-8B-Instruct"
+    )
     parser.add_argument("--moba-chunk-size", type=int, default=1024)
     parser.add_argument("--moba-topk", type=int, default=8)
     parser.add_argument(
@@ -32,7 +34,6 @@ if __name__ == "__main__":
     )
 
     tknz = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-
 
     prompt = "Artificial intelligence is transforming the world in profound ways, from healthcare and education to transportation and entertainment. Researchers continue to push the boundaries of what machines can learn and understand, raising both exciting opportunities and important ethical questions about the future of human-AI collaboration."
     input_tokens = tknz.encode(prompt)

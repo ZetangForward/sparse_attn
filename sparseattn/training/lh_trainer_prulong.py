@@ -273,22 +273,34 @@ class Trainer(HFTrainer):
         self.reg_learning_rate = args.reg_learning_rate
         self.warmup_type = args.warmup_type
         self.sparsity_warmup_ratio = args.sparsity_warmup_ratio
-        self.disable_linear_regularization_term = args.disable_linear_regularization_term
+        self.disable_linear_regularization_term = (
+            args.disable_linear_regularization_term
+        )
         self.context_window_if_toggled = args.context_window_if_toggled
         self.freeze_non_mask_parameters = args.freeze_non_mask_parameters
         self.freeze_mask_parameters = args.freeze_mask_parameters
-        self.num_sparsity_warmup_steps = math.ceil(self.sparsity_warmup_ratio * self.args.max_steps)
+        self.num_sparsity_warmup_steps = math.ceil(
+            self.sparsity_warmup_ratio * self.args.max_steps
+        )
         self.task_sparsity_config = {
-            "default": {"start": self.start_head_sparsity, "end": self.end_head_sparsity},
+            "default": {
+                "start": self.start_head_sparsity,
+                "end": self.end_head_sparsity,
+            },
             "Code": {"start": 0, "end": 0.5},
             "Math": {"start": 0, "end": 0.6},
             "MultiHop QA": {"start": 0, "end": 0.8},
             "Single QA": {"start": 0, "end": 0.8},
             "Summarization": {"start": 0, "end": 0.2},
         }
-        self.reverse_class_map = {0: 'Single QA', 1: 'MultiHop QA', 2: 'Summarization', 3: 'Code'}
+        self.reverse_class_map = {
+            0: "Single QA",
+            1: "MultiHop QA",
+            2: "Summarization",
+            3: "Code",
+        }
         self.use_softmax = args.use_softmax
-        
+
         self.tau_max = 1.5  # 初始 tau
         self.tau_min = 1  # 最终/保持 tau
 
@@ -319,44 +331,53 @@ class Trainer(HFTrainer):
     #         cfg = self.task_sparsity_config.get(task, self.task_sparsity_config["default"])
     #         start_sp = cfg["start"]
     #         end_sp = cfg["end"]
-            
+
     #         sp = end_sp
     #         sparsities.append(sp)
 
     #     return torch.tensor(sparsities, dtype=torch.float32)  # shape: [B]
     def get_current_target_sparsity(self, global_step):
         if global_step < self.num_sparsity_warmup_steps:
-            if self.warmup_type == 'linear':
+            if self.warmup_type == "linear":
                 return (
-                    self.start_head_sparsity + 
-                    (self.end_head_sparsity - self.start_head_sparsity) * global_step / self.num_sparsity_warmup_steps
+                    self.start_head_sparsity
+                    + (self.end_head_sparsity - self.start_head_sparsity)
+                    * global_step
+                    / self.num_sparsity_warmup_steps
                 )
-            elif self.warmup_type == 'logarithmic':
-                log_one_minus_sparsity = math.log(1 - self.start_head_sparsity) + (math.log(1 - self.end_head_sparsity) - 
-                    math.log(1 - self.start_head_sparsity)) * global_step / self.num_sparsity_warmup_steps
+            elif self.warmup_type == "logarithmic":
+                log_one_minus_sparsity = (
+                    math.log(1 - self.start_head_sparsity)
+                    + (
+                        math.log(1 - self.end_head_sparsity)
+                        - math.log(1 - self.start_head_sparsity)
+                    )
+                    * global_step
+                    / self.num_sparsity_warmup_steps
+                )
                 return 1 - math.exp(log_one_minus_sparsity)
             else:
-                raise ValueError(f'Unknown warmup type: {self.warmup_type}')
+                raise ValueError(f"Unknown warmup type: {self.warmup_type}")
         else:
             return self.end_head_sparsity
-    
+
     def get_current_tau(self, global_step: int) -> torch.Tensor:
-        
         tau_max = self.tau_max
         tau_min = self.tau_min
         T_max = self.tau_decay_steps
-        
+
         t = torch.tensor(global_step, dtype=torch.float32)
         T_max_tensor = torch.tensor(T_max, dtype=torch.float32)
-        
+
         if global_step < T_max:
-            cosine_factor = torch.cos(torch.pi * t / T_max_tensor) 
+            cosine_factor = torch.cos(torch.pi * t / T_max_tensor)
 
             current_tau = tau_min + 0.5 * (tau_max - tau_min) * (1 + cosine_factor)
             return current_tau.to(torch.float32)
         else:
             # 保持 0.2
             return torch.tensor(tau_min, dtype=torch.float32)
+
     def get_sequence_parallel_inputs(self, inputs):
         """
         Args:
@@ -365,20 +386,22 @@ class Trainer(HFTrainer):
                 - labels: [1, S] -> 需要变成 [S] 然后切分
                 - seq_lengths: List[Tensor] (len=1, tensor=[Bi+1]) -> 取出变成 [Bi+1], 保持全局
         """
-        seq_parallel_world_size = (dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1)
+        seq_parallel_world_size = (
+            dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1
+        )
         input_ids = inputs["input_ids"]
         if len(input_ids.shape) == 2:
-            input_ids = inputs["input_ids"].squeeze(0) 
+            input_ids = inputs["input_ids"].squeeze(0)
             labels = inputs["labels"].squeeze(0)
-            
+
             shifted_labels = labels.roll(-1, dims=-1)
             shifted_labels[..., -1] = -100
-            
-            global_seq_lengths = inputs["seq_lengths"][0] 
+
+            global_seq_lengths = inputs["seq_lengths"][0]
             task_ids = inputs["task_ids"][0]
             range_ids = inputs["range_ids"][0]
-            task_type = [i[0] for i in inputs['task_type']]
-            
+            task_type = [i[0] for i in inputs["task_type"]]
+
             raw_position_ids = inputs.get("position_ids", None)
             if raw_position_ids is not None:
                 raw_position_ids = raw_position_ids.squeeze(0)
@@ -392,19 +415,27 @@ class Trainer(HFTrainer):
 
             # Padding (保证被 world_size 整除)
             if total_seq_len % seq_parallel_world_size != 0:
-                padding = seq_parallel_world_size - (total_seq_len % seq_parallel_world_size)
-                padding_zeros = torch.full((padding,), 0, dtype=input_ids.dtype, device=input_ids.device)
-                
+                padding = seq_parallel_world_size - (
+                    total_seq_len % seq_parallel_world_size
+                )
+                padding_zeros = torch.full(
+                    (padding,), 0, dtype=input_ids.dtype, device=input_ids.device
+                )
+
                 input_ids = torch.cat([input_ids, padding_zeros], dim=0)
                 shifted_labels = torch.cat([shifted_labels, padding_zeros - 100], dim=0)
 
-            input_ids_chunks = torch.tensor_split(input_ids, seq_parallel_world_size, dim=0)
-            shifted_labels_chunks = torch.tensor_split(shifted_labels, seq_parallel_world_size, dim=0)
+            input_ids_chunks = torch.tensor_split(
+                input_ids, seq_parallel_world_size, dim=0
+            )
+            shifted_labels_chunks = torch.tensor_split(
+                shifted_labels, seq_parallel_world_size, dim=0
+            )
 
             inputs = {
-                "input_ids": input_ids_chunks[seq_parallel_rank],    # Local chunk
-                "shifted_labels": shifted_labels_chunks[seq_parallel_rank],  
-                "seq_lengths": global_seq_lengths,                   # Global
+                "input_ids": input_ids_chunks[seq_parallel_rank],  # Local chunk
+                "shifted_labels": shifted_labels_chunks[seq_parallel_rank],
+                "seq_lengths": global_seq_lengths,  # Global
                 "seq_parallel_group": self.seq_parallel_group,
                 "range_ids": range_ids,
                 "task_type": task_type,
@@ -412,13 +443,13 @@ class Trainer(HFTrainer):
             }
         else:
             inputs = {
-                "input_ids": input_ids,             # Global [S]
-                "labels": labels,                   # Global [S]
+                "input_ids": input_ids,  # Global [S]
+                "labels": labels,  # Global [S]
                 "task_ids": task_ids,
                 "range_ids": range_ids,
                 "seq_lengths": global_seq_lengths,  # Global [Bi+1]
                 "task_type": task_type,
-                "seq_parallel_group": None
+                "seq_parallel_group": None,
             }
 
         return inputs
@@ -443,16 +474,21 @@ class Trainer(HFTrainer):
         target_sparsity = self.get_current_target_sparsity(self.state.global_step)
         # target_sparsity = target_sparsity.to(model.device)  # [B]
         current_tau = self.get_current_tau(self.state.global_step)
-        
+
         # print(f"[Step {self.state.global_step} / Rank {dist.get_rank()}] Sample tasks: {tasks} → Target Sparsity: {[f'{s:.3f}' for s in target_sparsity.tolist()]}")
 
         # outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity, current_tau=current_tau)
-        outputs = model(**inputs, use_cache=False, target_sparsity=target_sparsity, current_tau=current_tau)
+        outputs = model(
+            **inputs,
+            use_cache=False,
+            target_sparsity=target_sparsity,
+            current_tau=current_tau,
+        )
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
         # head_entropy = outputs["head_entropy"]
         head_entropy = 0.0
         target_sparsity = outputs["target_sparsity"]
-        
+
         if getattr(self.args, "token_scaled_loss", False):
             seq_parallel_world_size = (
                 dist.get_world_size(self.seq_parallel_group)
@@ -481,8 +517,10 @@ class Trainer(HFTrainer):
                 )  # moving avg
             lm_loss = lm_loss / self.state.avg_num_valid_tokens_per_device
 
-        reg_loss = outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
-        
+        reg_loss = (
+            outputs["sparsity_loss"] if isinstance(outputs, dict) else outputs[-2]
+        )
+
         # gather_list = [
         #     torch.zeros_like(reg_loss, device=reg_loss.device)
         #     for _ in range(dist.get_world_size(group=self.seq_parallel_group))
@@ -491,25 +529,34 @@ class Trainer(HFTrainer):
         # dist.all_gather(gather_list, reg_loss.detach())
         # gather_list[dist.get_rank(group=self.seq_parallel_group)] = reg_loss
         # reg_loss = sum(gather_list)
-        
+
         loss = lm_loss + reg_loss
-       
+
         model_sparsity = outputs["model_sparsity"]
-        
-        print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "f"[Step {self.state.global_step}] Task={tasks} | model_sparsity={model_sparsity} | reg_loss={reg_loss}")
-        
-        task_ids = outputs['task_ids']
-        log_z_loss = outputs['log_z_loss']
-        task_sparsity_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
-        task_sparsity_loss_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
-        task_target_sparsity_statistic = dict([(task_name, []) for task_name in self.reverse_class_map.values()])
-        
+
+        print(
+            f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+            f"[Step {self.state.global_step}] Task={tasks} | model_sparsity={model_sparsity} | reg_loss={reg_loss}"
+        )
+
+        task_ids = outputs["task_ids"]
+        log_z_loss = outputs["log_z_loss"]
+        task_sparsity_statistic = dict(
+            [(task_name, []) for task_name in self.reverse_class_map.values()]
+        )
+        task_sparsity_loss_statistic = dict(
+            [(task_name, []) for task_name in self.reverse_class_map.values()]
+        )
+        task_target_sparsity_statistic = dict(
+            [(task_name, []) for task_name in self.reverse_class_map.values()]
+        )
+
         # all gather task ids and model_sparsity
         # distributed_log_z_loss = self.accelerator.gather(log_z_loss)
         # distributed_task_ids = self.accelerator.gather(task_ids)
         # distributed_model_sparsity = self.accelerator.gather(model_sparsity)
         # distributed_target_sparsity = self.accelerator.gather(target_sparsity)
-        
+
         distributed_log_z_loss = [None for _ in range(dist.get_world_size())]
         distributed_task_ids = [None for _ in range(dist.get_world_size())]
         distributed_model_sparsity = [None for _ in range(dist.get_world_size())]
@@ -523,11 +570,10 @@ class Trainer(HFTrainer):
         # distributed_task_ids = torch.cat(distributed_task_ids)
         # distributed_model_sparsity = torch.stack(distributed_model_sparsity)
         # distributed_target_sparsity = torch.stack(distributed_target_sparsity)
-        
+
         distributed_loss = self.accelerator.gather(loss).mean()
         distributed_lm_loss = self.accelerator.gather(lm_loss).mean()
         distributed_reg_loss = self.accelerator.gather(reg_loss).mean()
-        
 
         if self.log_loss and self.accelerator.is_main_process:
             model_sparsity = (
@@ -543,18 +589,16 @@ class Trainer(HFTrainer):
 
             extra = []
             if lambda1 is not None and lambda2 is not None:
-                extra.append(
-                    f"Lambda1: {lambda1} Lambda2: {lambda2}"
-                )
+                extra.append(f"Lambda1: {lambda1} Lambda2: {lambda2}")
 
             logger.info(
                 f"@ {self.state.global_step} | Loss: {distributed_loss} | LM Loss: {distributed_lm_loss} | Tau:{current_tau} | "
                 f"Reg Loss: {distributed_reg_loss} | Head Entropy: {head_entropy}"
                 + (" | " + " | ".join(extra) if len(extra) else "")
             )
-            
+
             # merged_list = [(distributed_log_z_loss[i], distributed_model_sparsity[i], distributed_target_sparsity[i]) for i in range(len(distributed_task_ids))]
-            
+
             # for task_id, item in zip(distributed_task_ids, merged_list):
             #     log_z_loss, task_sparsity, target_sparsity = item[0], item[1], item[2]
             #     task_name = self.reverse_class_map[task_id.item()]
@@ -581,8 +625,6 @@ class Trainer(HFTrainer):
 
             #     valid_tasks.append(task_name)
 
-
-            
             # new_task_sparsity_statistic = {
             #     f"Spa-{task} sparsity": task_sparsity_statistic[task]
             #     for task in valid_tasks
@@ -598,7 +640,6 @@ class Trainer(HFTrainer):
             #     for task in valid_tasks
             # }
 
-            
             # for task_name in valid_tasks:
             #     logger.info(
             #         f"Statistic -> {task_name} | "
@@ -606,7 +647,6 @@ class Trainer(HFTrainer):
             #         f"Target_Sparsity: {task_target_sparsity_statistic[task_name]} | "
             #         f"z_loss: {task_sparsity_loss_statistic[task_name]}"
             #     )
-
 
             # del task_sparsity_statistic
             # del task_sparsity_loss_statistic
@@ -629,7 +669,9 @@ class Trainer(HFTrainer):
                         else distributed_reg_loss
                     ),
                     "loss": float(
-                        distributed_loss.detach().item() if isinstance(distributed_loss, torch.Tensor) else distributed_loss
+                        distributed_loss.detach().item()
+                        if isinstance(distributed_loss, torch.Tensor)
+                        else distributed_loss
                     ),
                     # "head_entropy": head_entropy.detach().item(),
                     # "current_tau": current_tau.detach().item(),
@@ -641,11 +683,11 @@ class Trainer(HFTrainer):
                     # "lambda3 Summarization": lambda1[2].detach().item() if lambda1 is not None else None,
                     # "lambda4 Code": lambda1[3].detach().item() if lambda1 is not None else None,
                 }
-                
+
                 # train_metrics.update(new_task_sparsity_statistic)
                 # train_metrics.update(new_task_sparsity_loss_statistic)
                 # train_metrics.update(new_task_target_sparsity_statistic)
-                
+
                 self.log(train_metrics)
 
         if return_outputs:
@@ -705,9 +747,9 @@ class Trainer(HFTrainer):
                     else:
                         optimizer_1_group.append(p)
                         optimized_parameters.append(n)
-                        
+
             optimizer_grouped_parameters = []
-            
+
             if not self.freeze_non_mask_parameters:
                 optimizer_grouped_parameters.append(
                     {
@@ -723,7 +765,7 @@ class Trainer(HFTrainer):
                         "lr": self.learning_rate,
                     }
                 )
-            
+
             if not self.freeze_mask_parameters:
                 optimizer_grouped_parameters.append(
                     {
@@ -747,10 +789,10 @@ class Trainer(HFTrainer):
                         "lr": self.mask_learning_rate,
                     }
                 )
-            
+
             logger.info("optimizer_grouped_parameters -> optimized parameters")
             logger.info(optimized_parameters)
-            
+
             optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(
                 self.args, opt_model
             )
@@ -829,7 +871,7 @@ class Trainer(HFTrainer):
 
         return super()._get_train_sampler()
 
-    def get_train_dataloader(self):    
+    def get_train_dataloader(self):
         if self.train_dataloader is not None:
             return self.train_dataloader
 
@@ -1312,7 +1354,6 @@ class Trainer(HFTrainer):
             )
 
         return metrics
-
 
     def _save_checkpoint(self, model, trial, metrics=None):
         # A wrapper around the original _save_checkpoint function to save streaming dataset state

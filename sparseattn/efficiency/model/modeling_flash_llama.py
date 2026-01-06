@@ -71,7 +71,7 @@ logger = logging.get_logger(__name__)
 
 class PawLlamaConfig(LlamaConfig):
     def __init__(self, *args, **kwargs):
-        self.local_window_size = kwargs.pop("local_window_size", 1024) # 256
+        self.local_window_size = kwargs.pop("local_window_size", 1024)  # 256
         self.disable_linear_regularization_term = kwargs.pop(
             "disable_linear_regularization_term", False
         )
@@ -79,19 +79,19 @@ class PawLlamaConfig(LlamaConfig):
 
         # Streaming
         self.toggle_type = kwargs.pop("toggle_type", "streaming")
-        self.sink_size = kwargs.pop("sink_size", 128) 
-        
+        self.sink_size = kwargs.pop("sink_size", 128)
+
         # retrieval_mode
         self.retrieval_mode = kwargs.pop("retrieval_mode", "full")
-        
+
         # Head Router
         self.pooling_mode = kwargs.pop("pooling_mode", "first_token")
-        
+
         self.use_task_emb_for_mask = kwargs.pop("use_task_emb_for_mask", False)
 
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
-        
+
         # ada-sparsity
         self.enable_ada_sparsity = kwargs.pop("enable_ada_sparsity", False)
 
@@ -117,7 +117,7 @@ class PawLlamaConfig(LlamaConfig):
         self.pooling_seq = kwargs.pop("pooling_seq", True)
         self.enable_lambda_task = kwargs.pop("enable_lambda_task", False)
         self.use_softmax = kwargs.pop("use_softmax", False)
-        
+
         super().__init__(*args, **kwargs)
 
 
@@ -590,11 +590,23 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states.unsqueeze(-2).expand(expand_shape)
     return hidden_states.reshape(final_shape)
 
+
 class AttentionRouter(nn.Module):
-    def __init__(self, input_dim, num_key_value_heads, d_feature=128,
-                 use_task_emb=False, temp=1.0, hard=False, 
-                 router_type='mlp', use_gumbel=True, learnable_temp=False,
-                 dropout=0.1, use_softmax=True, pooling_mode='ctx_q'):
+    def __init__(
+        self,
+        input_dim,
+        num_key_value_heads,
+        d_feature=128,
+        use_task_emb=False,
+        temp=1.0,
+        hard=False,
+        router_type="mlp",
+        use_gumbel=True,
+        learnable_temp=False,
+        dropout=0.1,
+        use_softmax=True,
+        pooling_mode="ctx_q",
+    ):
         super().__init__()
         self.num_kv = num_key_value_heads
         self.use_task_emb = use_task_emb
@@ -604,15 +616,15 @@ class AttentionRouter(nn.Module):
         self.pooling_mode = pooling_mode
         self.use_softmax = use_softmax
 
-        self.cls_feat_extractor = nn.Sequential( 
+        self.cls_feat_extractor = nn.Sequential(
             nn.Linear(d_feature, 4 * d_feature),
             nn.SiLU(),
             nn.Linear(4 * d_feature, d_feature),
         )
-        
+
         if self.use_softmax:
             logger.info("using softmax for attention router")
-            self.cls_router_head_agnostic = nn.Sequential( 
+            self.cls_router_head_agnostic = nn.Sequential(
                 nn.Linear(d_feature, 4 * d_feature),
                 nn.SiLU(),
                 nn.Linear(4 * d_feature, d_feature),
@@ -621,15 +633,15 @@ class AttentionRouter(nn.Module):
             )
         else:
             logger.info("use sigmoid function for attention router")
-            self.cls_router_head_agnostic = nn.Sequential( 
+            self.cls_router_head_agnostic = nn.Sequential(
                 nn.Linear(d_feature, 4 * d_feature),
                 nn.SiLU(),
                 nn.Linear(4 * d_feature, d_feature),
                 nn.SiLU(),
                 nn.Linear(d_feature, 1),
-                nn.LayerNorm([self.num_kv, 1], elementwise_affine=False)
+                nn.LayerNorm([self.num_kv, 1], elementwise_affine=False),
             )
-        
+
         if self.use_task_emb:
             self.task_embedding = nn.Embedding(4, d_feature)
 
@@ -638,23 +650,26 @@ class AttentionRouter(nn.Module):
             self.log_temp = nn.Parameter(torch.log(torch.tensor(temp)))
         else:
             self.tau = temp
-    
+
     def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.cls_router_head_agnostic[0].weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(
+            self.cls_router_head_agnostic[0].weight, a=math.sqrt(5)
+        )
         nn.init.zeros_(self.cls_router_head_agnostic[0].bias)
-        
-        nn.init.kaiming_uniform_(self.cls_router_head_agnostic[2].weight, a=math.sqrt(5))
+
+        nn.init.kaiming_uniform_(
+            self.cls_router_head_agnostic[2].weight, a=math.sqrt(5)
+        )
         nn.init.zeros_(self.cls_router_head_agnostic[2].bias)
 
         nn.init.zeros_(self.cls_router_head_agnostic[4].weight)
         nn.init.constant_(self.cls_router_head_agnostic[4].bias, 1.0)
 
-        
     def forward(
-        self, 
-        x, 
+        self,
+        x,
         cu_seq_len=None,
-        range_ids: torch.Tensor = None, 
+        range_ids: torch.Tensor = None,
         task_ids: Optional[torch.Tensor] = None,
         current_tau: Optional[torch.Tensor] = None,
     ):
@@ -663,7 +678,7 @@ class AttentionRouter(nn.Module):
         cu_seq_len: [0, seq_len_1, seq_len_2 + seq_len_1, ...]
         range_ids: [B, 6]
         task_ids: [B]
-        
+
         return:
             {
               'decisions': [B, H],
@@ -673,51 +688,55 @@ class AttentionRouter(nn.Module):
             }
         """
         bsz = (cu_seq_len.shape[0] - 1) if cu_seq_len is not None else 1
-        
-        if self.pooling_mode == 'first_token':
+
+        if self.pooling_mode == "first_token":
             if cu_seq_len is not None:
                 pooled_latent = self._segment_pooling(
-                    x, range_ids, ['first_token'], cu_seq_len)  # [B, H, D]
+                    x, range_ids, ["first_token"], cu_seq_len
+                )  # [B, H, D]
             else:
                 pooled_latent = self._segment_pooling_single_batch(
-                    x, range_ids, ['first_token'])
-        elif self.pooling_mode == 'q':
+                    x, range_ids, ["first_token"]
+                )
+        elif self.pooling_mode == "q":
             if cu_seq_len is not None:
                 pooled_latent = self._segment_pooling(
-                    x, range_ids, ['q'], cu_seq_len)  # [B, H, D]
+                    x, range_ids, ["q"], cu_seq_len
+                )  # [B, H, D]
             else:
-                pooled_latent = self._segment_pooling_single_batch(
-                    x, range_ids, ['q'])
-        elif self.pooling_mode == 'ctx_q':
+                pooled_latent = self._segment_pooling_single_batch(x, range_ids, ["q"])
+        elif self.pooling_mode == "ctx_q":
             if cu_seq_len is not None:
                 B = cu_seq_len.shape[0] - 1
                 H, D = x.shape[1:]
                 sample_features = []
                 for i in range(B):
                     x_s, x_e = cu_seq_len[i], cu_seq_len[i + 1]
-                    seg_slice = x[x_s:x_e]              # [Ti, H, D]
+                    seg_slice = x[x_s:x_e]  # [Ti, H, D]
                     seg_pooled = seg_slice.mean(dim=0)  # [H, D]
                     sample_features.append(seg_pooled)
 
                 pooled_latent = torch.stack(sample_features, dim=0)
             else:
-                target = torch.concat([x[:,:100,:] , x[:,-100:,:]],dim=1).mean(dim=1)
+                target = torch.concat([x[:, :100, :], x[:, -100:, :]], dim=1).mean(
+                    dim=1
+                )
                 pooled_latent = target  # [H, D]
         else:
             raise ValueError(f"Unknown pooling_mode: {self.pooling_mode}")
-        
+
         if self.use_task_emb:
             if self.training:
-                task_emb = self.task_embedding(task_ids) # [B, D]
-                task_emb_expanded = task_emb.unsqueeze(1) 
+                task_emb = self.task_embedding(task_ids)  # [B, D]
+                task_emb_expanded = task_emb.unsqueeze(1)
                 pooled_latent = pooled_latent + task_emb_expanded
             else:
                 pooled_latent = pooled_latent
-                                
+
         pooled_hidden_states = self.cls_feat_extractor(pooled_latent)
 
         binary_logits = self.cls_router_head_agnostic(pooled_hidden_states)
-        
+
         if self.learnable_temp:
             tau = torch.exp(self.log_temp).clamp(0.3, 1.0)
         else:
@@ -726,42 +745,58 @@ class AttentionRouter(nn.Module):
         u = torch.rand_like(binary_logits)
         eps = 1e-8
         g = -torch.log(-torch.log(u + eps) + eps)
-        
+
         if not self.use_softmax:
             z_soft = torch.sigmoid((binary_logits + g) / tau)
             z_hard = (z_soft > 0.5).float()
             z = z_hard + (z_soft - z_soft.detach())  # [B, H, 1]
-            entropy = -(z_soft * torch.log(z_soft + eps) + (1 - z_soft) * torch.log(1 - z_soft + eps))
+            entropy = -(
+                z_soft * torch.log(z_soft + eps)
+                + (1 - z_soft) * torch.log(1 - z_soft + eps)
+            )
         else:
             z_soft = F.softmax(binary_logits, dim=-1)
-            z_hard = torch.zeros_like(z_soft).scatter_(-1, z_soft.argmax(-1, keepdim=True), 1.0)
+            z_hard = torch.zeros_like(z_soft).scatter_(
+                -1, z_soft.argmax(-1, keepdim=True), 1.0
+            )
             z = z_hard + (z_soft - z_soft.detach())  # [B, H, 2]
             z = z[..., 1]  # [B, H]
             z_soft = z_soft[..., 1]
             z_soft = z_soft.unsqueeze(-1)
             z = z.unsqueeze(-1)
-            entropy = -(z_soft * torch.log(z_soft + eps)).sum(dim=-1).mean() 
-        
+            entropy = -(z_soft * torch.log(z_soft + eps)).sum(dim=-1).mean()
+
         return {
-            'pooled_hidden_states': pooled_hidden_states, # [B, H, D]
-            'decisions': z_soft,
-            'hard_decisions': z_hard,
-            'sparse_mask': z, # [B, H], 这是一个 STE Tensor
-            'logits': binary_logits,
-            'entropy': entropy
+            "pooled_hidden_states": pooled_hidden_states,  # [B, H, D]
+            "decisions": z_soft,
+            "hard_decisions": z_hard,
+            "sparse_mask": z,  # [B, H], 这是一个 STE Tensor
+            "logits": binary_logits,
+            "entropy": entropy,
         }
-        
-    def _segment_pooling_single_batch(self, pooled_input: torch.Tensor, range_ids: torch.Tensor, segments: list) -> torch.Tensor:
+
+    def _segment_pooling_single_batch(
+        self, pooled_input: torch.Tensor, range_ids: torch.Tensor, segments: list
+    ) -> torch.Tensor:
         B, S, H, D = pooled_input.shape
         pooled_features_list = []
-        
-        POOL_MAP = {'first_token': (0, 1),'ctx': (2, 3), 'q': (4, 5), 'a': (6, 7), 'ctx_q': (2, 5)} 
+
+        POOL_MAP = {
+            "first_token": (0, 1),
+            "ctx": (2, 3),
+            "q": (4, 5),
+            "a": (6, 7),
+            "ctx_q": (2, 5),
+        }
         for i in range(B):
             sample_features = []
 
             for seg in segments:
                 start_idx, end_idx = POOL_MAP[seg]
-                start, end = range_ids[i, start_idx:end_idx + 1].tolist()[0], range_ids[i, start_idx:end_idx + 1].tolist()[-1]
+                start, end = (
+                    range_ids[i, start_idx : end_idx + 1].tolist()[0],
+                    range_ids[i, start_idx : end_idx + 1].tolist()[-1],
+                )
                 if end >= start:
                     # seg_slice = pooled_input[i, start : end + 1, :, :]
                     start_slice = pooled_input[i, start : start + 100, :, :]
@@ -770,23 +805,24 @@ class AttentionRouter(nn.Module):
                     seg_pooled = combined_slice.mean(dim=0)  # [H, D]
                 else:
                     seg_pooled = torch.zeros(H, D, device=pooled_input.device)
-                
+
                 sample_features.append(seg_pooled)
 
             if sample_features:
-                combined_feature = torch.stack(sample_features, dim=0).mean(dim=0) # [H, D]
+                combined_feature = torch.stack(sample_features, dim=0).mean(
+                    dim=0
+                )  # [H, D]
             else:
                 combined_feature = torch.zeros(H, D, device=pooled_input.device)
-                
+
             pooled_features_list.append(combined_feature)
 
-        return torch.stack(pooled_features_list, dim=0) # [B, H, D]
-        
-        
+        return torch.stack(pooled_features_list, dim=0)  # [B, H, D]
+
     def _segment_pooling(
-        self, 
-        x: torch.Tensor, 
-        range_ids: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        range_ids: torch.Tensor,
         segments: list[str],
         cu_seq_len: torch.Tensor,
     ) -> torch.Tensor:
@@ -801,18 +837,27 @@ class AttentionRouter(nn.Module):
         Returns:
             torch.Tensor: _description_
         """
-        POOL_MAP = {'first_token': (0, 1),'ctx': (2, 3), 'q': (4, 5), 'a': (6, 7), 'ctx_q': (2, 5)} 
-        
+        POOL_MAP = {
+            "first_token": (0, 1),
+            "ctx": (2, 3),
+            "q": (4, 5),
+            "a": (6, 7),
+            "ctx_q": (2, 5),
+        }
+
         B = cu_seq_len.shape[0] - 1
         H, D = x.shape[1:]
         pooled_features_list = []
-        
+
         for i in range(B):
             sample_features = []
             x_s, x_e = cu_seq_len[i], cu_seq_len[i + 1]
             for seg in segments:
                 start_idx, end_idx = POOL_MAP[seg]
-                start, end = range_ids[i, start_idx:end_idx + 1].tolist()[0], range_ids[i, start_idx:end_idx + 1].tolist()[-1]
+                start, end = (
+                    range_ids[i, start_idx : end_idx + 1].tolist()[0],
+                    range_ids[i, start_idx : end_idx + 1].tolist()[-1],
+                )
 
                 if end >= start:
                     start_slice = pooled_input[i, start : start + 100, :, :]
@@ -821,18 +866,19 @@ class AttentionRouter(nn.Module):
                     seg_pooled = combined_slice.mean(dim=0)  # [H, D]
                 else:
                     seg_pooled = torch.zeros(H, D, device=x.device)
-                
+
                 sample_features.append(seg_pooled)
 
             if sample_features:
-                combined_feature = torch.stack(sample_features, dim=0).mean(dim=0) # [H, D]
+                combined_feature = torch.stack(sample_features, dim=0).mean(
+                    dim=0
+                )  # [H, D]
             else:
                 combined_feature = torch.zeros(H, D, device=x.device)
-                
+
             pooled_features_list.append(combined_feature)
 
-        return torch.stack(pooled_features_list, dim=0) # [B, H, D]
-
+        return torch.stack(pooled_features_list, dim=0)  # [B, H, D]
 
 
 class LlamaAttention(nn.Module):
@@ -884,7 +930,7 @@ class LlamaAttention(nn.Module):
         )
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
-        
+
         self.mask_allocator = AttentionRouter(
             input_dim=self.hidden_size,
             num_key_value_heads=self.num_key_value_heads,
@@ -894,9 +940,8 @@ class LlamaAttention(nn.Module):
             temp=getattr(config, "mask_temp", 1.0),
             hard=getattr(config, "mask_hard_sample", False),
             pooling_mode=getattr(config, "pooling_mode", "first_token"),
-            use_softmax=getattr(config, "use_softmax", False)
+            use_softmax=getattr(config, "use_softmax", False),
         )
-
 
         self._dtype = self.q_proj.weight.dtype
         self.attn_mask_log_alphas = nn.Parameter(
@@ -912,11 +957,11 @@ class LlamaAttention(nn.Module):
         self.toggle_type = config.toggle_type
         self.sink_blocks = (config.sink_size + 127) // 128
         self.local_blocks = (config.local_window_size + 127) // 128
-        
+
         self.retrieval_mode = config.retrieval_mode
 
-
         from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+
         self.streaming_info_kwargs = {
             "sink_block_num": self.sink_blocks,
             "local_block_num": self.local_blocks,
@@ -960,6 +1005,7 @@ class LlamaAttention(nn.Module):
             self.topk_k_chunk = int(os.environ.get("TOPK_K_CHUNK", 4096))
         elif self.toggle_type == "xattn" or self.retrieval_mode == "xattn":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+
             self.streaming_info_kwargs = {
                 "sink_block_num": self.sink_blocks,
                 "local_block_num": self.local_blocks,
@@ -1047,7 +1093,6 @@ class LlamaAttention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -1056,7 +1101,7 @@ class LlamaAttention(nn.Module):
         v = self.v_proj(hidden_states).view(hidden_shape)
 
         has_layer_past = past_key_value is not None
-        
+
         if not has_layer_past:
             if not self.config.enable_ada_sparsity:
                 z_kv = get_mask(
@@ -1068,15 +1113,23 @@ class LlamaAttention(nn.Module):
                 z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
             else:
                 if unpadded_lengths is not None:
-                    res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids)
+                    res = self.mask_allocator(
+                        k, unpadded_lengths[0], range_ids, task_ids
+                    )
                 else:
                     res = self.mask_allocator(k, None, range_ids, task_ids)
-                
-                z_kv_batch, entropy, pooled_hidden_states = res['sparse_mask'], res['entropy'], res['pooled_hidden_states']
-                z_constrast = res['decisions']
+
+                z_kv_batch, entropy, pooled_hidden_states = (
+                    res["sparse_mask"],
+                    res["entropy"],
+                    res["pooled_hidden_states"],
+                )
+                z_constrast = res["decisions"]
 
                 if z_kv_batch.shape[-2] == self.num_key_value_heads:
-                    z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, 1)
+                    z_kv_batch = z_kv_batch.repeat_interleave(
+                        self.num_key_value_groups, 1
+                    )
         else:
             # decode
             z_kv_batch = past_key_value[2]
@@ -1091,7 +1144,7 @@ class LlamaAttention(nn.Module):
             past_len += position_ids.min()
 
         q, k = self.rotary_emb(q, k, past_len, unpadded_lengths)
-        
+
         kv = torch.stack([k, v], -3)
 
         # Cache QKV values
@@ -1117,21 +1170,30 @@ class LlamaAttention(nn.Module):
             kv = past_kv[:, :new_len]
         else:
             past_kv = kv
-        past_key_value = (past_kv, past_len + q.size(1), z_kv_batch) if use_cache else None
-             
-        if not has_layer_past:
+        past_key_value = (
+            (past_kv, past_len + q.size(1), z_kv_batch) if use_cache else None
+        )
 
+        if not has_layer_past:
             is_vlen_input = (q.dim() == 3) and (unpadded_lengths is not None)
 
             if is_vlen_input:
                 k = k.repeat_interleave(self.num_key_value_groups, dim=1)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=1)
-                q, k, v = q.transpose(0, 1).contiguous(), k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous() 
+                q, k, v = (
+                    q.transpose(0, 1).contiguous(),
+                    k.transpose(0, 1).contiguous(),
+                    v.transpose(0, 1).contiguous(),
+                )
             else:
                 k = k.repeat_interleave(self.num_key_value_groups, dim=2)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=2)
-                q, k, v = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous() 
-                
+                q, k, v = (
+                    q.transpose(1, 2).contiguous(),
+                    k.transpose(1, 2).contiguous(),
+                    v.transpose(1, 2).contiguous(),
+                )
+
             stride = self.xattn_params["stride"]
             threshold = self.xattn_params["threshold"]
             norm = self.xattn_params["norm"]
@@ -1150,13 +1212,17 @@ class LlamaAttention(nn.Module):
                 )
 
             else:
-                bsz,_,seqlen,_ = q.size()
+                bsz, _, seqlen, _ = q.size()
                 if not torch.is_tensor(seqlen):
                     seqlen = torch.tensor(seqlen, dtype=torch.int32, device=q.device)
                 max_seqlen = torch.max(seqlen).item()
 
                 cu_seqlens = torch.arange(
-                    0, (bsz + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device
+                    0,
+                    (bsz + 1) * seqlen,
+                    step=seqlen,
+                    dtype=torch.int32,
+                    device=q.device,
                 )
                 unpadded_lengths = (cu_seqlens, max_seqlen)
 
@@ -1167,24 +1233,27 @@ class LlamaAttention(nn.Module):
                     head_mask_type = torch.where(
                         z_kv_batch[0, :, 0] == 1,
                         torch.tensor(0, dtype=torch.int, device=z_kv_batch.device),
-                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device)
+                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
                     )
                 elif self.retrieval_mode == "xattn" and self.toggle_type == "streaming":
                     head_mask_type = torch.where(
                         z_kv_batch[0, :, 0] == 1,
                         torch.tensor(1, dtype=torch.int, device=z_kv_batch.device),
-                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device)
+                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
                     )
                 elif self.retrieval_mode == "xattn" and self.toggle_type == "xattn":
-                    head_mask_type = torch.ones_like(z_kv_batch[0, :, 0], dtype=torch.int)
+                    head_mask_type = torch.ones_like(
+                        z_kv_batch[0, :, 0], dtype=torch.int
+                    )
                 elif self.retrieval_mode == "full" and self.toggle_type == "full":
-                    head_mask_type = 1 - torch.ones_like(z_kv_batch[0, :, 0], dtype=torch.int)
+                    head_mask_type = 1 - torch.ones_like(
+                        z_kv_batch[0, :, 0], dtype=torch.int
+                    )
                 else:
                     raise SamplerConditionError(
                         f"retrieval_mode: {self.retrieval_mode} and toggle_type: {self.toggle_type} is not supported"
                     )
-                    
-                
+
                 attn_output = Xattention_prefill_dim4(
                     q,
                     k,
@@ -1230,10 +1299,19 @@ class LlamaAttention(nn.Module):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))
 
-        attn_weights = None        
+        attn_weights = None
         # print(f"task id: {task_ids}, layer sparsity: {z.squeeze(-1).sum(dim=-1)}")
         # z: [B, H, 1] -> [B, H] -> [B]
-        return z_kv_batch.squeeze(-1).sum(dim=-1), None, None, None, attn_output, attn_weights, past_key_value
+        return (
+            z_kv_batch.squeeze(-1).sum(dim=-1),
+            None,
+            None,
+            None,
+            attn_output,
+            attn_weights,
+            past_key_value,
+        )
+
 
 class LlamaDecoderLayer(nn.Module):
     def __init__(
@@ -1304,7 +1382,15 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        z_sum, entropy, pooled_hidden_states, z_constrast, hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        (
+            z_sum,
+            entropy,
+            pooled_hidden_states,
+            z_constrast,
+            hidden_states,
+            self_attn_weights,
+            present_key_value,
+        ) = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1325,7 +1411,13 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (z_sum, entropy, pooled_hidden_states, z_constrast, hidden_states,)
+        outputs = (
+            z_sum,
+            entropy,
+            pooled_hidden_states,
+            z_constrast,
+            hidden_states,
+        )
 
         if output_attentions:
             outputs += (self_attn_weights,)
@@ -1423,7 +1515,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 torch.tensor([0.0], dtype=self._dtype)
             )
         self.sparsity_lambda_2 = nn.Parameter(torch.tensor([0.0], dtype=self._dtype))
-        
+
         if self.config.enable_lambda_task:
             self.num_tasks = 5
             self.sparsity_lambda1_task = nn.Parameter(
@@ -1620,7 +1712,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         z_sum = 0 if compute_sparsity else None
         layer_z_sums = []
-        
+
         head_entropy = 0 if compute_sparsity else None
         layer_z_constrast = []
 
@@ -1664,16 +1756,22 @@ class LlamaModel(LlamaPreTrainedModel):
                     task_ids=task_ids,
                 )
 
-            z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = layer_outputs[0], layer_outputs[1], layer_outputs[2], layer_outputs[3], layer_outputs[4]
+            z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = (
+                layer_outputs[0],
+                layer_outputs[1],
+                layer_outputs[2],
+                layer_outputs[3],
+                layer_outputs[4],
+            )
 
             z_layer_sum = z_layer_sum.to(hidden_states.device)
-            
+
             if z_sum is None:
                 z_sum = z_layer_sum
             else:
                 z_sum = z_sum.to(z_layer_sum.device)
                 z_sum = z_sum + z_layer_sum
-            
+
             if use_cache:
                 next_decoder_cache += (layer_outputs[6 if output_attentions else 5],)
 
@@ -1688,7 +1786,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         model_sparsity = 1 - (z_sum / self.total_num_heads)
-        
+
         if not return_dict:
             # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)
             return tuple(
@@ -1707,7 +1805,7 @@ class LlamaModel(LlamaPreTrainedModel):
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-            model_sparsity=model_sparsity
+            model_sparsity=model_sparsity,
         )
 
 
@@ -1916,7 +2014,9 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
             max_seqlen = seq_lengths.max().item()
 
             unpadded_lengths = (cu_seqlens, max_seqlen)
-        elif attention_mask is not None and not use_cache and attention_mask.size(0) != 1:
+        elif (
+            attention_mask is not None and not use_cache and attention_mask.size(0) != 1
+        ):
             if inputs_embeds is not None:
                 bsz = inputs_embeds.size(0)
                 inputs_embeds, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
@@ -1925,7 +2025,9 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
             else:
                 bsz = input_ids.size(0)
                 tmp = input_ids.unsqueeze(-1)
-                input_ids, unpad_indices, cu_seqlens, max_seqlen = unpad_input(tmp, attention_mask)
+                input_ids, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
+                    tmp, attention_mask
+                )
                 max_seqlen_for_pad_seq = attention_mask.size(-1)
                 input_ids = input_ids.squeeze(-1)
             unpadded_lengths = (cu_seqlens, max_seqlen)
@@ -1952,19 +2054,23 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
 
         if input_ids.shape[1] > 1 and use_cache:
             self.prefill_sparsity = outputs.model_sparsity.detach()
-        
+
         hidden_states = outputs[0]
         if seq_lengths is None and unpadded_lengths is not None:
-            hidden_states = pad_input(hidden_states, unpad_indices, bsz, max_seqlen_for_pad_seq)
+            hidden_states = pad_input(
+                hidden_states, unpad_indices, bsz, max_seqlen_for_pad_seq
+            )
         if labels is not None or shifted_labels is not None:
             if shifted_labels is not None:
                 labels = shifted_labels.reshape(-1)
                 hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
             else:
                 labels = labels[..., 1:].reshape(-1).contiguous()
-                hidden_states = hidden_states[..., :-1, :].reshape(
-                    -1, hidden_states.size(-1)
-                ).contiguous()
+                hidden_states = (
+                    hidden_states[..., :-1, :]
+                    .reshape(-1, hidden_states.size(-1))
+                    .contiguous()
+                )
             if self.logit_block_size > 0:
                 num_valid_labels = (labels != -100).sum()
                 hidden_states = torch.split(hidden_states, self.logit_block_size, dim=0)
@@ -2005,7 +2111,7 @@ class PawLlamaForCausalLM(LlamaPreTrainedModel):
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-        
+
         return CausalLMOutputWithPastAndSparsity(
             loss=loss,
             logits=logits,

@@ -505,7 +505,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 If you use SparseAttn in your research, please consider citing:
 
-
+```
+@article{SparseAttn2024,
+  title={SparseAttn: High-Performance Sparse Attention Library for Large Language Models},
+  author={SparseAttn Team},
+  journal={arXiv preprint arXiv:24xx.xxxxx},
+  year={2024}
+}
+```
 
 ## 📞 Contact
 

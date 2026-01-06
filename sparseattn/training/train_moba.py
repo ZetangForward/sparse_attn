@@ -13,10 +13,19 @@ from transformers import (
     set_seed,
 )
 
-from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
-from .block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import Qwen3NSA
+from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import (
+    LlamaNSA,
+)
+from .block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import (
+    Qwen3NSA,
+)
 import torch
-from transformers import LlamaForCausalLM, AutoTokenizer, AutoModelForCausalLM, Qwen3ForCausalLM
+from transformers import (
+    LlamaForCausalLM,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Qwen3ForCausalLM,
+)
 from .modeling_nsa_llama import NSALlamaForCausalLM
 
 from .lh_trainer_moba import Trainer as MoBATrainer
@@ -35,9 +44,8 @@ import json
 from csv import reader
 
 
-
-
 logger = logging.getLogger(__name__)
+
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -86,6 +94,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token  # 或手动设置为其他 token
 
     from .MoBA.moba import register_moba, MoBAConfig
+
     moba_chunk_size = 1024
     moba_topk = 8
     attn = "moba"
@@ -95,9 +104,8 @@ def main():
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation=attn,
-        use_cache=False
+        use_cache=False,
     )
-            
 
     if (
         script_args.tokenizer_name is not None
@@ -150,9 +158,10 @@ def main():
         }
 
     # data_collator = DataCollator(tokenizer, data_args)
-    data_collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
+    data_collator = PackingDataCollator(
+        tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens
+    )
     assert training_args.max_steps is not None, "max_steps must be set!"
-
 
     trainer = MoBATrainer(
         model=model,
@@ -163,7 +172,6 @@ def main():
         data_collator=data_collator,
         log_loss=script_args.should_log_loss,
     )
-
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these

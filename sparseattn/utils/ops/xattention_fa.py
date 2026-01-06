@@ -172,8 +172,12 @@ def xattn_estimate(
 
     # Support GQA: expand k/v to match q heads
     if num_q_head != num_kv_head:
-        assert num_q_head % num_kv_head == 0, "num_q_head must be divisible by num_kv_head for GQA"
-        key_states = torch.repeat_interleave(key_states, num_q_head // num_kv_head, dim=1)
+        assert num_q_head % num_kv_head == 0, (
+            "num_q_head must be divisible by num_kv_head for GQA"
+        )
+        key_states = torch.repeat_interleave(
+            key_states, num_q_head // num_kv_head, dim=1
+        )
         num_kv_head = num_q_head  # now they match
 
     k_num_to_pad = ((k_len + chunk_size - 1) // chunk_size) * chunk_size - k_len

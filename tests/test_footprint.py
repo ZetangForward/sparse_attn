@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 def compare_kv_footprints(
     input_lengths,
     response_length=0,
@@ -59,11 +60,20 @@ def compare_kv_footprints(
 
     plt.figure(figsize=(7, 4))
     if streaming_ratios:
-        plt.plot(input_lengths, np.array(streaming_ratios) * 100, label="Streaming", marker="o")
+        plt.plot(
+            input_lengths,
+            np.array(streaming_ratios) * 100,
+            label="Streaming",
+            marker="o",
+        )
     if locret_ratios:
-        plt.plot(input_lengths, np.array(locret_ratios) * 100, label="LocRet", marker="^")
+        plt.plot(
+            input_lengths, np.array(locret_ratios) * 100, label="LocRet", marker="^"
+        )
     if xattn_ratios:
-        plt.plot(input_lengths, np.array(xattn_ratios) * 100, label="XAttention", marker="s")
+        plt.plot(
+            input_lengths, np.array(xattn_ratios) * 100, label="XAttention", marker="s"
+        )
 
     plt.xlabel("Input length (tokens)")
     plt.ylabel("KV footprint (%)")
@@ -71,8 +81,17 @@ def compare_kv_footprints(
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.6)
     import os
-    os.makedirs(os.path.dirname("/data/lcm_lab/qqt/project/SparseAttn/tests/footprint/"), exist_ok=True)
-    plt.savefig("/data/lcm_lab/qqt/project/SparseAttn/tests/footprint/xattn_footprint.pdf", bbox_inches="tight", dpi=300)
+
+    os.makedirs(
+        os.path.dirname("/data/lcm_lab/qqt/project/SparseAttn/tests/footprint/"),
+        exist_ok=True,
+    )
+    plt.savefig(
+        "/data/lcm_lab/qqt/project/SparseAttn/tests/footprint/xattn_footprint.pdf",
+        bbox_inches="tight",
+        dpi=300,
+    )
+
 
 compare_kv_footprints(
     input_lengths=[4_096, 8_000, 16_000, 32_000, 64_000, 128_000],

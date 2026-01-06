@@ -184,7 +184,7 @@ class TrainingArguments(HfTrainingArguments):
     load_masks_sparsity: float = field(
         default=None, metadata={"help": "Sparsity to load masks with, if any."}
     )
-    
+
     attention_type: str = field(
         default="None",
         metadata={
@@ -193,25 +193,19 @@ class TrainingArguments(HfTrainingArguments):
     )
     pooling_mode: str = field(
         default="first_token",
-        metadata={
-            "help": "The pooling mode to use. Options: 'first_token', 'mean'"
-        },
+        metadata={"help": "The pooling mode to use. Options: 'first_token', 'mean'"},
     )
 
     use_task_emb_for_mask: bool = field(
         default=False,
-        metadata={
-            "help": "Whether to use task embeddings for masking."
-        },
+        metadata={"help": "Whether to use task embeddings for masking."},
     )
-    
+
     retrieval_mode: str = field(
         default="full",
-        metadata={
-            "help": "The retrieval mode to use. Options: 'full', 'xattn'"
-        },
+        metadata={"help": "The retrieval mode to use. Options: 'full', 'xattn'"},
     )
-    
+
     ## Streaming
     toggle_type: str = field(
         default="streaming",
@@ -230,7 +224,7 @@ class TrainingArguments(HfTrainingArguments):
         default=2048,
         metadata={"help": "The k value for top-k toggling."},
     )
-    
+
     enable_ada_sparsity: bool = field(
         default=False,
         metadata={"help": "Whether to enable layer-wise sparsity."},
@@ -273,17 +267,17 @@ class TrainingArguments(HfTrainingArguments):
         default=None,
         metadata={"help": "Path to the effective rank analysis results file."},
     )
-    
+
     enable_contrastive_loss: bool = field(
         default=False,
         metadata={"help": "Whether to enable contrastive loss."},
     )
-    
+
     enable_lambda_task: bool = field(
         default=False,
         metadata={"help": "Whether to enable task-specific lambda."},
     )
-    
+
     use_softmax: bool = field(
         default=False,
         metadata={"help": "Whether to use softmax in attention routing."},
