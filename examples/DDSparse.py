@@ -4,7 +4,6 @@ from transformers import AutoTokenizer, AutoConfig
 from transformers import AutoModelForCausalLM
 
 
-
 def load_sparse_model(model_path):
     config_path = f"{model_path}/config.json"
     with open(config_path, "r") as f:
@@ -44,6 +43,7 @@ def load_sparse_model(model_path):
     )
     return model
 
+
 def get_task(metadata_str):
     try:
         if isinstance(metadata_str, str):
@@ -52,9 +52,10 @@ def get_task(metadata_str):
             meta_dict = metadata_str
         else:
             return None
-        return meta_dict.get('task')
+        return meta_dict.get("task")
     except Exception:
         return None
+
 
 def main():
     model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
@@ -64,16 +65,20 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     model = load_sparse_model(model_path)
     model.eval()
-    
+
     sparsity = []
-    
-    longbench_prediction = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/cwe_8192.jsonl"
-    
+
+    longbench_prediction = (
+        "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/cwe_8192.jsonl"
+    )
+
     # 读取jsonl文件
-    with open(longbench_prediction, 'r') as f:
+    with open(longbench_prediction, "r") as f:
         data = [json.loads(line) for line in f]
     for i in range(len(data)):
-        input_ids = tokenizer.encode(data[i]["input"], return_tensors="pt").to(model.device)
+        input_ids = tokenizer.encode(data[i]["input"], return_tensors="pt").to(
+            model.device
+        )
         attention_mask = torch.ones_like(input_ids).to(model.device)
         actual_len = input_ids.shape[-1]
 
@@ -96,7 +101,7 @@ def main():
     generated_ids = outputs[0][actual_len:]
     response = tokenizer.decode(generated_ids, skip_special_tokens=True)
     print("Response:", response)
-    print(f"Average Sparsity:{sum(sparsity)/len(sparsity)}")
+    print(f"Average Sparsity:{sum(sparsity) / len(sparsity)}")
 
 
 if __name__ == "__main__":

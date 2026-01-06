@@ -34,53 +34,77 @@ def generate_data(batch, seqlen, num_q_head, num_kv_head, headdim, dtype):
     return q, k, v, cu_seqlen, max_seqlen.item()
 
 
-
-def test_attn_varlen_moba_speed(batch, head, seqlen, head_dim, moba_chunk_size, moba_topk, dtype=torch.bfloat16):
+def test_attn_varlen_moba_speed(
+    batch, head, seqlen, head_dim, moba_chunk_size, moba_topk, dtype=torch.bfloat16
+):
     """Speed test comparing v3 vs v4 moba attention"""
     # Get data
-    q, k, v, cu_seqlen, max_seqlen = generate_data(batch, seqlen, head, head, head_dim, dtype)
+    q, k, v, cu_seqlen, max_seqlen = generate_data(
+        batch, seqlen, head, head, head_dim, dtype
+    )
     vo_grad = torch.randn_like(q)
-    
+
     # Warmup
     warmup_iters = 3
     perf_test_iters = 10
 
     # Warmup
     for _ in range(warmup_iters):
-        o = flash_attn_varlen_func(q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen, causal=True)
+        o = flash_attn_varlen_func(
+            q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen, causal=True
+        )
         torch.autograd.backward(o, vo_grad)
-    
+
     torch.cuda.synchronize()
     start_flash = time.perf_counter()
     for _ in range(perf_test_iters):
-        o = flash_attn_varlen_func(q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen, causal=True)
+        o = flash_attn_varlen_func(
+            q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen, causal=True
+        )
         torch.autograd.backward(o, vo_grad)
-        
+
     torch.cuda.synchronize()
     time_flash = (time.perf_counter() - start_flash) / perf_test_iters * 1000
 
-
     # Warmup
     for _ in range(warmup_iters):
-        om = moba_attn_varlen(q, k, v, cu_seqlen, max_seqlen, moba_chunk_size=moba_chunk_size, moba_topk=moba_topk)
+        om = moba_attn_varlen(
+            q,
+            k,
+            v,
+            cu_seqlen,
+            max_seqlen,
+            moba_chunk_size=moba_chunk_size,
+            moba_topk=moba_topk,
+        )
         torch.autograd.backward(om, vo_grad)
 
-        
     torch.cuda.synchronize()
     start_moba = time.perf_counter()
     for _ in range(perf_test_iters):
-        om = moba_attn_varlen(q, k, v, cu_seqlen, max_seqlen, moba_chunk_size=moba_chunk_size, moba_topk=moba_topk)
+        om = moba_attn_varlen(
+            q,
+            k,
+            v,
+            cu_seqlen,
+            max_seqlen,
+            moba_chunk_size=moba_chunk_size,
+            moba_topk=moba_topk,
+        )
         torch.autograd.backward(om, vo_grad)
-    
+
     torch.cuda.synchronize()
     time_moba = (time.perf_counter() - start_moba) / perf_test_iters * 1000
-    
-    print(f"\nbatch:{batch} head:{head} seqlen:{seqlen} chunk:{moba_chunk_size} topk:{moba_topk}")
+
+    print(
+        f"\nbatch:{batch} head:{head} seqlen:{seqlen} chunk:{moba_chunk_size} topk:{moba_topk}"
+    )
     print(f"Flash: {time_flash:.2f}ms, MoBA: {time_moba:.2f}ms")
     print(f"Speedup:  {time_flash / time_moba:.2f}x")
 
 
 if __name__ == "__main__":
-    test_attn_varlen_moba_speed(batch=1, head=1, seqlen=32768, head_dim=128, moba_chunk_size=512, moba_topk=3)
+    test_attn_varlen_moba_speed(
+        batch=1, head=1, seqlen=32768, head_dim=128, moba_chunk_size=512, moba_topk=3
+    )
     print("simple speed test finished")
-

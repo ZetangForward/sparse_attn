@@ -13,10 +13,19 @@ from transformers import (
     set_seed,
 )
 
-from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA
-from .block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import Qwen3NSA
+from .block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import (
+    LlamaNSA,
+)
+from .block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import (
+    Qwen3NSA,
+)
 import torch
-from transformers import LlamaForCausalLM, AutoTokenizer, AutoModelForCausalLM, Qwen3ForCausalLM
+from transformers import (
+    LlamaForCausalLM,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Qwen3ForCausalLM,
+)
 from .modeling_nsa_llama import NSALlamaForCausalLM
 
 from .lh_trainer_nsa import Trainer as NSATrainer
@@ -35,9 +44,8 @@ import json
 from csv import reader
 
 
-
-
 logger = logging.getLogger(__name__)
+
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -85,10 +93,13 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path)
-    #tokenizer = AutoTokenizer.from_pretrained(origin_model_path)
+    # tokenizer = AutoTokenizer.from_pretrained(origin_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token  # 或手动设置为其他 token
-    if training_args.attention_type is not None and "nsa" in training_args.attention_type :
+    if (
+        training_args.attention_type is not None
+        and "nsa" in training_args.attention_type
+    ):
         if "Llama" in script_args.model_name_or_path:
             model = LlamaForCausalLM.from_pretrained(
                 script_args.model_name_or_path,
@@ -97,11 +108,11 @@ def main():
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
                 torch_dtype=torch.bfloat16,
-                use_cache=False
+                use_cache=False,
             )
             config = model.config
             config._attn_implementation = "flash_attention_2"
-            config.compress_type = "linear"#"avgpool","weightedpool"
+            config.compress_type = "linear"  # "avgpool","weightedpool"
             config.kernel_size = 32
             config.kernel_stride = 16
             config.block_size = 64
@@ -128,11 +139,11 @@ def main():
                 revision=script_args.model_revision,
                 use_auth_token=True if script_args.use_auth_token else None,
                 torch_dtype=torch.bfloat16,
-                use_cache=False
+                use_cache=False,
             )
             config = model.config
             config._attn_implementation = "flash_attention_2"
-            config.compress_type = "linear"#"avgpool","weightedpool"
+            config.compress_type = "linear"  # "avgpool","weightedpool"
             config.kernel_size = 32
             config.kernel_stride = 16
             config.block_size = 64
@@ -203,11 +214,16 @@ def main():
         }
 
     # data_collator = DataCollator(tokenizer, data_args)
-    data_collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
+    data_collator = PackingDataCollator(
+        tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens
+    )
     assert training_args.max_steps is not None, "max_steps must be set!"
 
     # Initialize our Trainer
-    if training_args.attention_type is not None and "nsa" in training_args.attention_type :
+    if (
+        training_args.attention_type is not None
+        and "nsa" in training_args.attention_type
+    ):
         trainer = NSATrainer(
             model=model,
             args=training_args,
@@ -217,7 +233,6 @@ def main():
             data_collator=data_collator,
             log_loss=script_args.should_log_loss,
         )
-
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these

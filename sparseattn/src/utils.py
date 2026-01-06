@@ -1,5 +1,6 @@
 import torch
 
+
 def create_causal_mask(batch_size, head_num, block_size, block_num, divide_block_num):
     """
     Creates a causal attention mask used in transformer-based models.

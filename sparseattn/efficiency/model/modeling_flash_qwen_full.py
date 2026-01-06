@@ -74,18 +74,18 @@ class PawQwen3Config(Qwen3Config):
         # Streaming
         self.toggle_type = kwargs.pop("toggle_type", "streaming")
         self.sink_size = kwargs.pop("sink_size", 128)
-        
+
         # retrieval_mode
         self.retrieval_mode = kwargs.pop("retrieval_mode", "full")
-        
+
         # Head Router
         self.pooling_mode = kwargs.pop("pooling_mode", "first_token")
-        
+
         self.use_task_emb_for_mask = kwargs.pop("use_task_emb_for_mask", False)
 
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
-        
+
         # ada-sparsity
         self.enable_ada_sparsity = kwargs.pop("enable_ada_sparsity", False)
 
@@ -111,7 +111,7 @@ class PawQwen3Config(Qwen3Config):
         self.pooling_seq = kwargs.pop("pooling_seq", True)
         self.enable_lambda_task = kwargs.pop("enable_lambda_task", False)
         self.use_softmax = kwargs.pop("use_softmax", False)
-        
+
         super().__init__(*args, **kwargs)
 
 
@@ -622,7 +622,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-
 class Qwen3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -689,17 +688,17 @@ class Qwen3Attention(nn.Module):
         )  # sigmoid(4.5) ≈ 0.989
         self.threshold_for_deterministic = None
 
-
         self.context_window_toggle = context_window_toggle
 
         self.toggle_type = config.toggle_type
         self.sink_blocks = (config.sink_size + 127) // 128
         self.local_blocks = (config.local_window_size + 127) // 128
-        
+
         self.retrieval_mode = config.retrieval_mode
 
         if self.retrieval_mode == "xattn" or self.toggle_type == "streaming":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+
             self.streaming_info_kwargs = {
                 "sink_block_num": self.sink_blocks,
                 "local_block_num": self.local_blocks,
@@ -743,6 +742,7 @@ class Qwen3Attention(nn.Module):
             self.topk_k_chunk = int(os.environ.get("TOPK_K_CHUNK", 4096))
         elif self.toggle_type == "xattn" or self.toggle_type == "full":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+
             self.streaming_info_kwargs = {
                 "sink_block_num": self.sink_blocks,
                 "local_block_num": self.local_blocks,
@@ -811,7 +811,7 @@ class Qwen3Attention(nn.Module):
             .transpose(1, 2)
             .contiguous()
         )
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -830,15 +830,14 @@ class Qwen3Attention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
         k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
         v = self.v_proj(hidden_states).view(hidden_shape)
         has_layer_past = past_key_value is not None
-        
-        bsz, _, kv_heads= k.shape[:3]
+
+        bsz, _, kv_heads = k.shape[:3]
         if not has_layer_past:
             if not self.config.enable_ada_sparsity:
                 z_kv = get_mask(
@@ -853,12 +852,14 @@ class Qwen3Attention(nn.Module):
                 #     res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids)
                 # else:
                 #     res = self.mask_allocator(k, None, range_ids, task_ids)
-                
+
                 z_kv_batch = torch.zeros(bsz, kv_heads, 1, device=q.device)
                 # z_constrast = res['decisions']
                 # breakpoint()
                 if z_kv_batch.shape[-2] == self.num_key_value_heads:
-                    z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, 1)
+                    z_kv_batch = z_kv_batch.repeat_interleave(
+                        self.num_key_value_groups, 1
+                    )
         else:
             # decode
             z_kv_batch = past_key_value[2]
@@ -873,7 +874,7 @@ class Qwen3Attention(nn.Module):
             past_len += position_ids.min()
 
         q, k = self.rotary_emb(q, k, past_len, unpadded_lengths)
-        
+
         kv = torch.stack([k, v], -3)
 
         # Cache QKV values
@@ -899,21 +900,30 @@ class Qwen3Attention(nn.Module):
             kv = past_kv[:, :new_len]
         else:
             past_kv = kv
-        past_key_value = (past_kv, past_len + q.size(1), z_kv_batch) if use_cache else None
-             
-        if not has_layer_past:
+        past_key_value = (
+            (past_kv, past_len + q.size(1), z_kv_batch) if use_cache else None
+        )
 
+        if not has_layer_past:
             is_vlen_input = (q.dim() == 3) and (unpadded_lengths is not None)
 
             if is_vlen_input:
                 k = k.repeat_interleave(self.num_key_value_groups, dim=1)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=1)
-                q, k, v = q.transpose(0, 1).contiguous(), k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous() 
+                q, k, v = (
+                    q.transpose(0, 1).contiguous(),
+                    k.transpose(0, 1).contiguous(),
+                    v.transpose(0, 1).contiguous(),
+                )
             else:
                 k = k.repeat_interleave(self.num_key_value_groups, dim=2)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=2)
-                q, k, v = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous() 
-                
+                q, k, v = (
+                    q.transpose(1, 2).contiguous(),
+                    k.transpose(1, 2).contiguous(),
+                    v.transpose(1, 2).contiguous(),
+                )
+
             stride = self.xattn_params["stride"]
             threshold = self.xattn_params["threshold"]
             norm = self.xattn_params["norm"]
@@ -932,13 +942,17 @@ class Qwen3Attention(nn.Module):
                 )
 
             else:
-                bsz,_,seqlen,_ = q.size()
+                bsz, _, seqlen, _ = q.size()
                 if not torch.is_tensor(seqlen):
                     seqlen = torch.tensor(seqlen, dtype=torch.int32, device=q.device)
                 max_seqlen = torch.max(seqlen).item()
 
                 cu_seqlens = torch.arange(
-                    0, (bsz + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device
+                    0,
+                    (bsz + 1) * seqlen,
+                    step=seqlen,
+                    dtype=torch.int32,
+                    device=q.device,
                 )
                 unpadded_lengths = (cu_seqlens, max_seqlen)
 
@@ -949,18 +963,22 @@ class Qwen3Attention(nn.Module):
                     head_mask_type = torch.where(
                         z_kv_batch[0, :, 0] == 1,
                         torch.tensor(0, dtype=torch.int, device=z_kv_batch.device),
-                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device)
+                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
                     )
                 elif self.retrieval_mode == "xattn" and self.toggle_type == "streaming":
                     head_mask_type = torch.where(
                         z_kv_batch[0, :, 0] == 1,
                         torch.tensor(1, dtype=torch.int, device=z_kv_batch.device),
-                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device)
+                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
                     )
                 elif self.retrieval_mode == "xattn" and self.toggle_type == "xattn":
-                    head_mask_type = torch.ones_like(z_kv_batch[0, :, 0], dtype=torch.int)
+                    head_mask_type = torch.ones_like(
+                        z_kv_batch[0, :, 0], dtype=torch.int
+                    )
                 elif self.retrieval_mode == "full" and self.toggle_type == "full":
-                    head_mask_type = 1 - torch.ones_like(z_kv_batch[0, :, 0], dtype=torch.int)
+                    head_mask_type = 1 - torch.ones_like(
+                        z_kv_batch[0, :, 0], dtype=torch.int
+                    )
                 else:
                     raise SamplerConditionError(
                         f"retrieval_mode: {self.retrieval_mode} and toggle_type: {self.toggle_type} is not supported"
@@ -1006,18 +1024,25 @@ class Qwen3Attention(nn.Module):
                     causal=True,
                     return_attn_probs=False,
                 )
-        
-        
+
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))
 
         attn_weights = None
-        
+
         # if not has_layer_past:
         #     print(f"task_ids: {task_ids}, head allocate: {[x.tolist() for x in z_kv_batch]}")
-        
+
         # z: [B, H, 1] -> [B, H] -> [B]
-        return z_kv_batch.squeeze(-1).sum(dim=-1), None, None, None, attn_output, attn_weights, past_key_value
+        return (
+            z_kv_batch.squeeze(-1).sum(dim=-1),
+            None,
+            None,
+            None,
+            attn_output,
+            attn_weights,
+            past_key_value,
+        )
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -1089,7 +1114,15 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        z_sum, entropy, pooled_hidden_states, z_constrast, hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        (
+            z_sum,
+            entropy,
+            pooled_hidden_states,
+            z_constrast,
+            hidden_states,
+            self_attn_weights,
+            present_key_value,
+        ) = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1100,7 +1133,7 @@ class Qwen3DecoderLayer(nn.Module):
             seq_parallel_group=seq_parallel_group,
             segment_ids=segment_ids,
             range_ids=range_ids,
-            task_ids=task_ids
+            task_ids=task_ids,
         )
         hidden_states = residual + hidden_states
 
@@ -1110,7 +1143,13 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (z_sum, entropy, pooled_hidden_states, z_constrast, hidden_states,)
+        outputs = (
+            z_sum,
+            entropy,
+            pooled_hidden_states,
+            z_constrast,
+            hidden_states,
+        )
 
         if output_attentions:
             outputs += (self_attn_weights,)
@@ -1173,7 +1212,7 @@ class BaseModelOutputWithPastAndSparsity(ModelOutput):
     head_contrastive_loss: Optional[torch.FloatTensor] = None
     log_z_loss: Optional[torch.FloatTensor] = None
     head_entropy: Optional[torch.FloatTensor] = None
-    
+
 
 class Qwen3Model(Qwen3PreTrainedModel):
     """
@@ -1218,7 +1257,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 torch.tensor([0.0], dtype=self._dtype)
             )
         self.sparsity_lambda_2 = nn.Parameter(torch.tensor([0.0], dtype=self._dtype))
-        
+
         if self.config.enable_lambda_task:
             self.num_tasks = 5
             self.sparsity_lambda1_task = nn.Parameter(
@@ -1231,7 +1270,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
             self.sparsity_lambda1_task = None
             self.sparsity_lambda2_task = None
 
-
         self.threshold_for_deterministic = None
         if config.suggested_sparsity is not None:
             self.round_masks_for_sparsity(config.suggested_sparsity)
@@ -1243,8 +1281,12 @@ class Qwen3Model(Qwen3PreTrainedModel):
     @torch.no_grad()
     def reset_parameters(self):
         if self.config.enable_lambda_task:
-            self.sparsity_lambda1_task.data.copy_(torch.rand_like(self.sparsity_lambda1_task) * 0.5)
-            self.sparsity_lambda2_task.data.copy_(torch.rand_like(self.sparsity_lambda2_task) * 0.5)
+            self.sparsity_lambda1_task.data.copy_(
+                torch.rand_like(self.sparsity_lambda1_task) * 0.5
+            )
+            self.sparsity_lambda2_task.data.copy_(
+                torch.rand_like(self.sparsity_lambda2_task) * 0.5
+            )
 
     @torch.no_grad()
     def set_threshold_for_deterministic(self, threshold_for_deterministic):
@@ -1461,22 +1503,28 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     task_ids=task_ids,
                 )
 
-            z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = layer_outputs[0], layer_outputs[1], layer_outputs[2], layer_outputs[3], layer_outputs[4]
+            z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = (
+                layer_outputs[0],
+                layer_outputs[1],
+                layer_outputs[2],
+                layer_outputs[3],
+                layer_outputs[4],
+            )
 
             z_layer_sum = z_layer_sum.to(hidden_states.device)
-            
+
             if z_sum is None:
                 z_sum = z_layer_sum
             else:
                 z_sum = z_sum.to(z_layer_sum.device)
                 z_sum = z_sum + z_layer_sum
-            
+
             if use_cache:
                 next_decoder_cache += (layer_outputs[6 if output_attentions else 5],)
 
             if output_attentions:
                 all_self_attns += (layer_outputs[5],)
-                
+
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
@@ -1485,7 +1533,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         model_sparsity = 1 - (z_sum / self.total_num_heads)
-        
+
         if not return_dict:
             # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)
             return tuple(
@@ -1504,7 +1552,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-            model_sparsity=model_sparsity
+            model_sparsity=model_sparsity,
         )
 
 
@@ -1537,6 +1585,7 @@ class CausalLMOutputWithPastAndSparsity(ModelOutput):
     task_ids: Optional[torch.FloatTensor] = None
     log_z_loss: Optional[torch.FloatTensor] = None
     head_entropy: Optional[torch.FloatTensor] = None
+
 
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
@@ -1718,7 +1767,9 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             max_seqlen = seq_lengths.max().item()
 
             unpadded_lengths = (cu_seqlens, max_seqlen)
-        elif attention_mask is not None and not use_cache and attention_mask.size(0) != 1:
+        elif (
+            attention_mask is not None and not use_cache and attention_mask.size(0) != 1
+        ):
             if inputs_embeds is not None:
                 bsz = inputs_embeds.size(0)
                 inputs_embeds, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
@@ -1727,7 +1778,9 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             else:
                 bsz = input_ids.size(0)
                 tmp = input_ids.unsqueeze(-1)
-                input_ids, unpad_indices, cu_seqlens, max_seqlen = unpad_input(tmp, attention_mask)
+                input_ids, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
+                    tmp, attention_mask
+                )
                 max_seqlen_for_pad_seq = attention_mask.size(-1)
                 input_ids = input_ids.squeeze(-1)
             unpadded_lengths = (cu_seqlens, max_seqlen)
@@ -1755,19 +1808,23 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
 
         if input_ids.shape[1] > 1 and use_cache:
             self.prefill_sparsity = outputs.model_sparsity.detach()
-        
+
         hidden_states = outputs[0]
         if seq_lengths is None and unpadded_lengths is not None:
-            hidden_states = pad_input(hidden_states, unpad_indices, bsz, max_seqlen_for_pad_seq)
+            hidden_states = pad_input(
+                hidden_states, unpad_indices, bsz, max_seqlen_for_pad_seq
+            )
         if labels is not None or shifted_labels is not None:
             if shifted_labels is not None:
                 labels = shifted_labels.reshape(-1)
                 hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
             else:
                 labels = labels[..., 1:].reshape(-1).contiguous()
-                hidden_states = hidden_states[..., :-1, :].reshape(
-                    -1, hidden_states.size(-1)
-                ).contiguous()
+                hidden_states = (
+                    hidden_states[..., :-1, :]
+                    .reshape(-1, hidden_states.size(-1))
+                    .contiguous()
+                )
             if self.logit_block_size > 0:
                 num_valid_labels = (labels != -100).sum()
                 hidden_states = torch.split(hidden_states, self.logit_block_size, dim=0)
@@ -1808,7 +1865,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-        
+
         return CausalLMOutputWithPastAndSparsity(
             loss=loss,
             logits=logits,

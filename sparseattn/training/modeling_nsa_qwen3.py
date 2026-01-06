@@ -3,7 +3,13 @@
 import math
 import torch
 import torch.nn as nn
-from transformers.models.qwen3.modeling_qwen3 import Qwen3PreTrainedModel, Qwen3Model, QWEN3_INPUTS_DOCSTRING, _CONFIG_FOR_DOC,KwargsForCausalLM
+from transformers.models.qwen3.modeling_qwen3 import (
+    Qwen3PreTrainedModel,
+    Qwen3Model,
+    QWEN3_INPUTS_DOCSTRING,
+    _CONFIG_FOR_DOC,
+    KwargsForCausalLM,
+)
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.generation import GenerationMixin
 from typing import Optional, Tuple, Union
@@ -29,7 +35,10 @@ from transformers.utils import (
 from transformers.utils.deprecation import deprecate_kwarg
 
 
-from .block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import Qwen3NSA, Qwen3NSA_prefill
+from .block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import (
+    Qwen3NSA,
+    Qwen3NSA_prefill,
+)
 
 
 class NSAQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
@@ -44,7 +53,7 @@ class NSAQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         config._attn_implementation = "flash_attention_2"
-        config.compress_type = "linear"#"avgpool","weightedpool"
+        config.compress_type = "linear"  # "avgpool","weightedpool"
         config.kernel_size = 32
         config.kernel_stride = 16
         config.block_size = 64
@@ -54,12 +63,12 @@ class NSAQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         config.window_size = 512
 
         for layer_idx, layer in enumerate(self.model.layers):
-             # Create new NSA layer with same config
+            # Create new NSA layer with same config
             new_attn = Qwen3NSA_prefill(
                 config=config,
-                layer_idx=layer_idx # Pass layer index
+                layer_idx=layer_idx,  # Pass layer index
             )
-             # Assign the new NSA layer
+            # Assign the new NSA layer
             layer.self_attn = new_attn
 
         # Initialize weights and apply final processing
@@ -86,7 +95,9 @@ class NSAQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     @can_return_tuple
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(
+        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+    )
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -133,9 +144,15 @@ class NSAQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -154,12 +171,21 @@ class NSAQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(
+                logits=logits,
+                labels=labels,
+                vocab_size=self.config.vocab_size,
+                **kwargs,
+            )
 
         return CausalLMOutputWithPast(
             loss=loss,

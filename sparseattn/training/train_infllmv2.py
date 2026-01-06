@@ -15,7 +15,12 @@ from transformers import (
 
 
 import torch
-from transformers import LlamaForCausalLM, AutoTokenizer, AutoModelForCausalLM, Qwen3ForCausalLM
+from transformers import (
+    LlamaForCausalLM,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Qwen3ForCausalLM,
+)
 from .modeling_infllmv2_qwen3 import infllmv2_Qwen3ForCausalLM, infllmv2_Qwen3Config
 
 from .lh_trainer_infllmv2 import Trainer as infllmv2Trainer
@@ -34,9 +39,8 @@ import json
 from csv import reader
 
 
-
-
 logger = logging.getLogger(__name__)
+
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -94,7 +98,6 @@ def main():
         config=config,
         torch_dtype=torch.bfloat16,
     )
-            
 
     if (
         script_args.tokenizer_name is not None
@@ -148,9 +151,10 @@ def main():
         }
 
     # data_collator = DataCollator(tokenizer, data_args)
-    data_collator = PackingDataCollator(tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens)
+    data_collator = PackingDataCollator(
+        tokenizer, data_args, max_seq_len=data_args.per_device_max_tokens
+    )
     assert training_args.max_steps is not None, "max_steps must be set!"
-
 
     trainer = infllmv2Trainer(
         model=model,
@@ -161,7 +165,6 @@ def main():
         data_collator=data_collator,
         log_loss=script_args.should_log_loss,
     )
-
 
     if trainer.is_fsdp_enabled:
         # Identify which modules have "_fsdp_wrap" attribute set to True and wrap these

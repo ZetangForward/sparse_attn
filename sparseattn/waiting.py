@@ -16,7 +16,10 @@ def main():
         description="Wait for idle GPUs, then sequentially execute multiple bash scripts and save logs."
     )
     parser.add_argument(
-        "--gpus", type=int, default=8, help="Number of idle GPUs to wait for (default: 1)"
+        "--gpus",
+        type=int,
+        default=8,
+        help="Number of idle GPUs to wait for (default: 1)",
     )
     parser.add_argument(
         "scripts", nargs="+", help="Paths to bash scripts to execute sequentially"
@@ -67,7 +70,9 @@ def main():
         if process.returncode == 0:
             print(f"\n[INFO] ✅ Finished successfully: {script}\n")
         else:
-            print(f"\n[ERROR] ❌ Script failed ({script}), return code {process.returncode}\n")
+            print(
+                f"\n[ERROR] ❌ Script failed ({script}), return code {process.returncode}\n"
+            )
 
     print("[INFO] All done.")
 

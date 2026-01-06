@@ -36,13 +36,17 @@ from typing import Optional, Tuple, Union
 
 from einops import rearrange, repeat
 
+
 def rotate_half(x, interleaved=False):
     if not interleaved:
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
     else:
         x1, x2 = x[..., ::2], x[..., 1::2]
-        return rearrange(torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2)
+        return rearrange(
+            torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2
+        )
+
 
 def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
     """
@@ -51,17 +55,26 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
     """
     ro_dim = cos.shape[-1] * 2
     assert ro_dim <= x.shape[-1]
-    cos = repeat(cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
-    sin = repeat(sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    cos = repeat(
+        cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
+    )
+    sin = repeat(
+        sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
+    )
     return torch.cat(
-        [x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]],
+        [
+            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
+            x[..., ro_dim:],
+        ],
         dim=-1,
-    ) 
+    )
+
 
 # mode="max-autotune" 会尝试生成最快的 Triton 代码
 # fullgraph=True 告诉编译器这里没有 Python 控制流，可以全图优化
 # fast_apply_rotary = torch.compile(apply_rotary_emb_torch, mode="max-autotune") FIXME: 不能和 Gradient Checkpointing 混用
 fast_apply_rotary = apply_rotary_emb_torch
+
 
 class SeqAllToAll(torch.autograd.Function):
     @staticmethod
@@ -79,17 +92,17 @@ class SeqAllToAll(torch.autograd.Function):
         ]
         output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
         # if(dist.get_rank() == 0):
-            # 打印input_list中每个张量的shape
-            # print("\n\n==============================================\n \
-                # input_list 中各张量shape: ", [t.shape for t in input_list])
-            # 打印output_list中每个张量的shape
-            # print("output_list 中各张量shape: ", [t.shape for t in output_list])
-            # （可选）打印列表第一个张量的shape（代表所有分片的shape，因为torch.tensor_split是均分）
-            # print("input_list 第一个张量shape: ", input_list[0].shape)
-            # print("output_list 第一个张量shape: ", output_list[0].shape)
+        # 打印input_list中每个张量的shape
+        # print("\n\n==============================================\n \
+        # input_list 中各张量shape: ", [t.shape for t in input_list])
+        # 打印output_list中每个张量的shape
+        # print("output_list 中各张量shape: ", [t.shape for t in output_list])
+        # （可选）打印列表第一个张量的shape（代表所有分片的shape，因为torch.tensor_split是均分）
+        # print("input_list 第一个张量shape: ", input_list[0].shape)
+        # print("output_list 第一个张量shape: ", output_list[0].shape)
 
-            # print("scatter_idx:", scatter_idx)
-            # print("gather_idx:", gather_idx)
+        # print("scatter_idx:", scatter_idx)
+        # print("gather_idx:", gather_idx)
         dist.all_to_all(output_list, input_list, group=group)
 
         return torch.cat(output_list, dim=gather_idx).contiguous()
@@ -146,11 +159,12 @@ class DistributedAttention(torch.nn.Module):
         key_values_heads = SeqAllToAll.apply(key_values, scatter_idx, gather_idx, group)
 
         # out shape : e.g., [s:h/p:]
-        
+
         output_heads = self.local_attn(query_heads, key_values_heads, *args, **kwargs)
 
         # out e.g., [s/p::h]
         return SeqAllToAll.apply(output_heads, gather_idx, scatter_idx, group)
+
 
 """PyTorch Qwen3 model."""
 
@@ -216,18 +230,18 @@ class PawQwen3Config(Qwen3Config):
         # Streaming
         self.toggle_type = kwargs.pop("toggle_type", "streaming")
         self.sink_size = kwargs.pop("sink_size", 128)
-        
+
         # retrieval_mode
         self.retrieval_mode = kwargs.pop("retrieval_mode", "full")
-        
+
         # Head Router
         self.pooling_mode = kwargs.pop("pooling_mode", "first_token")
-        
+
         self.use_task_emb_for_mask = kwargs.pop("use_task_emb_for_mask", False)
 
         # TriangleMix
         self.triangle_n_last = kwargs.pop("triangle_n_last", 128)
-        
+
         # ada-sparsity
         self.enable_ada_sparsity = kwargs.pop("enable_ada_sparsity", False)
 
@@ -253,7 +267,7 @@ class PawQwen3Config(Qwen3Config):
         self.pooling_seq = kwargs.pop("pooling_seq", True)
         self.enable_lambda_task = kwargs.pop("enable_lambda_task", False)
         self.use_softmax = kwargs.pop("use_softmax", False)
-        
+
         super().__init__(*args, **kwargs)
 
 
@@ -763,11 +777,23 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
+
 class AttentionRouter(nn.Module):
-    def __init__(self, input_dim, num_key_value_heads, d_feature=128,
-                 use_task_emb=False, temp=0.2, hard=False, 
-                 router_type='mlp', use_gumbel=True, learnable_temp=False,
-                 dropout=0.1, use_softmax=True, pooling_mode='ctx_q'):
+    def __init__(
+        self,
+        input_dim,
+        num_key_value_heads,
+        d_feature=128,
+        use_task_emb=False,
+        temp=0.2,
+        hard=False,
+        router_type="mlp",
+        use_gumbel=True,
+        learnable_temp=False,
+        dropout=0.1,
+        use_softmax=True,
+        pooling_mode="ctx_q",
+    ):
         super().__init__()
         self.num_kv = num_key_value_heads
         self.use_task_emb = use_task_emb
@@ -777,15 +803,15 @@ class AttentionRouter(nn.Module):
         self.pooling_mode = pooling_mode
         self.use_softmax = use_softmax
 
-        self.cls_feat_extractor = nn.Sequential( 
+        self.cls_feat_extractor = nn.Sequential(
             nn.Linear(d_feature, 4 * d_feature),
             nn.SiLU(),
             nn.Linear(4 * d_feature, d_feature),
         )
-        
+
         if self.use_softmax:
             logger.info("using softmax for attention router")
-            self.cls_router_head_agnostic = nn.Sequential( 
+            self.cls_router_head_agnostic = nn.Sequential(
                 nn.Linear(d_feature, 4 * d_feature),
                 nn.SiLU(),
                 nn.Linear(4 * d_feature, d_feature),
@@ -794,15 +820,15 @@ class AttentionRouter(nn.Module):
             )
         else:
             logger.info("use sigmoid function for attention router")
-            self.cls_router_head_agnostic = nn.Sequential( 
+            self.cls_router_head_agnostic = nn.Sequential(
                 nn.Linear(d_feature, 4 * d_feature),
                 nn.SiLU(),
                 nn.Linear(4 * d_feature, d_feature),
                 nn.SiLU(),
                 nn.Linear(d_feature, 1),
-                nn.LayerNorm([self.num_kv, 1], elementwise_affine=False)
+                nn.LayerNorm([self.num_kv, 1], elementwise_affine=False),
             )
-        
+
         if self.use_task_emb:
             self.task_embedding = nn.Embedding(4, d_feature)
 
@@ -812,23 +838,26 @@ class AttentionRouter(nn.Module):
         else:
             self.register_buffer("log_temp", torch.log(torch.tensor(temp)))
             self.tau = torch.exp(self.log_temp).clamp(0.3, 1.0)
-    
+
     def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.cls_router_head_agnostic[0].weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(
+            self.cls_router_head_agnostic[0].weight, a=math.sqrt(5)
+        )
         nn.init.zeros_(self.cls_router_head_agnostic[0].bias)
-        
-        nn.init.kaiming_uniform_(self.cls_router_head_agnostic[2].weight, a=math.sqrt(5))
+
+        nn.init.kaiming_uniform_(
+            self.cls_router_head_agnostic[2].weight, a=math.sqrt(5)
+        )
         nn.init.zeros_(self.cls_router_head_agnostic[2].bias)
 
         nn.init.zeros_(self.cls_router_head_agnostic[4].weight)
         nn.init.constant_(self.cls_router_head_agnostic[4].bias, 1.0)
 
-        
     def forward(
-        self, 
-        x, 
+        self,
+        x,
         cu_seq_len=None,
-        range_ids: torch.Tensor = None, 
+        range_ids: torch.Tensor = None,
         task_ids: Optional[torch.Tensor] = None,
         current_tau: Optional[torch.Tensor] = None,
     ):
@@ -837,7 +866,7 @@ class AttentionRouter(nn.Module):
         cu_seq_len: [0, seq_len_1, seq_len_2 + seq_len_1, ...]
         range_ids: [B, 6]
         task_ids: [B]
-        
+
         return:
             {
               'decisions': [B, H],
@@ -847,45 +876,49 @@ class AttentionRouter(nn.Module):
             }
         """
         bsz = (cu_seq_len.shape[0] - 1) if cu_seq_len is not None else 1
-        
+
         # 目前所有支持的pooling 方法
-        if self.pooling_mode == 'first_token':
+        if self.pooling_mode == "first_token":
             if cu_seq_len is not None:
                 pooled_latent = self._segment_pooling(
-                    x, range_ids, ['first_token'], cu_seq_len)  # [B, H, D]
+                    x, range_ids, ["first_token"], cu_seq_len
+                )  # [B, H, D]
             else:
                 pooled_latent = self._segment_pooling_single_batch(
-                    x, range_ids, ['first_token'])
-        elif self.pooling_mode == 'q':
+                    x, range_ids, ["first_token"]
+                )
+        elif self.pooling_mode == "q":
             if cu_seq_len is not None:
                 pooled_latent = self._segment_pooling(
-                    x, range_ids, ['q'], cu_seq_len)  # [B, H, D]
+                    x, range_ids, ["q"], cu_seq_len
+                )  # [B, H, D]
             else:
-                pooled_latent = self._segment_pooling_single_batch(
-                    x, range_ids, ['q'])
-        elif self.pooling_mode == 'ctx_q':
+                pooled_latent = self._segment_pooling_single_batch(x, range_ids, ["q"])
+        elif self.pooling_mode == "ctx_q":
             if cu_seq_len is not None:
                 pooled_latent = self._segment_pooling(
-                    x, range_ids, ['ctx_q'], cu_seq_len)  # [B, H, D]
+                    x, range_ids, ["ctx_q"], cu_seq_len
+                )  # [B, H, D]
             else:
                 pooled_latent = self._segment_pooling_single_batch(
-                    x, range_ids, ['ctx_q'])
+                    x, range_ids, ["ctx_q"]
+                )
 
         else:
             raise ValueError(f"Unknown pooling_mode: {self.pooling_mode}")
-        
+
         if self.use_task_emb:
             if self.training:
-                task_emb = self.task_embedding(task_ids) # [B, D]
-                task_emb_expanded = task_emb.unsqueeze(1) 
+                task_emb = self.task_embedding(task_ids)  # [B, D]
+                task_emb_expanded = task_emb.unsqueeze(1)
                 pooled_latent = pooled_latent + task_emb_expanded
             else:
                 pooled_latent = pooled_latent
-                                
+
         pooled_hidden_states = self.cls_feat_extractor(pooled_latent)
 
         binary_logits = self.cls_router_head_agnostic(pooled_hidden_states)
-        
+
         if self.learnable_temp:
             tau = torch.exp(self.log_temp).clamp(0.3, 1.0)
         else:
@@ -896,7 +929,7 @@ class AttentionRouter(nn.Module):
             u = torch.rand_like(binary_logits)
             eps = 1e-8
             g = -torch.log(-torch.log(u + eps) + eps)
-            
+
             if not self.use_softmax:
                 z_soft = torch.sigmoid((binary_logits + g) / tau)
                 z_hard = (z_soft > 0.5).float()
@@ -906,7 +939,9 @@ class AttentionRouter(nn.Module):
                 entropy = entropy_per_head.mean(dim=1)
             else:
                 z_soft = F.softmax((binary_logits + g) / tau, dim=-1)
-                z_hard = torch.zeros_like(z_soft).scatter_(-1, z_soft.argmax(-1, keepdim=True), 1.0)
+                z_hard = torch.zeros_like(z_soft).scatter_(
+                    -1, z_soft.argmax(-1, keepdim=True), 1.0
+                )
                 z = z_hard + (z_soft - z_soft.detach())  # [B, H, 2]
                 z = z[..., 1]  # [B, H]
                 z_soft = z_soft[..., 1]
@@ -918,7 +953,7 @@ class AttentionRouter(nn.Module):
         else:
             # 推理阶段：直接根据 Logit 确定 (相当于 tau -> 0)
             # 或者也可以用 sigmoid(logit/tau) > 0.5，但在 deterministic 模式下 logit > 0 即可
-            # z_soft = torch.sigmoid(binary_logits / tau) 
+            # z_soft = torch.sigmoid(binary_logits / tau)
             if not self.use_softmax:
                 z_soft = torch.sigmoid(binary_logits / tau)
                 z_hard = (z_soft > 0.5).float()
@@ -927,27 +962,38 @@ class AttentionRouter(nn.Module):
                 z_soft = F.softmax(binary_logits / tau, dim=-1)
                 z_hard = z_soft.argmax(-1)
                 z = z_hard
-        
+
         return {
-            'pooled_hidden_states': pooled_hidden_states, # [B, H, D]
-            'decisions': z_soft,
-            'hard_decisions': z_hard,
-            'sparse_mask': z, # [B, H], 这是一个 STE Tensor
-            'logits': binary_logits,
-            'entropy': entropy # [B]
+            "pooled_hidden_states": pooled_hidden_states,  # [B, H, D]
+            "decisions": z_soft,
+            "hard_decisions": z_hard,
+            "sparse_mask": z,  # [B, H], 这是一个 STE Tensor
+            "logits": binary_logits,
+            "entropy": entropy,  # [B]
         }
-        
-    def _segment_pooling_single_batch(self, pooled_input: torch.Tensor, range_ids: torch.Tensor, segments: list) -> torch.Tensor:
+
+    def _segment_pooling_single_batch(
+        self, pooled_input: torch.Tensor, range_ids: torch.Tensor, segments: list
+    ) -> torch.Tensor:
         B, S, H, D = pooled_input.shape
         pooled_features_list = []
-        
-        POOL_MAP = {'first_token': (0, 1),'ctx': (2, 3), 'q': (4, 5), 'a': (6, 7), 'ctx_q': (2, 5)} 
+
+        POOL_MAP = {
+            "first_token": (0, 1),
+            "ctx": (2, 3),
+            "q": (4, 5),
+            "a": (6, 7),
+            "ctx_q": (2, 5),
+        }
         for i in range(B):
             sample_features = []
 
             for seg in segments:
                 start_idx, end_idx = POOL_MAP[seg]
-                start, end = range_ids[i, start_idx:end_idx + 1].tolist()[0], range_ids[i, start_idx:end_idx + 1].tolist()[-1]
+                start, end = (
+                    range_ids[i, start_idx : end_idx + 1].tolist()[0],
+                    range_ids[i, start_idx : end_idx + 1].tolist()[-1],
+                )
                 if end >= start:
                     # seg_slice = pooled_input[i, start : end + 1, :, :]
                     start_slice = pooled_input[i, start : start + 100, :, :]
@@ -956,23 +1002,24 @@ class AttentionRouter(nn.Module):
                     seg_pooled = combined_slice.mean(dim=0)  # [H, D]
                 else:
                     seg_pooled = torch.zeros(H, D, device=pooled_input.device)
-                
+
                 sample_features.append(seg_pooled)
 
             if sample_features:
-                combined_feature = torch.stack(sample_features, dim=0).mean(dim=0) # [H, D]
+                combined_feature = torch.stack(sample_features, dim=0).mean(
+                    dim=0
+                )  # [H, D]
             else:
                 combined_feature = torch.zeros(H, D, device=pooled_input.device)
-                
+
             pooled_features_list.append(combined_feature)
 
-        return torch.stack(pooled_features_list, dim=0) # [B, H, D]
-        
-        
+        return torch.stack(pooled_features_list, dim=0)  # [B, H, D]
+
     def _segment_pooling(
-        self, 
-        x: torch.Tensor, 
-        range_ids: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        range_ids: torch.Tensor,
         segments: list[str],
         cu_seq_len: torch.Tensor,
     ) -> torch.Tensor:
@@ -987,7 +1034,13 @@ class AttentionRouter(nn.Module):
         Returns:
             torch.Tensor: _description_
         """
-        POOL_MAP = {'first_token': (0, 1),'ctx': (2, 3), 'q': (4, 5), 'a': (6, 7), 'ctx_q': (2, 5)} 
+        POOL_MAP = {
+            "first_token": (0, 1),
+            "ctx": (2, 3),
+            "q": (4, 5),
+            "a": (6, 7),
+            "ctx_q": (2, 5),
+        }
 
         B = cu_seq_len.shape[0] - 1
         H, D = x.shape[1:]
@@ -998,11 +1051,16 @@ class AttentionRouter(nn.Module):
             x_s, x_e = cu_seq_len[i], cu_seq_len[i + 1]
             for seg in segments:
                 start_idx, end_idx = POOL_MAP[seg]
-                start, end = range_ids[i, start_idx:end_idx + 1].tolist()[0], range_ids[i, start_idx:end_idx + 1].tolist()[-1]
+                start, end = (
+                    range_ids[i, start_idx : end_idx + 1].tolist()[0],
+                    range_ids[i, start_idx : end_idx + 1].tolist()[-1],
+                )
                 if end >= start:
-                    prefix_seg_slice = x[x_s + start: x_s + start + 100,  : , :]
-                    suffix_seg_slice = x[x_s + end - 99: x_s + end + 1,  : , :]
-                    combined_slice = torch.cat((prefix_seg_slice, suffix_seg_slice), dim=0)
+                    prefix_seg_slice = x[x_s + start : x_s + start + 100, :, :]
+                    suffix_seg_slice = x[x_s + end - 99 : x_s + end + 1, :, :]
+                    combined_slice = torch.cat(
+                        (prefix_seg_slice, suffix_seg_slice), dim=0
+                    )
                     seg_pooled = combined_slice.mean(dim=0)  # [H, D]
                 else:
                     seg_pooled = torch.zeros(H, D, device=x.device)
@@ -1010,14 +1068,15 @@ class AttentionRouter(nn.Module):
                 sample_features.append(seg_pooled)
 
             if sample_features:
-                combined_feature = torch.stack(sample_features, dim=0).mean(dim=0) # [H, D]
+                combined_feature = torch.stack(sample_features, dim=0).mean(
+                    dim=0
+                )  # [H, D]
             else:
                 combined_feature = torch.zeros(H, D, device=x.device)
 
             pooled_features_list.append(combined_feature)
 
-        return torch.stack(pooled_features_list, dim=0) # [B, H, D]
-
+        return torch.stack(pooled_features_list, dim=0)  # [B, H, D]
 
 
 class Qwen3Attention(nn.Module):
@@ -1095,7 +1154,7 @@ class Qwen3Attention(nn.Module):
             temp=getattr(config, "mask_temp", 1.0),
             hard=getattr(config, "mask_hard_sample", False),
             pooling_mode=getattr(config, "pooling_mode", "first_token"),
-            use_softmax=getattr(config, "use_softmax", False)
+            use_softmax=getattr(config, "use_softmax", False),
         )
 
         self.context_window_toggle = context_window_toggle
@@ -1103,11 +1162,12 @@ class Qwen3Attention(nn.Module):
         self.toggle_type = config.toggle_type
         self.sink_blocks = (config.sink_size + 127) // 128
         self.local_blocks = (config.local_window_size + 127) // 128
-        
+
         self.retrieval_mode = config.retrieval_mode
 
         if self.retrieval_mode == "xattn":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+
             self.streaming_info_kwargs = {
                 "sink_block_num": self.sink_blocks,
                 "local_block_num": self.local_blocks,
@@ -1151,6 +1211,7 @@ class Qwen3Attention(nn.Module):
             self.topk_k_chunk = int(os.environ.get("TOPK_K_CHUNK", 4096))
         elif self.toggle_type == "xattn" or self.retrieval_mode == "xattn":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
+
             self.streaming_info_kwargs = {
                 "sink_block_num": self.sink_blocks,
                 "local_block_num": self.local_blocks,
@@ -1223,7 +1284,7 @@ class Qwen3Attention(nn.Module):
     def interpolated_attention(self, q, kv, k, v, unpadded_lengths, z):
         cu_seqlens, max_seqlen = unpadded_lengths
         total_valid_tokens = cu_seqlens[-1].item()
-            
+
         if q.shape[0] > total_valid_tokens:
             q = q[:total_valid_tokens]
             # 注意：KV Packed 需要小心处理
@@ -1234,7 +1295,7 @@ class Qwen3Attention(nn.Module):
                 k = k[:total_valid_tokens]
             if v is not None:
                 v = v[:total_valid_tokens]
-                
+
         if self.retrieval_mode == "full":
             if unpadded_lengths is not None:
                 # varlen, ignore padding tokens, efficient for large batch with many paddings
@@ -1266,12 +1327,20 @@ class Qwen3Attention(nn.Module):
             if is_vlen_input:
                 k = k.repeat_interleave(self.num_key_value_groups, dim=1)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=1)
-                q, k, v = q.transpose(0, 1).contiguous(), k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous() 
+                q, k, v = (
+                    q.transpose(0, 1).contiguous(),
+                    k.transpose(0, 1).contiguous(),
+                    v.transpose(0, 1).contiguous(),
+                )
             else:
                 k = k.repeat_interleave(self.num_key_value_groups, dim=2)
                 v = v.repeat_interleave(self.num_key_value_groups, dim=2)
-                q, k, v = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous() 
-                
+                q, k, v = (
+                    q.transpose(1, 2).contiguous(),
+                    k.transpose(1, 2).contiguous(),
+                    v.transpose(1, 2).contiguous(),
+                )
+
             stride = self.xattn_params["stride"]
             threshold = self.xattn_params["threshold"]
             norm = self.xattn_params["norm"]
@@ -1290,13 +1359,17 @@ class Qwen3Attention(nn.Module):
                 )
 
             else:
-                bsz,_,seqlen,_ = q.size()
+                bsz, _, seqlen, _ = q.size()
                 if not torch.is_tensor(seqlen):
                     seqlen = torch.tensor(seqlen, dtype=torch.int32, device=q.device)
                 max_seqlen = torch.max(seqlen).item()
 
                 cu_seqlens = torch.arange(
-                    0, (bsz + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device
+                    0,
+                    (bsz + 1) * seqlen,
+                    step=seqlen,
+                    dtype=torch.int32,
+                    device=q.device,
                 )
                 unpadded_lengths_xattn = (cu_seqlens, max_seqlen)
 
@@ -1390,23 +1463,29 @@ class Qwen3Attention(nn.Module):
                     return_attn_probs=False,
                     window_size=(self.context_window_toggle - 1, 0),
                 )
-        elif self.toggle_type == "xattn":  
-
-            if not self.training :
-                _, seq_len, _, _ = q.size()       
+        elif self.toggle_type == "xattn":
+            if not self.training:
+                _, seq_len, _, _ = q.size()
             if self.training or seq_len != 1:
-
                 is_vlen_input = (q.dim() == 3) and (unpadded_lengths is not None)
 
                 if is_vlen_input:
                     k = k.repeat_interleave(self.num_key_value_groups, dim=1)
                     v = v.repeat_interleave(self.num_key_value_groups, dim=1)
-                    q, k, v = q.transpose(0, 1).contiguous(), k.transpose(0, 1).contiguous(), v.transpose(0, 1).contiguous() 
+                    q, k, v = (
+                        q.transpose(0, 1).contiguous(),
+                        k.transpose(0, 1).contiguous(),
+                        v.transpose(0, 1).contiguous(),
+                    )
                 else:
                     k = k.repeat_interleave(self.num_key_value_groups, dim=2)
                     v = v.repeat_interleave(self.num_key_value_groups, dim=2)
-                    q, k, v = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous(), v.transpose(1, 2).contiguous() 
-                    
+                    q, k, v = (
+                        q.transpose(1, 2).contiguous(),
+                        k.transpose(1, 2).contiguous(),
+                        v.transpose(1, 2).contiguous(),
+                    )
+
                 stride = self.xattn_params["stride"]
                 threshold = self.xattn_params["threshold"]
                 norm = self.xattn_params["norm"]
@@ -1425,13 +1504,19 @@ class Qwen3Attention(nn.Module):
                     )
 
                 else:
-                    bsz,_,seqlen,_ = q.size()
+                    bsz, _, seqlen, _ = q.size()
                     if not torch.is_tensor(seqlen):
-                        seqlen = torch.tensor(seqlen, dtype=torch.int32, device=q.device)
+                        seqlen = torch.tensor(
+                            seqlen, dtype=torch.int32, device=q.device
+                        )
                     max_seqlen = torch.max(seqlen).item()
 
                     cu_seqlens = torch.arange(
-                        0, (bsz + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device
+                        0,
+                        (bsz + 1) * seqlen,
+                        step=seqlen,
+                        dtype=torch.int32,
+                        device=q.device,
                     )
                     unpadded_lengths = (cu_seqlens, max_seqlen)
 
@@ -1483,16 +1568,19 @@ class Qwen3Attention(nn.Module):
             bsz = len(cu_seqlens) - 1
             for i in range(bsz):
                 effective_attn_output.append(
-                    attn_output[cu_seqlens[i]:cu_seqlens[i + 1], :, :] * z[i, None, ...] + cw_attn_output[cu_seqlens[i]:cu_seqlens[i + 1], :, :] * (1 - z)[i, None, ...]
+                    attn_output[cu_seqlens[i] : cu_seqlens[i + 1], :, :]
+                    * z[i, None, ...]
+                    + cw_attn_output[cu_seqlens[i] : cu_seqlens[i + 1], :, :]
+                    * (1 - z)[i, None, ...]
                 )
             effective_attn_output = torch.cat(effective_attn_output, dim=0)
-        else:        
-            effective_attn_output = attn_output * z[:,None,...] + cw_attn_output * (
-                1 - z
-            )[:,None,...]
+        else:
+            effective_attn_output = (
+                attn_output * z[:, None, ...] + cw_attn_output * (1 - z)[:, None, ...]
+            )
 
         return effective_attn_output
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1512,30 +1600,30 @@ class Qwen3Attention(nn.Module):
         ] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        input_shape = hidden_states.shape[:-1] # [S_local, ]
-        hidden_shape = (*input_shape, -1, self.head_dim) # [S_local, nhead, head_dim]
+        input_shape = hidden_states.shape[:-1]  # [S_local, ]
+        hidden_shape = (*input_shape, -1, self.head_dim)  # [S_local, nhead, head_dim]
         q = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
         k = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
         v = self.v_proj(hidden_states).view(hidden_shape)
-        
+
         is_cp_enabled = (
             seq_parallel_group is not None
             and dist.is_initialized()
             and dist.get_world_size(seq_parallel_group) > 1
         )
-        
+
         if is_cp_enabled:
             q = SeqAllToAll.apply(q, 1, 0, seq_parallel_group)
             k = SeqAllToAll.apply(k, 1, 0, seq_parallel_group)
             v = SeqAllToAll.apply(v, 1, 0, seq_parallel_group)
-            
+
             # 此时 q, k, v 变成了 [S_global, H_local, D]
             # unpadded_lengths (cu_seqlens) 是全局的，现在正好匹配 S_global
         # Attention Router
         # Router 需要全局序列信息来做 Pooling (first_token / ctx)
         # k: [S_global, H_local, D] -> Router -> z: [B, H_local]
-        
-        if not self.config.enable_ada_sparsity: # 暂时不用
+
+        if not self.config.enable_ada_sparsity:  # 暂时不用
             # 静态 Mask 逻辑
             z_kv = get_mask(
                 self.attn_mask_log_alphas,
@@ -1548,47 +1636,58 @@ class Qwen3Attention(nn.Module):
                 world_size = dist.get_world_size(seq_parallel_group)
                 # z_kv 形状是 [H_total_kv]，在 dim 0 切分
                 z_kv = torch.tensor_split(z_kv, world_size, dim=0)[rank]
-            
+
             # Expand to Group & Flatten
-            z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1) #[H_local_q]
+            z = (
+                z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
+            )  # [H_local_q]
         else:
             # 动态 Router
             # 注意：range_ids, task_ids 通常是 [B, ...] 的，B 与 Global Seq 是一致的
             if unpadded_lengths is not None:
                 # unpadded_lengths[0] 是 cu_seqlens
-                res = self.mask_allocator(k, unpadded_lengths[0], range_ids, task_ids, current_tau)
+                res = self.mask_allocator(
+                    k, unpadded_lengths[0], range_ids, task_ids, current_tau
+                )
             else:
                 # 如果没有 varlen info，Router 可能无法工作，或者退化为 single batch
                 res = self.mask_allocator(k, None, range_ids, task_ids, current_tau)
-            
+
             # z_kv_batch: [B, H_local_kv, ]
             # entropy:  标量
             # pooled_hidden_states: [B, H_local_kv, D]
             # z_constrast: [B, H_local_kv, 1]
-            z_kv_batch, entropy, pooled_hidden_states = res['sparse_mask'], res['entropy'], res['pooled_hidden_states']
-            z_constrast = res['decisions']
-            
+            z_kv_batch, entropy, pooled_hidden_states = (
+                res["sparse_mask"],
+                res["entropy"],
+                res["pooled_hidden_states"],
+            )
+            z_constrast = res["decisions"]
 
             # GQA 适配: [B, H_local_kv, 1] -> [B, H_local, 1]
             # 注意：这里的 self.num_key_value_heads 在初始化时是 Total 的
             # 我们需要判断 z_kv_batch 是否已经是 local 大小
-            local_kv_heads = self.num_key_value_heads // (dist.get_world_size(seq_parallel_group) if is_cp_enabled else 1)
-            
+            local_kv_heads = self.num_key_value_heads // (
+                dist.get_world_size(seq_parallel_group) if is_cp_enabled else 1
+            )
+
             if z_kv_batch.shape[1] == local_kv_heads:
                 # Expand GQA groups
-                z_kv_batch = z_kv_batch.repeat_interleave(self.num_key_value_groups, dim=1)
-                
+                z_kv_batch = z_kv_batch.repeat_interleave(
+                    self.num_key_value_groups, dim=1
+                )
+
         has_layer_past = past_key_value is not None
         if has_layer_past:
             past_kv = past_key_value[0]
             past_len = past_key_value[1]
         else:
             past_len = 0
-            
+
         if position_ids is not None:
             past_len += position_ids.min()
         q, k = self.rotary_emb(q, k, past_len, unpadded_lengths)
-            
+
         kv = torch.stack([k, v], -3)
         if self.num_key_value_groups > 1:
             kv = kv.repeat_interleave(self.num_key_value_groups, dim=-2)
@@ -1618,21 +1717,24 @@ class Qwen3Attention(nn.Module):
             past_kv = kv
         past_key_value = (past_kv, past_len + q.size(1)) if use_cache else None
 
-        
-        attn_output = self.interpolated_attention(q, kv, k, v, unpadded_lengths, z_kv_batch)
+        attn_output = self.interpolated_attention(
+            q, kv, k, v, unpadded_lengths, z_kv_batch
+        )
         # attn_output: [S_global, H_local, D]
 
         # Context Parallel Reverse Transform
         if is_cp_enabled:
-            # 这里的 q 经历了 SeqAllToAll，已经是 S_global 长度 
+            # 这里的 q 经历了 SeqAllToAll，已经是 S_global 长度
             # 而 attn_output 长度可能小于 S_global (被 FlashAttn Unpad 了)
             expected_global_len = q.shape[0]
             actual_len = attn_output.shape[0]
-            
+
             if actual_len < expected_global_len:
                 pad_len = expected_global_len - actual_len
                 # 在 Dim 0 (Seq) 的末尾补 pad_len 个 0
-                attn_output = torch.nn.functional.pad(attn_output, (0, 0, 0, 0, 0, pad_len))
+                attn_output = torch.nn.functional.pad(
+                    attn_output, (0, 0, 0, 0, 0, pad_len)
+                )
             # Scatter dim 0 (Seq), Gather dim 1 (Heads)
             # 变回: [S_local, H_total, D]
             attn_output = SeqAllToAll.apply(attn_output, 0, 1, seq_parallel_group)
@@ -1642,13 +1744,22 @@ class Qwen3Attention(nn.Module):
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))
 
         attn_weights = None
-        
+
         # z_kv_batch: [B, H_local, 1] (Dynamic) -> [B, ]
         # entropy: [B, H_local_kv, 1] -> 标量
         # pooled_hidden_states: [B, H_local_kv, D]
         # z_constrast: [B, H_local, ]
         # 在 Model 层需要 reduce
-        return z_kv_batch.squeeze(-1).sum(dim=-1), entropy, pooled_hidden_states, z_constrast.squeeze(-1), attn_output, attn_weights, past_key_value
+        return (
+            z_kv_batch.squeeze(-1).sum(dim=-1),
+            entropy,
+            pooled_hidden_states,
+            z_constrast.squeeze(-1),
+            attn_output,
+            attn_weights,
+            past_key_value,
+        )
+
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
@@ -1720,7 +1831,15 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        z_sum, entropy, pooled_hidden_states, z_constrast, hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        (
+            z_sum,
+            entropy,
+            pooled_hidden_states,
+            z_constrast,
+            hidden_states,
+            self_attn_weights,
+            present_key_value,
+        ) = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1742,7 +1861,13 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (z_sum, entropy, pooled_hidden_states, z_constrast, hidden_states,)
+        outputs = (
+            z_sum,
+            entropy,
+            pooled_hidden_states,
+            z_constrast,
+            hidden_states,
+        )
 
         if output_attentions:
             outputs += (self_attn_weights,)
@@ -1803,7 +1928,7 @@ class BaseModelOutputWithPastAndSparsity(ModelOutput):
     # contrastive_loss
     log_z_loss: Optional[torch.FloatTensor] = None
     head_entropy: Optional[torch.FloatTensor] = None
-    
+
 
 class Qwen3Model(Qwen3PreTrainedModel):
     """
@@ -1848,7 +1973,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 torch.tensor([0.0], dtype=self._dtype)
             )
         self.sparsity_lambda_2 = nn.Parameter(torch.tensor([0.0], dtype=self._dtype))
-        
+
         if self.config.enable_lambda_task:
             self.num_tasks = 5
             self.sparsity_lambda1_task = nn.Parameter(
@@ -1861,7 +1986,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
             self.sparsity_lambda1_task = None
             self.sparsity_lambda2_task = None
 
-
         self.threshold_for_deterministic = None
         if config.suggested_sparsity is not None:
             self.round_masks_for_sparsity(config.suggested_sparsity)
@@ -1873,8 +1997,12 @@ class Qwen3Model(Qwen3PreTrainedModel):
     @torch.no_grad()
     def reset_parameters(self):
         if self.config.enable_lambda_task:
-            self.sparsity_lambda1_task.data.copy_(torch.rand_like(self.sparsity_lambda1_task) * 0.5)
-            self.sparsity_lambda2_task.data.copy_(torch.rand_like(self.sparsity_lambda2_task) * 0.5)
+            self.sparsity_lambda1_task.data.copy_(
+                torch.rand_like(self.sparsity_lambda1_task) * 0.5
+            )
+            self.sparsity_lambda2_task.data.copy_(
+                torch.rand_like(self.sparsity_lambda2_task) * 0.5
+            )
 
     @torch.no_grad()
     def set_threshold_for_deterministic(self, threshold_for_deterministic):
@@ -2053,9 +2181,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         z_sum = 0 if compute_sparsity else None
         layer_z_sums = []
-        
+
         # 修改：用于收集每层每个样本的 entropy
-        all_layers_entropy = [] # List[Tensor[B]]
+        all_layers_entropy = []  # List[Tensor[B]]
         layer_z_constrast = []
 
         for idx, decoder_layer in enumerate(self.layers):
@@ -2100,7 +2228,13 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     current_tau=current_tau,
                 )
 
-            z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = layer_outputs[0], layer_outputs[1], layer_outputs[2], layer_outputs[3], layer_outputs[4]
+            z_layer_sum, entropy, pooled_hidden_states, z_constrast, hidden_states = (
+                layer_outputs[0],
+                layer_outputs[1],
+                layer_outputs[2],
+                layer_outputs[3],
+                layer_outputs[4],
+            )
 
             if compute_sparsity:
                 z_sum += z_layer_sum
@@ -2127,7 +2261,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         if compute_sparsity:
             # A. 计算该 GPU 上，整个模型的平均 Entropy (跨层平均)
             # stack [L, B] -> mean(0) -> [B]
-            avg_sample_entropy = torch.stack(all_layers_entropy).mean(dim=0) 
+            avg_sample_entropy = torch.stack(all_layers_entropy).mean(dim=0)
 
             # B. 处理 Sequence Parallel (SP)
             # 因为 Router 只计算了 Local Heads 的平均值，我们需要通过 AllReduce 得到 Global Heads 的平均值
@@ -2138,23 +2272,28 @@ class Qwen3Model(Qwen3PreTrainedModel):
             ):
                 # Z_sum 是总数，直接 SUM
                 dist.all_reduce(z_sum, op=dist.ReduceOp.SUM, group=seq_parallel_group)
-                
+
                 # Entropy 是平均值，SUM 之后需要除以 SP Size
-                dist.all_reduce(avg_sample_entropy, op=dist.ReduceOp.SUM, group=seq_parallel_group)
-                avg_sample_entropy = avg_sample_entropy / dist.get_world_size(seq_parallel_group)
+                dist.all_reduce(
+                    avg_sample_entropy, op=dist.ReduceOp.SUM, group=seq_parallel_group
+                )
+                avg_sample_entropy = avg_sample_entropy / dist.get_world_size(
+                    seq_parallel_group
+                )
 
                 if layer_z_sums:
                     stacked_layer_z = torch.stack(layer_z_sums)
-                    dist.all_reduce(stacked_layer_z, op=dist.ReduceOp.SUM, group=seq_parallel_group)
+                    dist.all_reduce(
+                        stacked_layer_z, op=dist.ReduceOp.SUM, group=seq_parallel_group
+                    )
                     layer_z_sums = list(stacked_layer_z)
-                
+
                 # total_num_heads 是全局的总 Head 数，z_sum 现在也是全局的 Active Head 数
             head_entropy = avg_sample_entropy
             model_sparsity = 1 - (z_sum / self.total_num_heads)
         else:
             model_sparsity = None
             z_loss = None
-        
 
         # print("Model sparsity:", model_sparsity.item() if model_sparsity is not None else None)
         if compute_sparsity:
@@ -2171,11 +2310,11 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 z_loss = None
             else:
                 if self.config.enable_lambda_task:
-                    diff = (model_sparsity - target_sparsity)
+                    diff = model_sparsity - target_sparsity
 
                     # per-sample lambda
-                    lambda1_per_sample = self.sparsity_lambda1_task[task_ids]   # [B]
-                    lambda2_per_sample = self.sparsity_lambda2_task[task_ids]   # [B]
+                    lambda1_per_sample = self.sparsity_lambda1_task[task_ids]  # [B]
+                    lambda2_per_sample = self.sparsity_lambda2_task[task_ids]  # [B]
 
                     # per-sample loss
                     per_sample_loss = (
@@ -2187,7 +2326,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
                     task_losses = []
                     for task_id in range(self.num_tasks):
-                        mask = (task_ids == task_id)
+                        mask = task_ids == task_id
                         if mask.sum() > 0:
                             task_losses.append(per_sample_loss[mask].mean())
 
@@ -2195,7 +2334,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 else:
                     z_loss = (model_sparsity - target_sparsity).abs()
                     log_z_loss = z_loss.detach()
-                    z_loss = z_loss.mean() 
+                    z_loss = z_loss.mean()
         else:
             layerwise_model_sparsity = None
             layerwise_target = None
@@ -2262,6 +2401,7 @@ class CausalLMOutputWithPastAndSparsity(ModelOutput):
     task_ids: Optional[torch.FloatTensor] = None
     log_z_loss: Optional[torch.FloatTensor] = None
     head_entropy: Optional[torch.FloatTensor] = None
+
 
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
@@ -2420,7 +2560,7 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-    
+
         if seq_lengths is not None:
             if inputs_embeds is not None:
                 assert len(inputs_embeds.shape) == 2, (
@@ -2437,10 +2577,12 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
                 "attention_mask should be None or all ones for `seq_lengths`"
             )
             assert not use_cache, "use_cache is not supported with `seq_lengths`"
-            max_seqlen = (seq_lengths[1:]-seq_lengths[:-1]).max().item()
+            max_seqlen = (seq_lengths[1:] - seq_lengths[:-1]).max().item()
             unpadded_lengths = (seq_lengths, max_seqlen)
-        
-        elif attention_mask is not None and not use_cache and attention_mask.size(0) != 1:
+
+        elif (
+            attention_mask is not None and not use_cache and attention_mask.size(0) != 1
+        ):
             if inputs_embeds is not None:
                 bsz = inputs_embeds.size(0)
                 inputs_embeds, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
@@ -2449,7 +2591,9 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             else:
                 bsz = input_ids.size(0)
                 tmp = input_ids.unsqueeze(-1)
-                input_ids, unpad_indices, cu_seqlens, max_seqlen = unpad_input(tmp, attention_mask)
+                input_ids, unpad_indices, cu_seqlens, max_seqlen = unpad_input(
+                    tmp, attention_mask
+                )
                 max_seqlen_for_pad_seq = attention_mask.size(-1)
                 input_ids = input_ids.squeeze(-1)
             unpadded_lengths = (cu_seqlens, max_seqlen)
@@ -2476,20 +2620,24 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
             task_ids=task_ids,
             enable_contrastive_loss=self.enable_contrastive_loss,
         )
-        
+
         hidden_states = outputs[0]
         if seq_lengths is None and unpadded_lengths is not None:
-            hidden_states = pad_input(hidden_states, unpad_indices, bsz, max_seqlen_for_pad_seq)
-            
+            hidden_states = pad_input(
+                hidden_states, unpad_indices, bsz, max_seqlen_for_pad_seq
+            )
+
         if labels is not None or shifted_labels is not None:
             if shifted_labels is not None:
                 labels = shifted_labels.reshape(-1)
                 hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
             else:
                 labels = labels[..., 1:].reshape(-1).contiguous()
-                hidden_states = hidden_states[..., :-1, :].reshape(
-                    -1, hidden_states.size(-1)
-                ).contiguous()
+                hidden_states = (
+                    hidden_states[..., :-1, :]
+                    .reshape(-1, hidden_states.size(-1))
+                    .contiguous()
+                )
             if self.logit_block_size > 0:
                 num_valid_labels = (labels != -100).sum()
                 hidden_states = torch.split(hidden_states, self.logit_block_size, dim=0)
@@ -2527,12 +2675,11 @@ class PawQwen3ForCausalLM(Qwen3PreTrainedModel):
         else:
             logits = self.lm_head(hidden_states)
             loss = None
-        
-        
+
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-        
+
         return CausalLMOutputWithPastAndSparsity(
             loss=loss,
             logits=logits,

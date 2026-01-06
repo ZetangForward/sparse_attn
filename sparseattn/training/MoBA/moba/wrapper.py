@@ -48,7 +48,7 @@ def moba_layer(
         attn_output (torch.Tensor): [batch, q_len, q_heads, head_dim]
         attn_weights (None): not needed
     """
-    #breakpoint()
+    # breakpoint()
     assert module.is_causal
     batch, q_heads, q_len, head_dim = query.shape
     _, kv_heads, kv_len, _ = key.shape

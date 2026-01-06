@@ -286,7 +286,6 @@ class Trainer(HFTrainer):
         except ValueError:
             logger.warning("Couldn't remove PrinterCallback")
 
-
     def get_sequence_parallel_inputs(self, inputs):
         seq_parallel_world_size = (
             dist.get_world_size(self.seq_parallel_group) if dist.is_initialized() else 1
@@ -380,68 +379,77 @@ class Trainer(HFTrainer):
 
         Subclass and override for custom behavior.
         """
-        #print(inputs['attention_mask'].shape)
+        # print(inputs['attention_mask'].shape)
         # 在序列并行处理之前统一序列长度
         if dist.is_initialized() and "input_ids" in inputs:
             # 获取当前序列长度
             current_seq_len = inputs["input_ids"].size(1)
-            
+
             # 在所有GPU间同步最大序列长度
-            seq_len_tensor = torch.tensor(current_seq_len, device=inputs["input_ids"].device)
+            seq_len_tensor = torch.tensor(
+                current_seq_len, device=inputs["input_ids"].device
+            )
             dist.all_reduce(seq_len_tensor, op=dist.ReduceOp.MAX)
             max_seq_len = seq_len_tensor.item()
-            
+
             # 如果当前序列长度小于最大长度，进行填充
             if current_seq_len < max_seq_len:
                 padding_len = max_seq_len - current_seq_len
-                
+
                 # 填充 input_ids
                 input_ids_padding = torch.zeros(
                     (inputs["input_ids"].size(0), padding_len),
                     dtype=inputs["input_ids"].dtype,
-                    device=inputs["input_ids"].device
+                    device=inputs["input_ids"].device,
                 )
-                inputs["input_ids"] = torch.cat([inputs["input_ids"], input_ids_padding], dim=1)
-                
+                inputs["input_ids"] = torch.cat(
+                    [inputs["input_ids"], input_ids_padding], dim=1
+                )
+
                 # 填充 attention_mask
                 if "attention_mask" in inputs:
                     mask_padding = torch.zeros(
                         (inputs["attention_mask"].size(0), padding_len),
                         dtype=inputs["attention_mask"].dtype,
-                        device=inputs["attention_mask"].device
+                        device=inputs["attention_mask"].device,
                     )
-                    inputs["attention_mask"] = torch.cat([inputs["attention_mask"], mask_padding], dim=1)
-                
+                    inputs["attention_mask"] = torch.cat(
+                        [inputs["attention_mask"], mask_padding], dim=1
+                    )
+
                 # 填充 labels (用 -100 填充)
                 if "labels" in inputs:
                     labels_padding = torch.full(
                         (inputs["labels"].size(0), padding_len),
                         -100,
                         dtype=inputs["labels"].dtype,
-                        device=inputs["labels"].device
+                        device=inputs["labels"].device,
                     )
-                    inputs["labels"] = torch.cat([inputs["labels"], labels_padding], dim=1)
+                    inputs["labels"] = torch.cat(
+                        [inputs["labels"], labels_padding], dim=1
+                    )
 
         inputs = self.get_sequence_parallel_inputs(inputs)
-        
+
         attn_mask = inputs["attention_mask"]
         valid_tokens = attn_mask.sum(dim=1)
-        #print(attn_mask.shape)
-        print(f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
-            f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}")
-        
-        #inputs['input_ids'].require_grad
+        # print(attn_mask.shape)
+        print(
+            f"Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+            f"valid tokens per sample = {valid_tokens.tolist()}, total = {valid_tokens.sum().item()}"
+        )
+
+        # inputs['input_ids'].require_grad
         try:
             outputs = model(**inputs, use_cache=False)
         except Exception as e:
             raise e
         lm_loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-        #lm_loss.require
+        # lm_loss.require
 
-        loss = lm_loss 
+        loss = lm_loss
 
         if return_output_and_metrics:
-        
             metrics = {
                 "lm_loss": float(
                     lm_loss.detach().item()
@@ -460,7 +468,7 @@ class Trainer(HFTrainer):
         if return_outputs:
             return (loss, outputs)
         else:
-            return loss    
+            return loss
 
     def create_optimizer(self):
         """
@@ -480,7 +488,11 @@ class Trainer(HFTrainer):
                 p.requires_grad = False
 
             for n, p in opt_model.named_parameters():
-                if "self_attn.gate" in n or "compress_key" in n or "compress_value" in n : 
+                if (
+                    "self_attn.gate" in n
+                    or "compress_key" in n
+                    or "compress_value" in n
+                ):
                     p.requires_grad = True  # 解冻该参数
                     optimizer_nsa_group.append(p)
                 elif "lm_head" in n or "embed_tokens" in n:
