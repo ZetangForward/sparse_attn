@@ -62,7 +62,9 @@ def load_model(model_path, is_sparse):
 
     archs = config_data.get("architectures", [])
     arch_name = archs[0] if archs else "Unknown"
+    print(f"🏗️  [System] Detected architecture: {arch_name}")
 
+    config = None
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
@@ -72,30 +74,65 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            # from sparseattn.efficiency.model.modeling_flash_qwen import (
+            from sparseattn.efficiency.model.modeling_flash_qwen import (
+                PawQwen3ForCausalLM, PawQwen3Config
+            )
+            # from sparseattn.efficiency.model.modeling_flash_qwen_prulong import (
             #     PawQwen3ForCausalLM, PawQwen3Config
             # )
-            from sparseattn.efficiency.model.modeling_flash_qwen_xattn import (
+            AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
+            model_cls = PawQwen3ForCausalLM
+        else:
+            # breakpoint()
+            from sparseattn.efficiency.model.modeling_infllmv2_qwen3 import(
+                infllmv2_Qwen3Config,
+                infllmv2_Qwen3ForCausalLM
+            )
+            config = infllmv2_Qwen3Config.from_pretrained(model_path)
+            config._attn_implementation = "flash_attention_2"
+            config.sparse_config = {
+                "kernel_size": 32,
+                "kernel_stride": 16,
+                "init_blocks": 1,
+                "block_size": 64,
+                "window_size": 2048,
+                "topk": 64,
+                "use_nope": False,
+                "dense_len": 8192
+            }
+            # breakpoint()
+            AutoModelForCausalLM.register(infllmv2_Qwen3Config, infllmv2_Qwen3ForCausalLM)
+            model_cls = infllmv2_Qwen3ForCausalLM
+            
+    else:
+        if "PawLlama" in arch_name:
+            from sparseattn.training.eval.modeling_flash_llama import (
+                PawLlamaForCausalLM, PawLlamaConfig
+            )
+            AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
+            model_cls = PawLlamaForCausalLM
+        elif "PawQwen" in arch_name:
+            from sparseattn.efficiency.model.modeling_flash_qwen_full import (
                 PawQwen3ForCausalLM, PawQwen3Config
             )
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
+            
+    if config is None:
+        model = model_cls.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda:0",
+            trust_remote_code=True,
+        )
     else:
-        if "PawLlama" in arch_name:
-            from sparseattn.training.eval.modeling_flash_llama import PawLlamaForCausalLM, PawLlamaConfig
-            AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
-            model_cls = PawLlamaForCausalLM
-        elif "PawQwen" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_qwen_full import PawQwen3ForCausalLM, PawQwen3Config
-            AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
-            model_cls = PawQwen3ForCausalLM
-
-    model = model_cls.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda:0",
-        trust_remote_code=True,
-    )
+        model = model_cls.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda:0",
+            trust_remote_code=True,
+            config=config
+        )
     model.eval()
     return model, is_sparse
 
@@ -187,8 +224,8 @@ def run_benchmark_suite(model_path, samples, tokenizer, gen_len=10, max_len=4096
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
     sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
+    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
     full_model_path   = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
     base_data_dir     = "/data2/public_data/sort_longbench/"

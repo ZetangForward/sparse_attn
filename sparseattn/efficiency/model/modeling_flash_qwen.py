@@ -58,7 +58,7 @@ from block_sparse_attn import block_streaming_attn_func
 
 from dataclasses import dataclass
 
-from sparseattn.src.Xattention import Xattention_prefill_dim3, Xattention_prefill_dim4
+from sparseattn.efficiency.model.Xattention import Xattention_prefill_dim3, Xattention_prefill_dim4
 
 logger = logging.get_logger(__name__)
 
@@ -1222,7 +1222,7 @@ class Qwen3Attention(nn.Module):
                     k,
                     v,
                     stride,
-                    cu_seqlens,
+                    cu_seqlens.contiguous(),
                     norm,
                     threshold,
                     use_triton=True,

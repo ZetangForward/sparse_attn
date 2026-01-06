@@ -58,7 +58,7 @@ from block_sparse_attn import block_streaming_attn_func
 
 from dataclasses import dataclass
 
-from sparseattn.src.Xattention import Xattention_prefill_dim3, Xattention_prefill_dim4
+from sparseattn.efficiency.model.Xattention import Xattention_prefill_dim3, Xattention_prefill_dim4
 
 logger = logging.get_logger(__name__)
 
@@ -777,26 +777,26 @@ class AttentionRouter(nn.Module):
         self.use_softmax = use_softmax
 
         self.cls_feat_extractor = nn.Sequential( 
-            nn.Linear(d_feature, 2 * d_feature),
+            nn.Linear(d_feature, 4 * d_feature),
             nn.SiLU(),
-            nn.Linear(2 * d_feature, d_feature),
+            nn.Linear(4 * d_feature, d_feature),
         )
         
         if self.use_softmax:
             logger.info("using softmax for attention router")
             self.cls_router_head_agnostic = nn.Sequential( 
-                nn.Linear(d_feature, 2 * d_feature),
+                nn.Linear(d_feature, 4 * d_feature),
                 nn.SiLU(),
-                nn.Linear(2 * d_feature, d_feature),
+                nn.Linear(4 * d_feature, d_feature),
                 nn.SiLU(),
                 nn.Linear(d_feature, 2),
             )
         else:
             logger.info("use sigmoid function for attention router")
             self.cls_router_head_agnostic = nn.Sequential( 
-                nn.Linear(d_feature, 2 * d_feature),
+                nn.Linear(d_feature, 4 * d_feature),
                 nn.SiLU(),
-                nn.Linear(2 * d_feature, d_feature),
+                nn.Linear(4 * d_feature, d_feature),
                 nn.SiLU(),
                 nn.Linear(d_feature, 1),
                 nn.LayerNorm([self.num_kv, 1], elementwise_affine=False)

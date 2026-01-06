@@ -6,9 +6,6 @@ import gc
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
 import datetime
-from transformers import logging
-logging.set_verbosity_error()  # 只显示错误，不显示警告和通知
-
 # -----------------------------------------------------------------------------
 # 1. 统一模型加载器
 # -----------------------------------------------------------------------------
@@ -35,7 +32,7 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_qwen_prulong import (
+            from sparseattn.efficiency.model.modeling_flash_qwen_xattn import (
                 PawQwen3ForCausalLM, PawQwen3Config
             )
             # from sparseattn.efficiency.model.modeling_flash_qwen_prulong import (
@@ -110,8 +107,8 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     start_event.record()
     
     with torch.inference_mode():
-        # attn_mask = torch.ones_like(input_ids)
-        outputs = model(input_ids, use_cache=True)
+        attn_mask = torch.ones_like(input_ids).to(model.device)
+        outputs = model(input_ids, use_cache=True, attention_mask=attn_mask)
         
     end_event.record()
     torch.cuda.synchronize()
@@ -138,7 +135,8 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     
     with torch.inference_mode():
         for _ in range(gen_len):
-            outputs = model(next_token, past_key_values=past_key_values, use_cache=True)
+            attn_mask = torch.ones_like(next_token).to(model.device)
+            outputs = model(next_token, past_key_values=past_key_values, use_cache=True, attention_mask=attn_mask)
             past_key_values = outputs.past_key_values
             next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(1).to(model.device).contiguous()
             
@@ -222,12 +220,12 @@ def run_benchmark_suite(model_path, samples, tokenizer, gen_len=10, max_len=4096
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
-    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
+    sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
     full_model_path   = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
     
-    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_multivalue_131072.jsonl"
+    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_single_3_262144.jsonl"
     
     num_samples = 5       # 每个长度测试的样本数
     gen_len = 1           # 生成长度
@@ -348,7 +346,7 @@ def main():
 
     if final_excel_summary:
         ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        file_name = f"/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/benchmark_length_{ts}.xlsx"
+        file_name = f"/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/summary_benchmark_{ts}.xlsx"
         
         print(f"\n💾 Saving summary table to {file_name}...")
         
