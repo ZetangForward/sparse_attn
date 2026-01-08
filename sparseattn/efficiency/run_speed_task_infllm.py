@@ -50,7 +50,7 @@ def load_model(model_path, is_sparse):
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_llama import (
+            from sparseattn.training.eval.modeling_flash_llama import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -58,8 +58,7 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            # breakpoint()
-            from sparseattn.efficiency.model.modeling_flash_qwen import (
+            from sparseattn.efficiency.model.modeling_flash_qwen_xattn import (
                 PawQwen3ForCausalLM,
                 PawQwen3Config,
             )
@@ -69,9 +68,34 @@ def load_model(model_path, is_sparse):
             # )
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
+        else:
+            # breakpoint()
+            from sparseattn.efficiency.model.modeling_infllmv2_qwen3 import (
+                infllmv2_Qwen3Config,
+                infllmv2_Qwen3ForCausalLM,
+            )
+
+            config = infllmv2_Qwen3Config.from_pretrained(model_path)
+            config._attn_implementation = "flash_attention_2"
+            config.sparse_config = {
+                "kernel_size": 1024,
+                "kernel_stride": 128,
+                "init_blocks": 1,
+                "block_size": 1024,
+                "window_size": 512,
+                "topk": 64,
+                "use_nope": False,
+                "dense_len": 16384,
+            }
+            # breakpoint()
+            AutoModelForCausalLM.register(
+                infllmv2_Qwen3Config, infllmv2_Qwen3ForCausalLM
+            )
+            model_cls = infllmv2_Qwen3ForCausalLM
+
     else:
         if "PawLlama" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_llama_full import (
+            from sparseattn.training.eval.modeling_flash_llama import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -88,17 +112,34 @@ def load_model(model_path, is_sparse):
             model_cls = PawQwen3ForCausalLM
 
     if config is None:
+        max_memory_mapping = {
+            0: "20GiB",  # GPU0 留出大量空间做计算
+            1: "75GiB",
+            2: "75GiB",
+            3: "75GiB",  # 根据你的卡数调整
+        }
+        
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
+            max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
+            config=config,
         )
     else:
+        max_memory_mapping = {
+            0: "20GiB",  # GPU0 留出大量空间做计算
+            1: "75GiB",
+            2: "75GiB",
+            3: "75GiB",  # 根据你的卡数调整
+        }
+        
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
+            max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
             config=config,
         )
@@ -117,7 +158,8 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     torch.cuda.synchronize()
     start_event.record()
     with torch.inference_mode():
-        outputs = model(input_ids, use_cache=True)
+        attn_mask = torch.ones_like(input_ids).to(model.device)
+        outputs = model(input_ids, use_cache=True, attention_mask=attn_mask)
     end_event.record()
     torch.cuda.synchronize()
     prefill_time_ms = start_event.elapsed_time(end_event)
@@ -139,7 +181,8 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     start_event.record()
     with torch.inference_mode():
         for _ in range(gen_len):
-            outputs = model(next_token, past_key_values=past_key_values, use_cache=True)
+            attn_mask = torch.ones_like(next_token)
+            outputs = model(next_token, past_key_values=past_key_values, use_cache=True, attention_mask=attn_mask)
             past_key_values = outputs.past_key_values
             next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(1)
     end_event.record()
@@ -204,8 +247,9 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
-    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
+    
+    sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
     full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
     base_data_dir = "/data2/public_data/sort_longbench/"

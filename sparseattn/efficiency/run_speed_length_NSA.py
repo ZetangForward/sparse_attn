@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from transformers import logging
 
 logging.set_verbosity_error()
+
+
 # -----------------------------------------------------------------------------
 # 1. 统一模型加载器
 # -----------------------------------------------------------------------------
@@ -27,7 +29,7 @@ def load_model(model_path, is_sparse):
     arch_name = archs[0] if archs else "Unknown"
     print(f"🏗️  [System] Detected architecture: {arch_name}")
 
-    is_moba = False
+    is_NSA = False
 
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
@@ -51,21 +53,34 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
         else:
-            is_moba = True
-            from sparseattn.training.MoBA.moba import register_moba
-            from sparseattn.efficiency.model.modeling_qwen3 import Qwen3ForCausalLM
+            is_NSA = True
+            from transformers import AutoConfig
+            from transformers.models.qwen3 import modeling_qwen3, Qwen3ForCausalLM
+            from sparseattn.training.block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA_prefill
+            from sparseattn.training.block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import Qwen3NSA_prefill
 
-            @dataclass
-            class MoBAConfig:
-                moba_chunk_size: int
-                moba_topk: int
+            # 1. 先加载 Config，并把 NSA 需要的参数注入进去
+            #    这步很重要，因为替换后的 Attention 初始化时需要用到这些新参数
+            config = AutoConfig.from_pretrained(
+                model_path, 
+                trust_remote_code=True
+            )
+            config._attn_implementation = "flash_attention_2"
+            config.compress_type = "linear"#"avgpool","weightedpool"
+            config.kernel_size = 64
+            config.kernel_stride = 32
+            config.block_size = 128
+            config.topk = 16
+            config.init_blocks = 1
+            config.local_blocks = 2
+            config.window_size = 512
+            # 2. 【关键步骤】执行 Monkey Patch 替换
+            #    把 modeling_qwen3 模块里的 Qwen3Attention 强行变成你的 Qwen3NSA
+            modeling_qwen3.Qwen3Attention = Qwen3NSA_prefill 
+            print("正在使用Qwen3NSA_prefill")
 
-            moba_chunk_size = 1024
-            # moba_topk = 16
-            moba_topk = 8
-            attn = "moba"
-            register_moba(MoBAConfig(moba_chunk_size, moba_topk))
             model_cls = Qwen3ForCausalLM
+            
     else:
         if "PawLlama" in arch_name:
             from sparseattn.training.eval.modeling_flash_llama import (
@@ -84,17 +99,20 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
 
-    if is_moba:
-        model = model_cls.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            attn_implementation=attn,
-        )
-        print("Model loaded successfully.")
-        print(f"Model config architectures: {model.config.architectures}")
-        print(f"Total parameters in loaded model: {model.num_parameters():,}")
+    if is_NSA:
+        # 3. 正常加载模型
+            #    此时 from_pretrained 内部实例化 Attention 时，实际上实例化的是 Qwen3NSA
+            #    并且它会自动尝试加载权重
+            model = Qwen3ForCausalLM.from_pretrained(
+                model_path,
+                config=config,  # 传入修改后的 config
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                device_map="auto",
+            )
+            print("NSA loaded successfully.")
+            print(f"Model config architectures: {model.config.architectures}")
+            print(f"Total parameters in loaded model: {model.num_parameters():,}")
     else:
         model = model_cls.from_pretrained(
             model_path,

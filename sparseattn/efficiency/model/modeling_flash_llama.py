@@ -63,7 +63,10 @@ from sparseattn.training.attention_mask import (
     sample_z_from_log_alpha,
     cdf_stretched_concrete,
 )
-from sparseattn.src.Xattention import Xattention_prefill_dim3, Xattention_prefill_dim4
+from sparseattn.efficiency.model.Xattention import (
+    Xattention_prefill_dim3,
+    Xattention_prefill_dim4,
+)
 import math
 
 logger = logging.get_logger(__name__)

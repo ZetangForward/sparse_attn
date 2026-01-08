@@ -6,11 +6,11 @@ import gc
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
 import datetime
-from dataclasses import dataclass
-
 from transformers import logging
 
-logging.set_verbosity_error()
+logging.set_verbosity_error()  # 只显示错误，不显示警告和通知
+
+
 # -----------------------------------------------------------------------------
 # 1. 统一模型加载器
 # -----------------------------------------------------------------------------
@@ -27,12 +27,11 @@ def load_model(model_path, is_sparse):
     arch_name = archs[0] if archs else "Unknown"
     print(f"🏗️  [System] Detected architecture: {arch_name}")
 
-    is_moba = False
-
+    config = None
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
-            from sparseattn.training.eval.modeling_flash_llama import (
+            from sparseattn.efficiency.model.modeling_flash_llama_xattn import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -50,25 +49,10 @@ def load_model(model_path, is_sparse):
             # )
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
-        else:
-            is_moba = True
-            from sparseattn.training.MoBA.moba import register_moba
-            from sparseattn.efficiency.model.modeling_qwen3 import Qwen3ForCausalLM
 
-            @dataclass
-            class MoBAConfig:
-                moba_chunk_size: int
-                moba_topk: int
-
-            moba_chunk_size = 1024
-            # moba_topk = 16
-            moba_topk = 8
-            attn = "moba"
-            register_moba(MoBAConfig(moba_chunk_size, moba_topk))
-            model_cls = Qwen3ForCausalLM
     else:
         if "PawLlama" in arch_name:
-            from sparseattn.training.eval.modeling_flash_llama import (
+            from sparseattn.efficiency.model.modeling_flash_llama_full import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -84,25 +68,21 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
 
-    if is_moba:
+    if config is None:
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map="cuda:0",
             trust_remote_code=True,
-            attn_implementation=attn,
         )
-        print("Model loaded successfully.")
-        print(f"Model config architectures: {model.config.architectures}")
-        print(f"Total parameters in loaded model: {model.num_parameters():,}")
     else:
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map="cuda:0",
             trust_remote_code=True,
+            config=config,
         )
-
     model.eval()
     return model, is_sparse
 
@@ -120,6 +100,7 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     start_event.record()
 
     with torch.inference_mode():
+        # attn_mask = torch.ones_like(input_ids)
         outputs = model(input_ids, use_cache=True)
 
     end_event.record()
@@ -245,18 +226,17 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
-    sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
+    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
     full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
 
-    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_single_3_262144.jsonl"
+    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_multivalue_131072.jsonl"
 
     num_samples = 5  # 每个长度测试的样本数
     gen_len = 1  # 生成长度
 
     target_lengths_k = [8, 16, 32, 64, 128]
-    # target_lengths_k = [128]
     target_lengths = [k * 1024 for k in target_lengths_k]
 
     # 1. 准备数据
@@ -285,17 +265,14 @@ def main():
         print(f"🎯 TARGET LENGTH: {target_len} ({target_len / 1024:.0f}K)")
         print("█" * 80)
 
-        # print(f"🔸 Full Model @ {target_len}")
-        # full_results = run_benchmark_suite(full_model_path, raw_samples, tokenizer, gen_len, target_len, False)
+        print(f"🔸 Full Model @ {target_len}")
+        full_results = run_benchmark_suite(
+            full_model_path, raw_samples, tokenizer, gen_len, target_len, False
+        )
 
         print(f"🔹 Sparse Model @ {target_len}")
         sparse_results = run_benchmark_suite(
             sparse_model_path, raw_samples, tokenizer, gen_len, target_len, True
-        )
-
-        print(f"🔸 Full Model @ {target_len}")
-        full_results = run_benchmark_suite(
-            full_model_path, raw_samples, tokenizer, gen_len, target_len, False
         )
 
         print(

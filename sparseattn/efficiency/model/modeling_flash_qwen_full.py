@@ -58,7 +58,10 @@ from block_sparse_attn import block_streaming_attn_func
 
 from dataclasses import dataclass
 
-from sparseattn.src.Xattention import Xattention_prefill_dim3, Xattention_prefill_dim4
+from sparseattn.efficiency.model.Xattention import (
+    Xattention_prefill_dim3,
+    Xattention_prefill_dim4,
+)
 
 logger = logging.get_logger(__name__)
 

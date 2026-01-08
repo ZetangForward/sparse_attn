@@ -7,6 +7,7 @@ import datetime
 import pandas as pd
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import logging
+from dataclasses import dataclass
 
 logging.set_verbosity_error()  # 只显示错误，不显示警告和通知
 
@@ -46,11 +47,12 @@ def load_model(model_path, is_sparse):
     arch_name = archs[0] if archs else "Unknown"
     print(f"🏗️  [System] Detected architecture: {arch_name}")
 
-    config = None
+    is_moba = False
+
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_llama import (
+            from sparseattn.training.eval.modeling_flash_llama import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -58,8 +60,7 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            # breakpoint()
-            from sparseattn.efficiency.model.modeling_flash_qwen import (
+            from sparseattn.efficiency.model.modeling_flash_qwen_xattn import (
                 PawQwen3ForCausalLM,
                 PawQwen3Config,
             )
@@ -69,9 +70,25 @@ def load_model(model_path, is_sparse):
             # )
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
+        else:
+            is_moba = True
+            from sparseattn.training.MoBA.moba import register_moba
+            from sparseattn.efficiency.model.modeling_qwen3 import Qwen3ForCausalLM
+
+            @dataclass
+            class MoBAConfig:
+                moba_chunk_size: int
+                moba_topk: int
+
+            moba_chunk_size = 1024
+            # moba_topk = 16
+            moba_topk = 8
+            attn = "moba"
+            register_moba(MoBAConfig(moba_chunk_size, moba_topk))
+            model_cls = Qwen3ForCausalLM
     else:
         if "PawLlama" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_llama_full import (
+            from sparseattn.training.eval.modeling_flash_llama import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -87,21 +104,25 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
 
-    if config is None:
+    if is_moba:
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
             trust_remote_code=True,
+            attn_implementation=attn,
         )
+        print("Model loaded successfully.")
+        print(f"Model config architectures: {model.config.architectures}")
+        print(f"Total parameters in loaded model: {model.num_parameters():,}")
     else:
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
             trust_remote_code=True,
-            config=config,
         )
+
     model.eval()
     return model, is_sparse
 
@@ -204,10 +225,10 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
-    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
     full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
+    
     base_data_dir = "/data2/public_data/sort_longbench/"
 
     num_samples = 5

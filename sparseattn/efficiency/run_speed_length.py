@@ -31,7 +31,7 @@ def load_model(model_path, is_sparse):
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
-            from sparseattn.training.eval.modeling_flash_llama import (
+            from sparseattn.efficiency.model.modeling_flash_llama import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -39,7 +39,8 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_qwen_prulong import (
+            # breakpoint()
+            from sparseattn.efficiency.model.modeling_flash_qwen import (
                 PawQwen3ForCausalLM,
                 PawQwen3Config,
             )
@@ -49,34 +50,9 @@ def load_model(model_path, is_sparse):
             # )
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
-        else:
-            # breakpoint()
-            from sparseattn.efficiency.model.modeling_infllmv2_qwen3 import (
-                infllmv2_Qwen3Config,
-                infllmv2_Qwen3ForCausalLM,
-            )
-
-            config = infllmv2_Qwen3Config.from_pretrained(model_path)
-            config._attn_implementation = "flash_attention_2"
-            config.sparse_config = {
-                "kernel_size": 32,
-                "kernel_stride": 16,
-                "init_blocks": 1,
-                "block_size": 64,
-                "window_size": 2048,
-                "topk": 64,
-                "use_nope": False,
-                "dense_len": 8192,
-            }
-            # breakpoint()
-            AutoModelForCausalLM.register(
-                infllmv2_Qwen3Config, infllmv2_Qwen3ForCausalLM
-            )
-            model_cls = infllmv2_Qwen3ForCausalLM
-
     else:
         if "PawLlama" in arch_name:
-            from sparseattn.training.eval.modeling_flash_llama import (
+            from sparseattn.efficiency.model.modeling_flash_llama_full import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -250,7 +226,7 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
+    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
     # sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
     full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"

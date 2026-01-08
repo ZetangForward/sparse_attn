@@ -911,7 +911,7 @@ class LlamaAttention(nn.Module):
                 # z_kv_batch = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
                 if not self.config.enable_ada_sparsity and self.static_kv_mask is None:
                     self.static_kv_mask = load_kv_mask_from_tsv(
-                        "/workspace/mnt/lcm_lab/qqt/project/SparseAttn/sparseattn/checkpoints/1.3steps266_prulong_64k_llama-8b_wfrozen/masks_sp0.7.tsv",
+                        "/data2/hf_models/prulong_qwen_3_4b/masks_sp0.7.tsv",
                         device=hidden_states.device,
                         dtype=torch.int32,
                     )

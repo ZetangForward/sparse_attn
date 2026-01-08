@@ -50,7 +50,7 @@ def load_model(model_path, is_sparse):
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_llama import (
+            from sparseattn.efficiency.model.modeling_flash_llama_xattn import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -58,8 +58,7 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            # breakpoint()
-            from sparseattn.efficiency.model.modeling_flash_qwen import (
+            from sparseattn.efficiency.model.modeling_flash_qwen_xattn import (
                 PawQwen3ForCausalLM,
                 PawQwen3Config,
             )
@@ -69,6 +68,7 @@ def load_model(model_path, is_sparse):
             # )
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
+
     else:
         if "PawLlama" in arch_name:
             from sparseattn.efficiency.model.modeling_flash_llama_full import (

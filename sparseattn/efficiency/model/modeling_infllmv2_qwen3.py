@@ -230,7 +230,9 @@ def compressed_attention(
             causal=is_prefilling,
         )
         score = score[:, : q_idx.shape[0], :]  # [num_heads, total_q_len, num_blocks]
-
+        valid_q_len = q_idx.shape[0]
+        if score.shape[1] > valid_q_len:
+            score = score[:, :valid_q_len, :]
         block_score = max_pooling_1d_varlen(
             score.contiguous(),
             cu_seqlens_q,
@@ -700,7 +702,7 @@ class infllmv2_Qwen3Attention(nn.Module):
             # q_heads = 32. k_heads = 8
             # 按照issue中的做法，要把q_heads拓展成128
             repeated_query_states = query_states.repeat_interleave(
-                4, dim=2
+                4, dim=2,
             )  # [batch_size, seq_len, num_heads * 4, head_dim]
             attn_output = self._sparse_attention_forward(
                 repeated_query_states,

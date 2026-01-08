@@ -974,7 +974,7 @@ class LlamaAttention(nn.Module):
             "stride": 16,
             "norm": 1,
             "softmax": True,
-            "threshold": 0.4,
+            "threshold": 0.9,
             "chunk_size": 16384,
             "select_mode": "inverse",
             "use_triton": True,
@@ -1018,7 +1018,7 @@ class LlamaAttention(nn.Module):
                 "stride": 16,
                 "norm": 1,
                 "softmax": True,
-                "threshold": 0.4,
+                "threshold": 0.9,
                 "chunk_size": 16384,
                 "select_mode": "inverse",
                 "use_triton": True,
@@ -1102,6 +1102,7 @@ class LlamaAttention(nn.Module):
 
         has_layer_past = past_key_value is not None
 
+        bsz, _, kv_heads = k.shape[:3]
         if not has_layer_past:
             if not self.config.enable_ada_sparsity:
                 z_kv = get_mask(
@@ -1112,20 +1113,25 @@ class LlamaAttention(nn.Module):
                 # Next: expand z_kv to (num_key_value_heads, num_key_value_groups) and then flatten it to (num_heads)
                 z = z_kv.unsqueeze(-1).expand(-1, self.num_key_value_groups).reshape(-1)
             else:
-                if unpadded_lengths is not None:
-                    res = self.mask_allocator(
-                        k, unpadded_lengths[0], range_ids, task_ids
+                if self.retrieval_mode == "full":
+                    if unpadded_lengths is not None:
+                        res = self.mask_allocator(
+                            k, unpadded_lengths[0], range_ids, task_ids
+                        )
+                    else:
+                        res = self.mask_allocator(k, None, range_ids, task_ids)
+
+                    z_kv_batch, entropy, pooled_hidden_states = (
+                        res["sparse_mask"],
+                        res["entropy"],
+                        res["pooled_hidden_states"],
                     )
+                    z_constrast = res["decisions"]
+                # breakpoint()
                 else:
-                    res = self.mask_allocator(k, None, range_ids, task_ids)
-
-                z_kv_batch, entropy, pooled_hidden_states = (
-                    res["sparse_mask"],
-                    res["entropy"],
-                    res["pooled_hidden_states"],
-                )
-                z_constrast = res["decisions"]
-
+                    z_kv_batch = torch.zeros(bsz, kv_heads, 1, device=q.device)
+                # z_constrast = res['decisions']
+                # breakpoint()
                 if z_kv_batch.shape[-2] == self.num_key_value_heads:
                     z_kv_batch = z_kv_batch.repeat_interleave(
                         self.num_key_value_groups, 1

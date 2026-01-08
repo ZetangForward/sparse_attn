@@ -6,7 +6,9 @@ import gc
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
 import datetime
+from transformers import logging
 
+logging.set_verbosity_error()  # 只显示错误，不显示警告和通知
 
 # -----------------------------------------------------------------------------
 # 1. 统一模型加载器
@@ -56,14 +58,14 @@ def load_model(model_path, is_sparse):
             config = infllmv2_Qwen3Config.from_pretrained(model_path)
             config._attn_implementation = "flash_attention_2"
             config.sparse_config = {
-                "kernel_size": 32,
-                "kernel_stride": 16,
+                "kernel_size": 1024,
+                "kernel_stride": 128,
                 "init_blocks": 1,
-                "block_size": 64,
-                "window_size": 2048,
+                "block_size": 1024,
+                "window_size": 512,
                 "topk": 64,
                 "use_nope": False,
-                "dense_len": 8192,
+                "dense_len": 16384,
             }
             # breakpoint()
             AutoModelForCausalLM.register(
@@ -90,17 +92,34 @@ def load_model(model_path, is_sparse):
             model_cls = PawQwen3ForCausalLM
 
     if config is None:
+        max_memory_mapping = {
+            0: "20GiB",  # GPU0 留出大量空间做计算
+            1: "75GiB",
+            2: "75GiB",
+            3: "75GiB",  # 根据你的卡数调整
+        }
+        
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
+            max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
+            config=config,
         )
     else:
+        max_memory_mapping = {
+            0: "20GiB",  # GPU0 留出大量空间做计算
+            1: "75GiB",
+            2: "75GiB",
+            3: "75GiB",  # 根据你的卡数调整
+        }
+        
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
+            max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
             config=config,
         )
@@ -292,14 +311,19 @@ def main():
         print(f"🎯 TARGET LENGTH: {target_len} ({target_len / 1024:.0f}K)")
         print("█" * 80)
 
-        print(f"🔸 Full Model @ {target_len}")
-        full_results = run_benchmark_suite(
-            full_model_path, raw_samples, tokenizer, gen_len, target_len, False
-        )
+        # print(f"🔸 Full Model @ {target_len}")
+        # full_results = run_benchmark_suite(
+        #     full_model_path, raw_samples, tokenizer, gen_len, target_len, False
+        # )
 
         print(f"🔹 Sparse Model @ {target_len}")
         sparse_results = run_benchmark_suite(
             sparse_model_path, raw_samples, tokenizer, gen_len, target_len, True
+        )
+        
+        print(f"🔸 Full Model @ {target_len}")
+        full_results = run_benchmark_suite(
+            full_model_path, raw_samples, tokenizer, gen_len, target_len, False
         )
 
         print(
@@ -410,7 +434,7 @@ def main():
 
     if final_excel_summary:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_name = f"/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/summary_benchmark_{ts}.xlsx"
+        file_name = f"/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/benchmark_length_{ts}.xlsx"
 
         print(f"\n💾 Saving summary table to {file_name}...")
 
