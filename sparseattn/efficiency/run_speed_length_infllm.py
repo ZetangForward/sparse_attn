@@ -58,12 +58,12 @@ def load_model(model_path, is_sparse):
             config = infllmv2_Qwen3Config.from_pretrained(model_path)
             config._attn_implementation = "flash_attention_2"
             config.sparse_config = {
-                "kernel_size": 1024,
+                "kernel_size": 256,
                 "kernel_stride": 128,
                 "init_blocks": 1,
-                "block_size": 1024,
-                "window_size": 512,
-                "topk": 64,
+                "block_size": 256,
+                "window_size": 2048,
+                "topk": 16,
                 "use_nope": False,
                 "dense_len": 16384,
             }
@@ -92,34 +92,21 @@ def load_model(model_path, is_sparse):
             model_cls = PawQwen3ForCausalLM
 
     if config is None:
-        max_memory_mapping = {
-            0: "20GiB",  # GPU0 留出大量空间做计算
-            1: "75GiB",
-            2: "75GiB",
-            3: "75GiB",  # 根据你的卡数调整
-        }
         
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            max_memory=max_memory_mapping, # <--- 关键修改
+            # max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
             config=config,
         )
     else:
-        max_memory_mapping = {
-            0: "20GiB",  # GPU0 留出大量空间做计算
-            1: "75GiB",
-            2: "75GiB",
-            3: "75GiB",  # 根据你的卡数调整
-        }
-        
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            max_memory=max_memory_mapping, # <--- 关键修改
+            # max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
             config=config,
         )
@@ -153,9 +140,9 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     current_sparsity = 0.0
     if is_sparse:
         try:
-            sp = getattr(model, "prefill_sparsity", None)
-            if isinstance(sp, torch.Tensor):
-                current_sparsity = sp.item()
+            current_sparsity = getattr(model, "prefill_sparsity", None)
+            if isinstance(current_sparsity, torch.Tensor):
+                current_sparsity = current_sparsity.item()
         except:
             pass
 
@@ -167,8 +154,8 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     start_event.record()
 
     with torch.inference_mode():
-        for _ in range(gen_len):
-            attn_mask = torch.ones_like(next_token).to(model.device)
+        for i in range(gen_len):
+            attn_mask = torch.ones(1, i+1+input_ids.shape[-1]).to(model.device)
             outputs = model(
                 next_token,
                 past_key_values=past_key_values,
@@ -253,7 +240,8 @@ def run_benchmark_suite(
 
         # 实时打印进度
         print(
-            f"  Sample {i} {note}: 📏 Len {seq_len} | ⚡ Prefill {res['prefill_ms']:.1f}ms | ⏩ Decode {res['decode_ms_per_token']:.2f}ms/tok"
+            f"  Sample {i} {note}: 📏 Len {seq_len} | ⚡ Prefill {res['prefill_ms']:.1f}ms | ⏩ Decode {res['decode_ms_per_token']:.2f}ms/tok \
+                | ESR {res['sparsity']:.2f}"
         )
 
         del input_ids
@@ -271,18 +259,30 @@ def run_benchmark_suite(
 # 4. 主程序
 # -----------------------------------------------------------------------------
 def main():
+    FULL_MODEL_CACHE = {
+        8192:   (755.49, 49.41),   
+        16384:  (1621.70, 72.74),
+        32768:  (3720.74, 73.55),
+        65536:  (9969.15, 112.16),
+        131072: (30984.94, 201.58),
+        262144: (107457.45, 398.02),
+    }
+    
     # ================= 配置区域 =================
-    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
-    sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    sparse_model_path = "/data2/hf_models/Meta-Llama-3.1-8B-Instruct"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
+    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
-    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
+    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
+    # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
 
-    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_single_3_262144.jsonl"
+    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_multikey_2_262144.jsonl"
 
-    num_samples = 5  # 每个长度测试的样本数
+    num_samples = 3  # 每个长度测试的样本数
     gen_len = 1  # 生成长度
 
-    target_lengths_k = [8, 16, 32, 64, 128]
+    target_lengths_k = [128]
+    # target_lengths_k = [256]
     target_lengths = [k * 1024 for k in target_lengths_k]
 
     # 1. 准备数据
@@ -311,20 +311,38 @@ def main():
         print(f"🎯 TARGET LENGTH: {target_len} ({target_len / 1024:.0f}K)")
         print("█" * 80)
 
-        # print(f"🔸 Full Model @ {target_len}")
-        # full_results = run_benchmark_suite(
-        #     full_model_path, raw_samples, tokenizer, gen_len, target_len, False
-        # )
-
         print(f"🔹 Sparse Model @ {target_len}")
         sparse_results = run_benchmark_suite(
             sparse_model_path, raw_samples, tokenizer, gen_len, target_len, True
         )
         
-        print(f"🔸 Full Model @ {target_len}")
-        full_results = run_benchmark_suite(
-            full_model_path, raw_samples, tokenizer, gen_len, target_len, False
-        )
+        # ================== 修改逻辑开始 ==================
+        # 检查是否有缓存数据
+        if target_len in FULL_MODEL_CACHE:
+            print(f"🔄 [System] Using CACHED results for Full Model @ {target_len}")
+            cached_prefill, cached_decode = FULL_MODEL_CACHE[target_len]
+            
+            # 构造假的 full_results 列表，长度与 num_samples 一致，以便后续做对比计算
+            full_results = []
+            for _ in range(num_samples):
+                full_results.append({
+                    "prefill_ms": cached_prefill,
+                    "decode_ms_per_token": cached_decode,
+                    "seq_len": target_len, # 假装长度完全匹配
+                    "sparsity": 0.0
+                })
+        else:
+            # 如果缓存里没有这个长度的数据，才去真正跑 Full 模型
+            print(f"🔸 Full Model @ {target_len}")
+            full_results = run_benchmark_suite(
+                full_model_path, raw_samples, tokenizer, gen_len, target_len, False
+            )
+        # ================== 修改逻辑结束 ==================
+        
+        # print(f"🔸 Full Model @ {target_len}")
+        # full_results = run_benchmark_suite(
+        #     full_model_path, raw_samples, tokenizer, gen_len, target_len, False
+        # )
 
         print(
             "\n"

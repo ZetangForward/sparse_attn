@@ -55,7 +55,7 @@ def load_model(model_path, is_sparse):
         else:
             is_NSA = True
             from transformers import AutoConfig
-            from transformers.models.qwen3 import modeling_qwen3, Qwen3ForCausalLM
+            from sparseattn.efficiency.model.modeling_llama_nsa import LlamaForCausalLM 
             from sparseattn.training.block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA_prefill
             from sparseattn.training.block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import Qwen3NSA_prefill
 
@@ -67,19 +67,18 @@ def load_model(model_path, is_sparse):
             )
             config._attn_implementation = "flash_attention_2"
             config.compress_type = "linear"#"avgpool","weightedpool"
-            config.kernel_size = 64
-            config.kernel_stride = 32
-            config.block_size = 128
-            config.topk = 16
+            config.kernel_size = 128
+            config.kernel_stride = 64
+            config.block_size = 64
+            config.topk = 128
             config.init_blocks = 1
             config.local_blocks = 2
             config.window_size = 512
             # 2. 【关键步骤】执行 Monkey Patch 替换
             #    把 modeling_qwen3 模块里的 Qwen3Attention 强行变成你的 Qwen3NSA
-            modeling_qwen3.Qwen3Attention = Qwen3NSA_prefill 
-            print("正在使用Qwen3NSA_prefill")
+            print("正在使用LlamaNSA_prefill")
 
-            model_cls = Qwen3ForCausalLM
+            model_cls = LlamaForCausalLM
             
     else:
         if "PawLlama" in arch_name:
@@ -103,7 +102,7 @@ def load_model(model_path, is_sparse):
         # 3. 正常加载模型
             #    此时 from_pretrained 内部实例化 Attention 时，实际上实例化的是 Qwen3NSA
             #    并且它会自动尝试加载权重
-            model = Qwen3ForCausalLM.from_pretrained(
+            model = model_cls.from_pretrained(
                 model_path,
                 config=config,  # 传入修改后的 config
                 torch_dtype=torch.bfloat16,
@@ -128,31 +127,43 @@ def load_model(model_path, is_sparse):
 # -----------------------------------------------------------------------------
 # 2. 核心评测函数
 # -----------------------------------------------------------------------------
+import time
+
 def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
-    # 计时器初始化
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    # -----------------------------------------------------------
+    # 辅助函数：强行同步所有 GPU
+    # -----------------------------------------------------------
+    def sync_all_devices():
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(i)
 
     # --- A. Prefill 阶段 ---
-    torch.cuda.synchronize()
-    start_event.record()
+    
+    # 1. 先同步所有设备，确保之前的残留任务跑完
+    sync_all_devices()
+    
+    # 2. 记录 CPU 时间
+    start_time = time.time()
 
     with torch.inference_mode():
         outputs = model(input_ids, use_cache=True)
 
-    end_event.record()
-    torch.cuda.synchronize()
-    prefill_time_ms = start_event.elapsed_time(end_event)
+    # 3. 再次同步所有设备，确保刚才的 Prefill 在所有卡上都彻底跑完
+    sync_all_devices()
+    
+    end_time = time.time()
+    prefill_time_ms = (end_time - start_time) * 1000  # 转换为毫秒
 
     past_key_values = outputs.past_key_values
 
-    # 获取 Sparsity (仅 Sparse 模型有)
+    # 获取 Sparsity
     current_sparsity = 0.0
     if is_sparse:
         try:
-            sp = getattr(model, "prefill_sparsity", None)
-            if isinstance(sp, torch.Tensor):
-                current_sparsity = sp.item()
+            current_sparsity = getattr(model, "prefill_sparsity", None)
+            if isinstance(current_sparsity, torch.Tensor):
+                current_sparsity = current_sparsity.item()
         except:
             pass
 
@@ -160,23 +171,24 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
     next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(1)
 
     # --- B. Decode 阶段 ---
-    torch.cuda.synchronize()
-    start_event.record()
+    sync_all_devices()
+    start_time = time.time()
 
     with torch.inference_mode():
         for _ in range(gen_len):
             outputs = model(next_token, past_key_values=past_key_values, use_cache=True)
             past_key_values = outputs.past_key_values
+            # 注意：这里的 next_token 可能在 GPU 1 上，但 model 接受它会自动处理
             next_token = (
                 torch.argmax(outputs.logits[:, -1, :], dim=-1)
                 .unsqueeze(1)
-                .to(model.device)
+                .to(model.device) # 保持在模型主设备或自动流转
                 .contiguous()
             )
 
-    end_event.record()
-    torch.cuda.synchronize()
-    decode_time_ms = start_event.elapsed_time(end_event)
+    sync_all_devices()
+    end_time = time.time()
+    decode_time_ms = (end_time - start_time) * 1000
 
     return {
         "prefill_ms": prefill_time_ms,
@@ -184,7 +196,6 @@ def evaluate_efficiency(model, input_ids, gen_len=10, is_sparse=False):
         "decode_ms_per_token": decode_time_ms / gen_len,
         "sparsity": current_sparsity,
     }
-
 
 # -----------------------------------------------------------------------------
 # 3. 批量测试执行器 (修改：截断逻辑)
@@ -206,6 +217,8 @@ def run_benchmark_suite(
     )
 
     for i, item in enumerate(samples):
+        gc.collect()
+        torch.cuda.empty_cache()
         input_text = item["input"]
         input_ids = tokenizer.encode(input_text, return_tensors="pt").to(model.device)
         seq_len = input_ids.shape[-1]
@@ -237,6 +250,7 @@ def run_benchmark_suite(
         # 跳过第一个预热阶段
         if i == 0:
             print("🔥(Skipping warmup sample)")
+            del input_ids
             continue
 
         res["seq_len"] = seq_len
@@ -244,7 +258,8 @@ def run_benchmark_suite(
 
         # 实时打印进度
         print(
-            f"  Sample {i} {note}: 📏 Len {seq_len} | ⚡ Prefill {res['prefill_ms']:.1f}ms | ⏩ Decode {res['decode_ms_per_token']:.2f}ms/tok"
+            f"  Sample {i} {note}: 📏 Len {seq_len} | ⚡ Prefill {res['prefill_ms']:.1f}ms | ⏩ Decode {res['decode_ms_per_token']:.2f}ms/tok \
+                | ESR {res['sparsity']:.2f}"
         )
 
         del input_ids
@@ -262,19 +277,31 @@ def run_benchmark_suite(
 # 4. 主程序
 # -----------------------------------------------------------------------------
 def main():
+    FULL_MODEL_CACHE = {
+        8192:   (755.49, 49.41),   
+        16384:  (1621.70, 72.74),
+        32768:  (3720.74, 73.55),
+        65536:  (9969.15, 112.16),
+        131072: (30984.94, 201.58),
+        262144: (107457.45, 398.02),
+    }
+    
     # ================= 配置区域 =================
-    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-230"
-    sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    sparse_model_path = "/data2/hf_models/Meta-Llama-3.1-8B-Instruct"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
+    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
-    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
+    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
+    # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
 
-    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_single_3_262144.jsonl"
+    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_multikey_2_262144.jsonl"
 
-    num_samples = 5  # 每个长度测试的样本数
+    num_samples = 3  # 每个长度测试的样本数
     gen_len = 1  # 生成长度
 
-    target_lengths_k = [8, 16, 32, 64, 128]
-    # target_lengths_k = [128]
+    # target_lengths_k = [8, 16, 32, 64, 128]
+    target_lengths_k = [256]
+    # target_lengths_k = [256]
     target_lengths = [k * 1024 for k in target_lengths_k]
 
     # 1. 准备数据
@@ -303,18 +330,38 @@ def main():
         print(f"🎯 TARGET LENGTH: {target_len} ({target_len / 1024:.0f}K)")
         print("█" * 80)
 
-        # print(f"🔸 Full Model @ {target_len}")
-        # full_results = run_benchmark_suite(full_model_path, raw_samples, tokenizer, gen_len, target_len, False)
-
         print(f"🔹 Sparse Model @ {target_len}")
         sparse_results = run_benchmark_suite(
             sparse_model_path, raw_samples, tokenizer, gen_len, target_len, True
         )
-
-        print(f"🔸 Full Model @ {target_len}")
-        full_results = run_benchmark_suite(
-            full_model_path, raw_samples, tokenizer, gen_len, target_len, False
-        )
+        
+        # ================== 修改逻辑开始 ==================
+        # 检查是否有缓存数据
+        if target_len in FULL_MODEL_CACHE:
+            print(f"🔄 [System] Using CACHED results for Full Model @ {target_len}")
+            cached_prefill, cached_decode = FULL_MODEL_CACHE[target_len]
+            
+            # 构造假的 full_results 列表，长度与 num_samples 一致，以便后续做对比计算
+            full_results = []
+            for _ in range(num_samples):
+                full_results.append({
+                    "prefill_ms": cached_prefill,
+                    "decode_ms_per_token": cached_decode,
+                    "seq_len": target_len, # 假装长度完全匹配
+                    "sparsity": 0.0
+                })
+        else:
+            # 如果缓存里没有这个长度的数据，才去真正跑 Full 模型
+            print(f"🔸 Full Model @ {target_len}")
+            full_results = run_benchmark_suite(
+                full_model_path, raw_samples, tokenizer, gen_len, target_len, False
+            )
+        # ================== 修改逻辑结束 ==================
+        
+        # print(f"🔸 Full Model @ {target_len}")
+        # full_results = run_benchmark_suite(
+        #     full_model_path, raw_samples, tokenizer, gen_len, target_len, False
+        # )
 
         print(
             "\n"

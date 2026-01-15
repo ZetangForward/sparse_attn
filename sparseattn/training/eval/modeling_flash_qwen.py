@@ -682,20 +682,6 @@ class AttentionRouter(nn.Module):
         else:
             self.tau = temp
 
-    def reset_parameters(self):
-        nn.init.kaiming_uniform_(
-            self.cls_router_head_agnostic[0].weight, a=math.sqrt(5)
-        )
-        nn.init.zeros_(self.cls_router_head_agnostic[0].bias)
-
-        nn.init.kaiming_uniform_(
-            self.cls_router_head_agnostic[2].weight, a=math.sqrt(5)
-        )
-        nn.init.zeros_(self.cls_router_head_agnostic[2].bias)
-
-        nn.init.zeros_(self.cls_router_head_agnostic[4].weight)
-        nn.init.constant_(self.cls_router_head_agnostic[4].bias, 1.0)
-
     def forward(
         self,
         x,
@@ -720,23 +706,7 @@ class AttentionRouter(nn.Module):
         """
         bsz = (cu_seq_len.shape[0] - 1) if cu_seq_len is not None else 1
 
-        if self.pooling_mode == "first_token":
-            if cu_seq_len is not None:
-                pooled_latent = self._segment_pooling(
-                    x, range_ids, ["first_token"], cu_seq_len
-                )  # [B, H, D]
-            else:
-                pooled_latent = self._segment_pooling_single_batch(
-                    x, range_ids, ["first_token"]
-                )
-        elif self.pooling_mode == "q":
-            if cu_seq_len is not None:
-                pooled_latent = self._segment_pooling(
-                    x, range_ids, ["q"], cu_seq_len
-                )  # [B, H, D]
-            else:
-                pooled_latent = self._segment_pooling_single_batch(x, range_ids, ["q"])
-        elif self.pooling_mode == "ctx_q":
+        if self.pooling_mode == "ctx_q":
             if cu_seq_len is not None:
                 B = cu_seq_len.shape[0] - 1
                 H, D = x.shape[1:]
@@ -755,14 +725,6 @@ class AttentionRouter(nn.Module):
                 pooled_latent = target  # [H, D]
         else:
             raise ValueError(f"Unknown pooling_mode: {self.pooling_mode}")
-
-        if self.use_task_emb:
-            if self.training:
-                task_emb = self.task_embedding(task_ids)  # [B, D]
-                task_emb_expanded = task_emb.unsqueeze(1)
-                pooled_latent = pooled_latent + task_emb_expanded
-            else:
-                pooled_latent = pooled_latent
 
         pooled_hidden_states = self.cls_feat_extractor(pooled_latent)
 
@@ -805,111 +767,6 @@ class AttentionRouter(nn.Module):
             "logits": binary_logits,
             "entropy": entropy,
         }
-
-    def _segment_pooling_single_batch(
-        self, pooled_input: torch.Tensor, range_ids: torch.Tensor, segments: list
-    ) -> torch.Tensor:
-        B, S, H, D = pooled_input.shape
-        pooled_features_list = []
-
-        POOL_MAP = {
-            "first_token": (0, 1),
-            "ctx": (2, 3),
-            "q": (4, 5),
-            "a": (6, 7),
-            "ctx_q": (2, 5),
-        }
-        for i in range(B):
-            sample_features = []
-
-            for seg in segments:
-                start_idx, end_idx = POOL_MAP[seg]
-                start, end = (
-                    range_ids[i, start_idx : end_idx + 1].tolist()[0],
-                    range_ids[i, start_idx : end_idx + 1].tolist()[-1],
-                )
-                if end >= start:
-                    # seg_slice = pooled_input[i, start : end + 1, :, :]
-                    start_slice = pooled_input[i, start : start + 100, :, :]
-                    end_slice = pooled_input[i, end - 100 : end + 1, :, :]
-                    combined_slice = torch.cat((start_slice, end_slice), dim=0)
-                    seg_pooled = combined_slice.mean(dim=0)  # [H, D]
-                else:
-                    seg_pooled = torch.zeros(H, D, device=pooled_input.device)
-
-                sample_features.append(seg_pooled)
-
-            if sample_features:
-                combined_feature = torch.stack(sample_features, dim=0).mean(
-                    dim=0
-                )  # [H, D]
-            else:
-                combined_feature = torch.zeros(H, D, device=pooled_input.device)
-
-            pooled_features_list.append(combined_feature)
-
-        return torch.stack(pooled_features_list, dim=0)  # [B, H, D]
-
-    def _segment_pooling(
-        self,
-        x: torch.Tensor,
-        range_ids: torch.Tensor,
-        segments: list[str],
-        cu_seq_len: torch.Tensor,
-    ) -> torch.Tensor:
-        """_summary_
-
-        Args:
-            x (torch.Tensor): [cu_seqlen, H, D]
-            range_ids (torch.Tensor): _description_
-            segments (list[str]): _description_
-            cu_seq_len (torch.Tensor): _description_
-
-        Returns:
-            torch.Tensor: _description_
-        """
-        POOL_MAP = {
-            "first_token": (0, 1),
-            "ctx": (2, 3),
-            "q": (4, 5),
-            "a": (6, 7),
-            "ctx_q": (2, 5),
-        }
-
-        B = cu_seq_len.shape[0] - 1
-        H, D = x.shape[1:]
-        pooled_features_list = []
-
-        for i in range(B):
-            sample_features = []
-            x_s, x_e = cu_seq_len[i], cu_seq_len[i + 1]
-            for seg in segments:
-                start_idx, end_idx = POOL_MAP[seg]
-                start, end = (
-                    range_ids[i, start_idx : end_idx + 1].tolist()[0],
-                    range_ids[i, start_idx : end_idx + 1].tolist()[-1],
-                )
-
-                if end >= start:
-                    start_slice = pooled_input[i, start : start + 100, :, :]
-                    end_slice = pooled_input[i, end - 99 : end + 1, :, :]
-                    combined_slice = torch.cat((start_slice, end_slice), dim=0)
-                    seg_pooled = combined_slice.mean(dim=0)  # [H, D]
-                else:
-                    seg_pooled = torch.zeros(H, D, device=x.device)
-
-                sample_features.append(seg_pooled)
-
-            if sample_features:
-                combined_feature = torch.stack(sample_features, dim=0).mean(
-                    dim=0
-                )  # [H, D]
-            else:
-                combined_feature = torch.zeros(H, D, device=x.device)
-
-            pooled_features_list.append(combined_feature)
-
-        return torch.stack(pooled_features_list, dim=0)  # [B, H, D]
 
 
 class Qwen3Attention(nn.Module):
@@ -1008,12 +865,12 @@ class Qwen3Attention(nn.Module):
             # self.head_indices = self.num_heads // self.num_key_value_heads
             self.head_indices = self.num_heads
             self.xattn_flash_attn_func = xattn_flash_attn_func
-            self.granularity = int(getattr(config, "block_size", 64))
+            self.granularity = int(getattr(config, "block_size", 128))
             self.xattn_params = {
                 "stride": 16,
                 "norm": 1,
                 "softmax": True,
-                "threshold": 0.4,
+                "threshold": 0.7,
                 "chunk_size": 16384,
                 "select_mode": "inverse",
                 "use_triton": True,
@@ -1042,7 +899,7 @@ class Qwen3Attention(nn.Module):
             self.topk_k = int(getattr(config, "topk_k", 2048))
             self.topk_q_chunk = int(os.environ.get("TOPK_Q_CHUNK", 128))
             self.topk_k_chunk = int(os.environ.get("TOPK_K_CHUNK", 4096))
-        elif self.toggle_type == "xattn" or self.toggle_type == "full":
+        elif self.toggle_type == "xattn" or self.retrieval_mode == "xattn":
             from sparseattn.utils.ops.xattention_fa import xattn_flash_attn_func
 
             self.streaming_info_kwargs = {
@@ -1052,12 +909,12 @@ class Qwen3Attention(nn.Module):
             # self.head_indices = self.num_heads // self.num_key_value_heads
             self.head_indices = self.num_heads
             self.xattn_flash_attn_func = xattn_flash_attn_func
-            self.granularity = int(getattr(config, "block_size", 64))
+            self.granularity = int(getattr(config, "block_size", 128))
             self.xattn_params = {
                 "stride": 16,
                 "norm": 1,
                 "softmax": True,
-                "threshold": 0.4,
+                "threshold": 0.7,
                 "chunk_size": 16384,
                 "select_mode": "inverse",
                 "use_triton": True,
@@ -1299,6 +1156,7 @@ class Qwen3Attention(nn.Module):
                     cu_seqlens,
                     norm,
                     threshold,
+                    block_size=self.granularity,
                     use_triton=True,
                     head_mask_type=head_mask_type,
                     sink_num=self.sink_blocks,

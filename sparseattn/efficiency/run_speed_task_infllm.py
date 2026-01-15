@@ -111,35 +111,10 @@ def load_model(model_path, is_sparse):
             AutoModelForCausalLM.register(PawQwen3Config, PawQwen3ForCausalLM)
             model_cls = PawQwen3ForCausalLM
 
-    if config is None:
-        max_memory_mapping = {
-            0: "20GiB",  # GPU0 留出大量空间做计算
-            1: "75GiB",
-            2: "75GiB",
-            3: "75GiB",  # 根据你的卡数调整
-        }
-        
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            max_memory=max_memory_mapping, # <--- 关键修改
-            trust_remote_code=True,
-            config=config,
-        )
-    else:
-        max_memory_mapping = {
-            0: "20GiB",  # GPU0 留出大量空间做计算
-            1: "75GiB",
-            2: "75GiB",
-            3: "75GiB",  # 根据你的卡数调整
-        }
-        
-        model = model_cls.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            max_memory=max_memory_mapping, # <--- 关键修改
             trust_remote_code=True,
             config=config,
         )

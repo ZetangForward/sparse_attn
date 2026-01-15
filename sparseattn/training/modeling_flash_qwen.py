@@ -826,7 +826,7 @@ class AttentionRouter(nn.Module):
                 nn.Linear(4 * d_feature, d_feature),
                 nn.SiLU(),
                 nn.Linear(d_feature, 1),
-                nn.LayerNorm([self.num_kv, 1], elementwise_affine=False),
+                # nn.LayerNorm([self.num_kv, 1], elementwise_affine=False),
             )
 
         if self.use_task_emb:

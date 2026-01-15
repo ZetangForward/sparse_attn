@@ -32,7 +32,7 @@ def load_model(model_path, is_streaming):
             AutoModelForCausalLM.register(PawLlamaConfig, PawLlamaForCausalLM)
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_qwen_streaming_decode import (
+            from sparseattn.efficiency.model.modeling_flash_qwen_streaming import (
                 PawQwen3ForCausalLM,
                 PawQwen3Config,
             )
@@ -124,7 +124,7 @@ def run_benchmark_suite(
     # Warmup
     print("🔥 [System] Warming up GPU...")
     dummy = tokenizer.encode("Warmup " * 10, return_tensors="pt").to(model.device)
-    evaluate_efficiency(model, dummy, gen_len=2, is_sparse=is_sparse)
+    evaluate_efficiency(model, dummy, gen_len=2, is_streaming=is_streaming)
     # breakpoint()
 
     print(

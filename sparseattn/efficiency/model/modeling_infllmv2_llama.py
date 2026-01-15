@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
-from typing import Callable, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Any, Dict
 
 import torch
 import torch.utils.checkpoint
@@ -37,6 +37,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
+from dataclasses import dataclass
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
@@ -780,6 +781,7 @@ class infllmv2_LlamaAttention(nn.Module):
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
+        spa = 0.0
         dropout_rate = 0.0
         kv_seq_len = key_states.shape[1]
         q_len = query_states.shape[1]
@@ -798,7 +800,7 @@ class infllmv2_LlamaAttention(nn.Module):
             repeated_query_states = query_states.repeat_interleave(
                 4, dim=2
             )  # [batch_size, seq_len, num_heads * 4, head_dim]
-            attn_output = self._sparse_attention_forward(
+            attn_output, spa = self._sparse_attention_forward(
                 repeated_query_states,
                 key_states,
                 value_states,
@@ -819,7 +821,7 @@ class infllmv2_LlamaAttention(nn.Module):
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        return attn_output, None
+        return attn_output, None, spa
 
     def _sparse_attention_forward(
         self,
@@ -903,7 +905,7 @@ class infllmv2_LlamaAttention(nn.Module):
                 # compressed_k and compressed_k2 already retrieved from get_compress_k above
                 pass
 
-            attn_output_unpad = self.sparse_forward(
+            attn_output_unpad, spa = self.sparse_forward(
                 query_states,
                 key_states,
                 value_states,
@@ -925,7 +927,7 @@ class infllmv2_LlamaAttention(nn.Module):
         else:
             raise ValueError("Need attention mask")
 
-        return attn_output
+        return attn_output, spa
 
     def get_compress_k(self, key_states, attention_mask, past_key_value):
         """
@@ -1131,9 +1133,40 @@ class infllmv2_LlamaAttention(nn.Module):
             # block_window_size=self.window_size // self.block_size,
             topk_idx=topk_idx,
         )
+        with torch.no_grad():
+            # 1. 获取每个 Batch 中最后一个 Query Token 的索引
+            # cu_seqlens_q: [0, s1, s1+s2, ...] -> last_indices: [s1-1, s1+s2-1, ...]
+            last_token_indices = cu_seqlens_q[1:] - 1
+            
+            # 2. 提取这些 Token 对应的检索结果
+            # selected_blocks shape: [num_heads, batch_size, num_blocks]
+            selected_blocks = topk_idx[:, last_token_indices, :]
+            
+            # 3. 统计有效 Block 数量 (通常无效 Block 会被填充为 -1)
+            # 如果你的实现不使用 -1 padding 而是固定大小，可以直接用 selected_blocks.shape[-1]
+            valid_block_counts = (selected_blocks > -1).sum(dim=-1).float()  # [num_heads, batch_size]
+            
+            # 4. 对所有 Head 取平均，得到平均每个 Head 关注的 Block 数
+            avg_blocks_per_head = valid_block_counts.mean(dim=0)  # [batch_size]
+            
+            # 5. 转换为 Token 数 (attend_tokens)
+            attend_tokens = avg_blocks_per_head * self.block_size
+            
+            # 6. 获取总 Token 数 (all_tokens)，即当前的 K 序列长度
+            all_tokens = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).float().to(attend_tokens.device)
+            
+            # 7. 计算稀疏度: 1 - (attend / all)
+            spa = 1.0 - (attend_tokens / (all_tokens)).float()
+            
+            # 如果需要打印或记录平均值
+            # avg_sparsity = sparsity_tensor.mean().item()
+            # print(f"[SparseForward] Avg Sparsity: {avg_sparsity:.4f}")
+
+        # 如果需要释放内存
         del topk_idx, compressed_k, compressed_k2
 
-        return topk_attn_output
+        # 你可以将 avg_sparsity 放在返回值里，或者返回整个 tensor
+        return topk_attn_output, spa
 
     def _flash_attention_forward_dense(
         self,
@@ -1295,7 +1328,7 @@ class infllmv2_LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights = self.self_attn(
+        hidden_states, self_attn_weights, spa = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1318,7 +1351,7 @@ class infllmv2_LlamaDecoderLayer(nn.Module):
         if output_attentions:
             outputs += (self_attn_weights,)
 
-        return outputs
+        return outputs, spa
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -1439,6 +1472,33 @@ LLAMA_INPUTS_DOCSTRING = r"""
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
     LLAMA_START_DOCSTRING,
 )
+@dataclass
+class BaseModelOutputWithPastAndSparsity(ModelOutput):
+    last_hidden_state: torch.FloatTensor
+    past_key_values: Optional[List[torch.FloatTensor]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    model_sparsity: Optional[torch.FloatTensor] = None
+    target_sparsity: Optional[torch.FloatTensor] = None
+    sparsity_loss: Optional[torch.FloatTensor] = None
+    # Diagnostics
+    expected_model_sparsity: Optional[torch.FloatTensor] = None
+    lambda1: Optional[torch.FloatTensor] = None
+    lambda2: Optional[torch.FloatTensor] = None
+    expected_z_mean: Optional[torch.FloatTensor] = None
+    expected_z_std: Optional[torch.FloatTensor] = None
+    log_alpha_mean: Optional[torch.FloatTensor] = None
+    log_alpha_std: Optional[torch.FloatTensor] = None
+    # Layer-wise sparsity diagnostics
+    layerwise_model_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_target_sparsity: Optional[torch.FloatTensor] = None  # (num_layers,)
+    layerwise_sparsity_loss: Optional[torch.FloatTensor] = None  # scalar
+    # contrastive_loss
+    contrastive_loss: Optional[torch.FloatTensor] = None
+    head_contrastive_loss: Optional[torch.FloatTensor] = None
+    log_z_loss: Optional[torch.FloatTensor] = None
+    head_entropy: Optional[torch.FloatTensor] = None
+
 class infllmv2_LlamaModel(infllmv2_LlamaPreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
@@ -1566,7 +1626,7 @@ class infllmv2_LlamaModel(infllmv2_LlamaPreTrainedModel):
                     position_embeddings,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs, spa = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -1589,11 +1649,12 @@ class infllmv2_LlamaModel(infllmv2_LlamaPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithPastAndSparsity(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            model_sparsity=spa,
         )
 
 
@@ -1652,7 +1713,7 @@ class infllmv2_LlamaForCausalLM(infllmv2_LlamaPreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[KwargsForCausalLM],
-    ) -> CausalLMOutputWithPast:
+    ) -> BaseModelOutputWithPastAndSparsity:
         r"""
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
                 Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
@@ -1696,7 +1757,7 @@ class infllmv2_LlamaForCausalLM(infllmv2_LlamaPreTrainedModel, GenerationMixin):
         )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs: BaseModelOutputWithPast = self.model(
+        outputs: BaseModelOutputWithPastAndSparsity = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1708,6 +1769,9 @@ class infllmv2_LlamaForCausalLM(infllmv2_LlamaPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             **kwargs,
         )
+        
+        if input_ids.shape[1] > 1 and use_cache:
+            self.prefill_sparsity = outputs.model_sparsity
 
         hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss

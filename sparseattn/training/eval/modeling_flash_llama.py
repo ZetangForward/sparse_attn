@@ -974,7 +974,7 @@ class LlamaAttention(nn.Module):
             "stride": 16,
             "norm": 1,
             "softmax": True,
-            "threshold": 0.4,
+            "threshold": 0.7,
             "chunk_size": 16384,
             "select_mode": "inverse",
             "use_triton": True,
@@ -1013,12 +1013,12 @@ class LlamaAttention(nn.Module):
             # self.head_indices = self.num_heads // self.num_key_value_heads
             self.head_indices = self.num_heads
             self.xattn_flash_attn_func = xattn_flash_attn_func
-            self.granularity = int(getattr(config, "block_size", 64))
+            self.granularity = int(getattr(config, "block_size", 128))
             self.xattn_params = {
                 "stride": 16,
                 "norm": 1,
                 "softmax": True,
-                "threshold": 0.4,
+                "threshold": 0.7,
                 "chunk_size": 16384,
                 "select_mode": "inverse",
                 "use_triton": True,

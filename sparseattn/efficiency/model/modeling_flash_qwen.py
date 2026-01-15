@@ -1186,6 +1186,7 @@ class Qwen3Attention(nn.Module):
         q, k = self.rotary_emb(q, k, past_len, unpadded_lengths)
 
         kv = torch.stack([k, v], -3)
+        spa = 0
 
         # Cache QKV values
         if has_layer_past:
@@ -1293,7 +1294,7 @@ class Qwen3Attention(nn.Module):
                     raise SamplerConditionError(
                         f"retrieval_mode: {self.retrieval_mode} and toggle_type: {self.toggle_type} is not supported"
                     )
-                attn_output = Xattention_prefill_dim4(
+                attn_output= Xattention_prefill_dim4(
                     q,
                     k,
                     v,
@@ -1306,6 +1307,7 @@ class Qwen3Attention(nn.Module):
                     sink_num=self.sink_blocks,
                     local_num=self.local_blocks,
                 ).transpose(1, 2)  # B, T, H, D
+                spa = max(0, (seqlen - 1024 - 128)) / seqlen
         else:
             if self.num_key_value_groups > 1:
                 kv = kv.repeat_interleave(self.num_key_value_groups, dim=-2)
@@ -1359,6 +1361,7 @@ class Qwen3Attention(nn.Module):
             attn_output,
             attn_weights,
             past_key_value,
+            spa
         )
 
 
@@ -1439,6 +1442,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             self_attn_weights,
             present_key_value,
+            spa
         ) = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -1474,7 +1478,7 @@ class Qwen3DecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
 
-        return outputs
+        return outputs, spa
 
 
 class Qwen3PreTrainedModel(PreTrainedModel):
@@ -1806,7 +1810,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     task_ids=task_ids,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs,spa = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -1849,7 +1853,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
-        model_sparsity = 1 - (z_sum / self.total_num_heads)
+        seqlen = input_ids.shape[-1]
+        spa = max(0, (seqlen - 128 - 1024)) / seqlen 
+        model_sparsity = (1 - (z_sum / self.total_num_heads)) * spa
 
         if not return_dict:
             # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)

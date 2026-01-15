@@ -7,7 +7,7 @@ import glob
 import re
 
 # 配置
-DUMP_DIR = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/nolambda_abs*100"
+DUMP_DIR = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/batch_dump_new"
 SAVE_IMG_PATH = "training_dashboard.png"
 
 

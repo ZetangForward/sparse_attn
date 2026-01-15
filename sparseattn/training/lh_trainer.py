@@ -459,11 +459,11 @@ class Trainer(HFTrainer):
                 "start": self.start_head_sparsity,
                 "end": self.end_head_sparsity,
             },
-            "Code": {"start": 0, "end": 0.9},
-            "In-Context Learning": {"start": 0, "end": 0.9},
-            "MultiHop QA": {"start": 0, "end": 0.6},
-            "Single QA": {"start": 0, "end": 0.6},
-            "Summarization": {"start": 0, "end": 0.9},
+            "Code": {"start": 0, "end": 1.0},
+            "In-Context Learning": {"start": 0, "end": 1.0},
+            "MultiHop QA": {"start": 0, "end": self.end_head_sparsity},
+            "Single QA": {"start": 0, "end": self.end_head_sparsity},
+            "Summarization": {"start": 0, "end": 1.0},
         }
         self.reverse_class_map = {
             0: "Single QA",
