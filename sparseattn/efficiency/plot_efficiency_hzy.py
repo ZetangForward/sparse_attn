@@ -6,20 +6,28 @@ import os
 
 # --- 1. ICML 风格配置 ---
 plt.rcParams.update({
-    'font.family': 'serif',
-    'font.serif': ['Times New Roman'],
-    'mathtext.fontset': 'stix',        # 公式字体与 Times 搭配最佳
-    'font.size': 12,                   # 全局字号
-    'axes.labelsize': 14,              # 轴标签字号
-    'axes.titlesize': 14,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 8,
-    'figure.dpi': 300,
-    'axes.linewidth': 1.0,             # 边框略加粗
-    'lines.linewidth': 2.0,            # 线条加粗
-    'pdf.fonttype': 42,                # 保证 PDF 字体可编辑
-})
+        # 字体设置 (最接近 LaTeX 的渲染)
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'mathtext.fontset': 'stix', # 数学公式字体
+
+        'font.size': 14,
+        'axes.labelsize': 16, # 坐标轴标题
+        'axes.titlesize': 16, # 图表标题
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        'legend.fontsize': 14, # 图例
+
+        # 布局与线条
+        'axes.linewidth': 0.8, # 边框线宽
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 1.0,
+
+        # 保存设置
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.05, # 减少留白
+    })
 
 
 # --- 2. 数据准备 ---
@@ -31,47 +39,60 @@ category_labels = [
     'Synthetic Tasks', 
     'Code'
 ]
-lengths = ['8K', '16K', '32K', '64K', '128K']
+lengths = ['8K', '16K', '32K', '64K', '128K', '256K']
 
 data_speedup = {
-    'Full + Streaming':         [1.06, 1.21, 1.45, 1.83, 2.33],
-    # 'Full + Xattn':             [0.96, 1.10, 1.24, 1.44, 1.64],
-    'PruLong':                  [1.07, 1.19, 1.41, 1.75, 2.16],
-    # 'Xattention':               [1.01, 1.17, 1.37, 1.71, 2.12],
-    'MoBA':                     [0.63, 0.64, 0.78, 1.06, 1.32],
-    'InfLLM-V2':                [1.00, 0.71, 0.80, 0.86, 1.17],
-    'Native Sparse Attention':  [0.39, 0.44, 0.55, 0.78, 1.20]
+    # 'Xattn + Streaming':        [1.08, 1.22, 1.35, 1.70, 2.29, 3.28],
+    'Full + Streaming':         [1.05, 1.17, 1.34, 1.65, 2.10, 2.54],
+    # 'Full + Xattn':             [1.03, 1.09, 1.07, 1.11, 1.25, 1.51],
+    'PruLong':                  [1.12, 1.17, 1.31, 1.58, 1.96, 2.38],
+    'DuoAttention':             [1.12, 1.17, 1.31, 1.58, 1.96, 2.38],
+    # 'Xattention':               [1.04, 1.10, 1.10, 1.17, 1.39, 1.85],
+    'MoBA':                     [0.71, 0.73, 0.81, 1.02, 1.24],
+    'InfLLM-V2':                [1.00, 0.38, 0.42, 0.54, 0.81],
+    'NSA':                      [0.30, 0.27, 0.29, 0.37, 0.56, 0.83],
+    
 }
 
 data_scores = {
-    'Full + Streaming':         [90.63, 84.33, 81.39, 61.87, 66.54,],      # 性能保持较好
-    # 'Full + Xattn':             [92.82, 92, 87.8, 68.23, 78.87,],
-    'PruLong':                  [83.54, 69.35, 56.83, 30.88, 33.74,],      # 性能严重下降示例
-    # 'Xattention':               [92.96, 91.23, 89.08, 73.91, 77.69,],
-    'MoBA':                     [89.05, 67.14, 30.13, 6.13, 1.15,],
-    'InfLLM-V2':                [89.3, 80.93, 60.98, 35.9, 32.29,],      
-    'Native Sparse Attention':  [73.27, 50.68, 21.39, 22.52, 15.3,]
+    # 'Xattn + Streaming':        [89.07, 82.99, 77.74, 58.56, 64.48, 47.68],
+    'Full + Streaming':         [90.63, 84.33, 81.39, 61.87, 66.54, 53.39],      # 性能保持较好
+    # 'Full + Xattn':             [92.82, 92, 87.8, 68.23, 78.87, 68.51],
+    'PruLong':                  [83.54, 69.35, 56.83, 30.88, 33.74, 21.64],      # 性能严重下降示例
+    'DuoAttention':                  [87.2, 77.85, 66.99, 40.13, 57.45, 42.94],      # 性能严重下降示例
+    # 'Xattention':               [92.96, 91.23, 89.08, 73.91, 77.69, 35.82],
+    'MoBA':                     [89.05, 67.14, 30.13, 6.13, 1.15, 0],
+    'InfLLM-V2':                [89.3, 80.93, 60.98, 35.9, 32.29, 47.27],      
+    'NSA':                      [73.27, 50.68, 21.39, 22.52, 15.3, 11.42],
+    
 }
 
 data_sparsity = {
-    'Full + Streaming':         [0.46, 0.99, 0.73, 0.97, 0.55,],      # 性能保持较好
-    # 'Full + Xattn':             [90.6, 92.15, 61.11, 88.89, 31.12,],
-    'PruLong':                  [0.70, 0.70, 0.70, 0.70, 0.70,],      # 性能严重下降示例
-    # 'Xattention':               [89.36, 91.54, 62.43, 84.54, 31.52,],
-    'MoBA':                     [0.50, 0.50, 0.50, 0.50, 0.50,],
-    'InfLLM-V2':                [0.09, 0.79, 0.29, 0.15, 0.33,],      
-    'Native Sparse Attention':  [0.86, 0.57, 0.53, 0.65, 0.79,]
+    # 'Xattn + Streaming':        [0.86, 0.93, 0.96, 0.98, 0.99, 0.995],
+    'Full + Streaming':         [0.64, 0.69, 0.72, 0.74, 0.74, 0.73],      
+    # 'Full + Xattn':             [0.34, 0.38, 0.42, 0.42, 0.55, 0.65],
+    'PruLong':                  [0.60, 0.65, 0.67, 0.69, 0.69, 0.70],      
+    'DuoAttention':                  [0.60, 0.65, 0.67, 0.69, 0.69, 0.70],      
+    # 'Xattention':               [0.44, 0.50, 0.55, 0.54, 0.73, 0.86],
+    'MoBA':                     [0.00, 0.50, 0.75, 0.88, 0.94],
+    'InfLLM-V2':                [0.00, 0.63, 0.81, 0.91, 0.95],      
+    'NSA':                      [0.00, 0.47, 0.74, 0.87, 0.93, 0.97],
+    
+    
 }
 
 # --- 3. 样式映射 (保持不变) ---
 style_map = {
-    'Full + Streaming': {'color': 'tab:blue',   'marker': 'o', 'linestyle': '-',  'linewidth': 1.8, 'zorder': 10, 'label': 'Full + Streaming (Ours)'},
-    # 'Full + Xattn':     {'color': 'tab:red',    'marker': 'o', 'linestyle': '-',  'linewidth': 1.8, 'zorder': 9,  'label': 'Full + Xattn (Ours)'},
-    # 'Xattention':       {'color': 'tab:orange', 'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 5,  'label': 'Xattention'},
-    'PruLong':          {'color': 'tab:green',  'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 4,  'label': 'PruLong'},
-    'MoBA':             {'color': 'tab:purple', 'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 3,  'label': 'MoBA'},
-    'InfLLM-V2':        {'color': 'tab:brown',  'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 2,  'label': 'InfLLM-V2'},
-    'Native Sparse Attention': {'color': 'tab:gray', 'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 1, 'label': 'Native Sparse Attention'}
+    'Xattn + Streaming':{'color': 'tab:purple', 'marker': 'o', 'linestyle': '-',  'linewidth': 2.5, 'zorder': 11, 'label': 'Ours (XA-SA)'},
+    'Full + Streaming': {'color': 'tab:blue',   'marker': 'o', 'linestyle': '-',  'linewidth': 2.5, 'zorder': 10, 'label': 'Ours (FA-SA)'},
+    'Full + Xattn':     {'color': 'tab:red',    'marker': 'o', 'linestyle': '-',  'linewidth': 2.5, 'zorder': 9,  'label': 'Ours (FA-XA)'},
+    'Xattention':       {'color': 'tab:orange', 'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 8,  'label': 'Xattention'},
+    'PruLong':          {'color': 'dodgerblue',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 7,  'label': 'PruLong'},
+    'DuoAttention':     {'color': 'lightskyblue',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 6,  'label': 'DuoAttention'},
+    'MoBA':             {'color': 'tab:green', 'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 5,  'label': 'MoBA'},
+    # 'InfLLM-V2':        {'color': 'tab:brown',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 4,  'label': 'InfLLM-V2'},
+    'InfLLM-V2':        {'color': 'tab:purple',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 4,  'label': 'InfLLM-V2'},
+    'NSA':              {'color': 'tab:gray', 'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 3, 'label': 'NSA'}
 }
 
 
@@ -114,9 +135,9 @@ style_map = {
 #         'color': 'tab:brown',
 #         'marker': '*', 'linestyle': '--',  'linewidth': 1.2, 'zorder': 2,  'label': 'InfLLM-V2'
 #     },
-#     'Native Sparse Attention': {
+#     'NSA': {
 #         'color': 'tab:gray',
-#         'marker': 'X', 'linestyle': '--',   'linewidth': 1.2, 'zorder': 1,  'label': 'Native Sparse Attention'
+#         'marker': 'X', 'linestyle': '--',   'linewidth': 1.2, 'zorder': 1,  'label': 'NSA'
 #     }
 # }
 
@@ -150,7 +171,7 @@ def plot_scaling_trend(x_cats, data, filename):
     ax.axhline(y=1.0, color='#444444', linestyle='--', linewidth=1.2, zorder=0)
     # 调整文字位置，避免遮挡
     ax.text(3, 0.92, 'Full Attention Baseline', 
-        fontsize=10, color='#444444', fontstyle='italic',
+         color='#444444', fontstyle='italic',
         ha='left', va='bottom')
 
     # 坐标轴设置
@@ -216,8 +237,8 @@ def plot_bar_tasks(x_cats, data, filename):
     ax.set_xticks(x)
     ax.set_xticklabels(x_cats, rotation=25, ha='right', fontsize=11)
     
-    ax.set_ylabel('Normalized Speedup', fontweight='bold')
-    ax.set_xlabel('LongBench Subtasks', fontweight='bold')
+    ax.set_ylabel('Normalized Speedup', )
+    ax.set_xlabel('LongBench Subtasks', )
     
     # 去除多余边框
     ax.spines['top'].set_visible(False)
@@ -281,7 +302,7 @@ def plot_category_speedup(x_cats, data, filename):
     # X轴设置
     ax.set_xticks(x)
     ax.set_xticklabels(x_cats, rotation=15, ha='right', fontsize=11) # 稍微倾斜避免重叠
-    # ax.set_xlabel('Tasks', fontweight='bold') # 横轴标签可选
+    # ax.set_xlabel('Tasks', ) # 横轴标签可选
 
     # 网格线 (仅 Y 轴)
     ax.grid(axis='y', linestyle='--', alpha=0.3, zorder=0)
@@ -347,7 +368,7 @@ def plot_bubble_scaling(x_cats, y_data, score_data, filename):
 
     # 3. 装饰
     ax.axhline(y=1.0, color='#444444', linestyle='--', linewidth=1.2, zorder=0)
-    ax.text(0, 0.92, 'Baseline (Full Attn)', fontsize=10, color='#444444', fontstyle='italic')
+    ax.text(0, 0.92, 'Baseline',  color='b', fontstyle='italic')
 
     ax.set_xticks(x)
     ax.set_xticklabels(x_cats)
@@ -432,8 +453,8 @@ def plot_bubble_scaling(x_cats, y_data, score_data, filename):
 #     # 标注 Context Length (可选，画在某个明显的模型旁边)
 #     # 比如在 Full + Streaming 的点旁边标 8K, 128K...
     
-#     ax.set_xlabel('Speedup (vs Full Attention)', fontsize=14, fontweight='bold')
-#     ax.set_ylabel('Average Score', fontsize=14, fontweight='bold')
+#     ax.set_xlabel('Speedup (vs Full Attention)', fontsize=14, )
+#     ax.set_ylabel('Average Score', fontsize=14, )
 #     ax.set_title('Efficiency vs. Performance Trade-off', fontsize=14)
     
 #     ax.grid(True, linestyle='--', alpha=0.3)
@@ -461,189 +482,299 @@ def plot_bubble_scaling(x_cats, y_data, score_data, filename):
 
 
 
-# --- 2. 数据准备 ---
-category_labels = [
-    'Single-Document QA', 
-    'Multi-Document QA', 
-    'Summarization', 
-    'Few-shot Learning', 
-    'Synthetic Tasks', 
-    'Code'
-]
-lengths = ['8K', '16K', '32K', '64K', '128K', '256K']
 
-data_speedup = {
-    # 'Full + Streaming':         [1.06, 1.21, 1.45, 1.83, 2.33, 1],
-    'Full + Xattn':             [0.96, 1.10, 1.24, 1.44, 1.64, 1],
-    # 'PruLong':                  [1.07, 1.19, 1.41, 1.75, 2.16, 1],
-    'Xattention':               [1.01, 1.17, 1.37, 1.71, 2.12, 1],
-    'MoBA':                     [0.63, 0.64, 0.78, 1.06, 1.32, 1],
-    'InfLLM-V2':                [1.00, 0.71, 0.80, 0.86, 1.17, 1],
-    'Native Sparse Attention':  [0.39, 0.44, 0.55, 0.78, 1.20, 1]
-}
 
-data_scores = {
-    # 'Full + Streaming':         [90.63, 84.33, 81.39, 61.87, 66.54, 53.39],      # 性能保持较好
-    'Full + Xattn':             [92.82, 92, 87.8, 68.23, 78.87, 68.51],
-    # 'PruLong':                  [83.54, 69.35, 56.83, 30.88, 33.74, 21.64],      # 性能严重下降示例
-    'Xattention':               [92.96, 91.23, 89.08, 73.91, 77.69, 35.82],
-    'MoBA':                     [89.05, 67.14, 30.13, 6.13, 1.15, 0],
-    'InfLLM-V2':                [89.3, 80.93, 60.98, 35.9, 32.29, 47.27],      
-    'Native Sparse Attention':  [73.27, 50.68, 21.39, 22.52, 15.3, 11.42]
-}
-
-data_sparsity = {
-    # 'Full + Streaming':         [0, 0, 0, 0, 0, 0],
-    'Full + Xattn':             [0, 0, 0, 0, 0, 0],
-    # 'PruLong':                  [0, 0, 0, 0, 0, 0],
-    'Xattention':               [0, 0, 0, 0, 0, 0],
-    'MoBA':                     [0, 0, 0, 0, 0, 0],
-    'InfLLM-V2':                [0, 0, 0, 0, 0, 0],
-    'Native Sparse Attention':  [0, 0, 0, 0, 0, 0]
-}
-
-# --- 3. 样式映射 (保持不变) ---
-style_map = {
-    'Full + Streaming': {'color': 'tab:blue',   'marker': 'o', 'linestyle': '-',  'linewidth': 1.8, 'zorder': 10, 'label': 'Full + Streaming (Ours)'},
-    'Full + Xattn':     {'color': 'tab:red',    'marker': 'o', 'linestyle': '-',  'linewidth': 1.8, 'zorder': 9,  'label': 'Full + Xattn (Ours)'},
-    'Xattention':       {'color': 'tab:orange', 'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 5,  'label': 'Xattention'},
-    'PruLong':          {'color': 'tab:green',  'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 4,  'label': 'PruLong'},
-    'MoBA':             {'color': 'tab:purple', 'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 3,  'label': 'MoBA'},
-    'InfLLM-V2':        {'color': 'tab:brown',  'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 2,  'label': 'InfLLM-V2'},
-    'Native Sparse Attention': {'color': 'tab:gray', 'marker': 'o', 'linestyle': '--', 'linewidth': 1.2, 'zorder': 1, 'label': 'Native Sparse Attention'}
-}
+import os
+import numpy as np
+import matplotlib.pyplot as plt
 
 def plot_separated(x_cats, data_speed, data_score, data_sparsity, filename_base):
-    """
-    filename_base: 例如 '/path/to/side_by_side.pdf'
-    会自动保存为:
-      - /path/to/side_by_side1.pdf (Score)
-      - /path/to/side_by_side2.pdf (Speedup)
-      - /path/to/side_by_side3.pdf (Sparsity)
-    """
-    
-    # 处理文件名，去掉后缀，方便拼接 1, 2, 3
     base_path, ext = os.path.splitext(filename_base)
-    if not ext: 
+    if not ext:
         ext = '.pdf'
-    
-    x = np.arange(len(x_cats))
-    
+
+    # 完整的 X 轴索引 [0, 1, 2, 3, 4, 5]
+    x_full = np.arange(len(x_cats))
+
     # =======================================================
-    # 图 1：Score (Bar Chart) -> 保存为 ...1.pdf
+    # 图 1：Score (Bar Chart)
     # =======================================================
-    # 调整 figsize，单张图一般用 (6, 5) 或者 (5, 4) 比较合适
-    fig1, ax1 = plt.subplots(figsize=(6, 5)) 
-    
+    fig1, ax1 = plt.subplots(figsize=(6, 5))
+
     valid_models = [m for m in style_map.keys() if m in data_score]
     n_models = len(valid_models)
-    total_width = 0.85          
+    total_width = 0.85
     bar_width = total_width / n_models
-    
+
     for i, label in enumerate(valid_models):
         if label not in data_score: continue
         values = data_score[label]
         style = style_map[label]
-        
-        offset = (i - (n_models - 1) / 2) * bar_width
-        
-        ax1.bar(x + offset, values, width=bar_width,
-               color=style['color'],           
-               edgecolor='white', linewidth=0.5,
-               label=style.get('label', label),
-               alpha=0.9,
-               zorder=3)
 
-    # ax1.set_title('(a) RULER Score', fontsize=14, pad=10)
-    ax1.set_ylabel('Performance', fontweight='bold')
-    ax1.set_xlabel('Context Length', fontweight='bold')
-    ax1.set_xticks(x)
+        # --- 修改点 1: 动态获取当前数据的长度 ---
+        n_points = len(values)
+        # 截取对应的 x 轴部分
+        current_x = x_full[:n_points]
+
+        offset = (i - (n_models - 1) / 2) * bar_width
+
+        # 绘图时使用 current_x
+        ax1.bar(current_x + offset, values, width=bar_width,
+                color=style['color'],
+                edgecolor='white', linewidth=0.5,
+                label=style.get('label', label),
+                alpha=0.9,
+                zorder=3)
+
+    ax1.set_ylabel('Performance')
+    ax1.set_xlabel('Context Length')
+    ax1.set_xticks(x_full)
     ax1.set_xticklabels(x_cats)
     ax1.grid(axis='y', linestyle='--', alpha=0.3, zorder=0)
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
-    
-    # 独立图必须加图例
-    ax1.legend(loc='best', frameon=False, fontsize=10)
-    
+    ax1.legend(loc='best', frameon=False)
+
     plt.tight_layout()
-    save_path1 = f"{base_path}4{ext}" #name
+    save_path1 = f"{base_path}1{ext}"
     plt.savefig(save_path1, format='pdf', bbox_inches='tight')
-    plt.close(fig1) # 关闭图形释放内存
+    plt.close(fig1)
     print(f"Saved: {save_path1}")
 
     # =======================================================
-    # 图 2：Speedup (Line Chart) -> 保存为 ...2.pdf
+    # 图 2：Speedup (Line Chart)
     # =======================================================
     fig2, ax2 = plt.subplots(figsize=(6, 5))
-    
+
     for label, values in data_speed.items():
         if label not in style_map: continue
         style = style_map[label]
-        ax2.plot(x, values, 
-                marker=style['marker'], color=style['color'], 
-                linestyle=style['linestyle'], linewidth=style['linewidth'],
-                label=style.get('label', label), zorder=style['zorder'])
-    
-    ax2.axhline(y=1.0, color='#444444', linestyle=':', linewidth=1.5, zorder=0)
-    # ax2.set_title('(c) Efficiency Analysis', fontsize=14, pad=10)
-    ax2.set_ylabel('Speedup', fontweight='bold')
-    ax2.set_xlabel('Context Length', fontweight='bold')
-    ax2.set_xticks(x)
+
+        # --- 修改点 2: 动态获取长度并截取 x 轴 ---
+        n_points = len(values)
+        current_x = x_full[:n_points]
+
+        ax2.plot(current_x, values,
+                 marker=style['marker'], color=style['color'],
+                 linestyle=style['linestyle'], linewidth=style['linewidth'],
+                 label=style.get('label', label), zorder=style['zorder'])
+
+    ax2.axhline(y=1.0, color='#444444', linestyle=':', linewidth=2, zorder=0)
+    ax2.set_ylabel('Speedup')
+    ax2.set_xlabel('Context Length')
+    ax2.set_xticks(x_full)
     ax2.set_xticklabels(x_cats)
     ax2.grid(axis='y', linestyle='--', alpha=0.3)
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
-    ax2.set_ylim(top=2.25)
-    
-    # 独立图必须加图例
-    ax2.legend(loc='upper left', frameon=False, fontsize=10)
-    
-    # 原图中的注释
-    ax2.text(3, 0.85, 'Full Attention Baseline', 
-        fontsize=10, color='#444444', fontstyle='italic',
-        ha='left', va='bottom')
+    ax2.set_ylim(top=2.5) 
+    ax2.legend(loc='upper left', frameon=False)
+
+    ax2.text(4.5, 1.05, 'Baseline',
+             color="#000000",
+             ha='left', va='bottom')
 
     plt.tight_layout()
-    save_path2 = f"{base_path}5{ext}" #name
+    save_path2 = f"{base_path}2{ext}"
     plt.savefig(save_path2, format='pdf', bbox_inches='tight')
     plt.close(fig2)
     print(f"Saved: {save_path2}")
 
     # =======================================================
-    # 图 3：Sparsity (Line Chart) -> 保存为 ...3.pdf
+    # 图 3：Sparsity (Line Chart)
     # =======================================================
     fig3, ax3 = plt.subplots(figsize=(6, 5))
-    
+
     for label, values in data_sparsity.items():
         if label not in style_map: continue
         style = style_map[label]
-        ax3.plot(x, values, 
-                marker=style['marker'], color=style['color'], 
-                linestyle=style['linestyle'], linewidth=style['linewidth'],
-                label=style.get('label', label), # 这里加上label以便显示图例
-                zorder=style['zorder'])
 
-    # ax3.set_title('(b) Sparsity Rate', fontsize=14, pad=10)
-    ax3.set_ylabel('Sparsity', fontweight='bold')
-    ax3.set_xlabel('Context Length', fontweight='bold')
-    ax3.set_xticks(x)
+        # --- 修改点 3: 动态获取长度并截取 x 轴 ---
+        n_points = len(values)
+        current_x = x_full[:n_points]
+        print("current_x: ", current_x)
+        print("values: ", values)
+
+        ax3.plot(current_x, values,
+                 marker=style['marker'], color=style['color'],
+                 linestyle=style['linestyle'], linewidth=style['linewidth'],
+                 label=style.get('label', label),
+                 zorder=style['zorder'])
+
+    ax3.set_ylabel(r'$\Omega_{\mathrm{ESR}}$')
+    ax3.set_xlabel('Context Length')
+    ax3.set_xticks(x_full)
     ax3.set_xticklabels(x_cats)
     ax3.grid(axis='y', linestyle='--', alpha=0.3)
     ax3.spines['top'].set_visible(False)
     ax3.spines['right'].set_visible(False)
-    ax3.set_ylim(0, 1.1) 
-    
-    # 独立图必须加图例
-    ax3.legend(loc='upper left', frameon=False, fontsize=10)
+    ax3.set_ylim(0, 1.1)
+    ax3.legend(loc='lower right', frameon=False)
 
     plt.tight_layout()
-    save_path3 = f"{base_path}6{ext}" #name
+    save_path3 = f"{base_path}3{ext}"
     plt.savefig(save_path3, format='pdf', bbox_inches='tight')
     plt.close(fig3)
     print(f"Saved: {save_path3}")
+def plot_separated_xs(x_cats, data_speed, data_score, data_sparsity, filename_base):
+    base_path, ext = os.path.splitext(filename_base)
+    if not ext:
+        ext = '.pdf'
 
+    # 完整的 X 轴索引
+    x_full = np.arange(len(x_cats))
+
+    # =======================================================
+    # 辅助函数：配置图例 (包含样式调整)
+    # =======================================================
+    def configure_legend(ax):
+        handles, labels = ax.get_legend_handles_labels()
+        n_items = len(labels)
+        if n_items == 0: return
+
+        # 逻辑：如果 >= 6 个，分两排
+        if n_items >= 6:
+            n_cols = (n_items + 1) // 2
+        else:
+            n_cols = n_items
+
+        ax.legend(handles, labels,
+                  loc='upper center',
+                  # 修改点：稍微往下移一点
+                  bbox_to_anchor=(0.5, -0.1),
+                  ncol=n_cols,
+                  frameon=False,
+                  # --- 新增：控制图例样式 ---
+                #   fontsize='small',          # 设置字体大小 (例如 9, 10, 或 'small')
+                  markerscale=0.8,      # 减小标记/线条的大小
+                #   handletextpad=0.2,    # 减小图例句柄和文本间的距离
+                  columnspacing=1.0,    # 减小列间距
+                  labelspacing=0.4      # 减小行间距
+                 )
+
+    # =======================================================
+    # 图 1：Score (Bar Chart)
+    # =======================================================
+    # 修改点：稍微增大画布尺寸
+    fig1, ax1 = plt.subplots(figsize=(7, 6))
+
+    valid_models = [m for m in style_map.keys() if m in data_score]
+    n_models = len(valid_models)
+    total_width = 0.85
+    bar_width = total_width / n_models if n_models > 0 else total_width
+
+    for i, label in enumerate(valid_models):
+        if label not in data_score: continue
+        values = data_score[label]
+        style = style_map[label]
+
+        n_points = len(values)
+        current_x = x_full[:n_points]
+        offset = (i - (n_models - 1) / 2) * bar_width
+
+        ax1.bar(current_x + offset, values, width=bar_width,
+                color=style['color'],
+                edgecolor='white', linewidth=0.5,
+                label=style.get('label', label),
+                alpha=0.9,
+                zorder=3)
+
+    ax1.set_ylabel('Performance', ) # 可以稍微增大轴标签字体
+    ax1.set_xlabel('Context Length', )
+    ax1.set_xticks(x_full)
+    ax1.set_xticklabels(x_cats, ) # 可以控制刻度字体
+    ax1.grid(axis='y', linestyle='--', alpha=0.3, zorder=0)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    
+    # 应用新的图例配置
+    configure_legend(ax1)
+
+    plt.tight_layout()
+    save_path1 = f"{base_path}1{ext}"
+    # bbox_inches='tight' 会确保包含画布外的图例
+    plt.savefig(save_path1, format='pdf', bbox_inches='tight')
+    plt.close(fig1)
+    print(f"Saved: {save_path1}")
+
+    # =======================================================
+    # 图 2：Speedup (Line Chart)
+    # =======================================================
+    # 修改点：稍微增大画布尺寸
+    fig2, ax2 = plt.subplots(figsize=(7, 6))
+
+    for label, values in data_speed.items():
+        if label not in style_map: continue
+        style = style_map[label]
+
+        n_points = len(values)
+        current_x = x_full[:n_points]
+
+        ax2.plot(current_x, values,
+                 marker=style['marker'], color=style['color'],
+                 linestyle=style['linestyle'], linewidth=style['linewidth'],
+                 label=style.get('label', label), zorder=style['zorder'])
+
+    ax2.axhline(y=1.0, color='#444444', linestyle=':', linewidth=2, zorder=0)
+    ax2.set_ylabel('Speedup', )
+    ax2.set_xlabel('Context Length', )
+    ax2.set_xticks(x_full)
+    ax2.set_xticklabels(x_cats, )
+    ax2.grid(axis='y', linestyle='--', alpha=0.3)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.set_ylim(top=2.5) 
+
+    ax2.text(4.5, 1.05, 'Baseline',
+             color="#000000",
+             ha='left', va='bottom', )
+
+    # 应用新的图例配置
+    configure_legend(ax2)
+
+    plt.tight_layout()
+    save_path2 = f"{base_path}2{ext}"
+    plt.savefig(save_path2, format='pdf', bbox_inches='tight')
+    plt.close(fig2)
+    print(f"Saved: {save_path2}")
+
+    # =======================================================
+    # 图 3：Sparsity (Line Chart)
+    # =======================================================
+    # 修改点：稍微增大画布尺寸
+    fig3, ax3 = plt.subplots(figsize=(7, 6))
+
+    for label, values in data_sparsity.items():
+        if label not in style_map: continue
+        style = style_map[label]
+
+        n_points = len(values)
+        current_x = x_full[:n_points]
+
+        ax3.plot(current_x, values,
+                 marker=style['marker'], color=style['color'],
+                 linestyle=style['linestyle'], linewidth=style['linewidth'],
+                 label=style.get('label', label),
+                 zorder=style['zorder'])
+
+    ax3.set_ylabel(r'$\Omega_{\mathrm{ESR}}$', )
+    ax3.set_xlabel('Context Length', )
+    ax3.set_xticks(x_full)
+    ax3.set_xticklabels(x_cats, )
+    ax3.grid(axis='y', linestyle='--', alpha=0.3)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    ax3.set_ylim(0, 1.1)
+    
+    # 应用新的图例配置
+    configure_legend(ax3)
+
+    plt.tight_layout()
+    save_path3 = f"{base_path}3{ext}"
+    plt.savefig(save_path3, format='pdf', bbox_inches='tight')
+    plt.close(fig3)
+    print(f"Saved: {save_path3}")
 # 调用
-base_file = '/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/side_by_side.pdf'
+# base_file = '/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/side_by_side_streaming.pdf'
+base_file = '/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/side_by_side_streaming.pdf'
 plot_separated(lengths, data_speedup, data_scores, data_sparsity, base_file)
-

@@ -50,7 +50,7 @@ def load_model(model_path, is_sparse):
     if is_sparse:
         # --- 自定义 Sparse 模型注册逻辑 ---
         if "PawLlama" in arch_name:
-            from sparseattn.efficiency.model.modeling_flash_llama import (
+            from sparseattn.efficiency.model.modeling_flash_llama_prulong import (
                 PawLlamaForCausalLM,
                 PawLlamaConfig,
             )
@@ -59,7 +59,7 @@ def load_model(model_path, is_sparse):
             model_cls = PawLlamaForCausalLM
         elif "PawQwen" in arch_name:
             # breakpoint()
-            from sparseattn.efficiency.model.modeling_flash_qwen import (
+            from sparseattn.efficiency.model.modeling_flash_qwen_streaming import (
                 PawQwen3ForCausalLM,
                 PawQwen3Config,
             )
@@ -91,14 +91,14 @@ def load_model(model_path, is_sparse):
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
             trust_remote_code=True,
         )
     else:
         model = model_cls.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
+            device_map="auto",
             trust_remote_code=True,
             config=config,
         )
@@ -204,10 +204,13 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     # ================= 配置区域 =================
-    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
+    sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.12steps300_full_streaming_64k_llama3-8b_end0.7_wfrozen"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
     # sparse_model_path = "/data2/hf_models/Qwen3-4B"
     # sparse_model_path = ""
-    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
+    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
+    # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
+
     base_data_dir = "/data2/public_data/sort_longbench/"
 
     num_samples = 5

@@ -44,7 +44,7 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from flash_attn import flash_attn_kvpacked_func, flash_attn_varlen_kvpacked_func
+from flash_attn import flash_attn_kvpacked_func, flash_attn_varlen_kvpacked_func, flash_attn_func
 from flash_attn.bert_padding import unpad_input, pad_input
 import math
 
@@ -1361,119 +1361,83 @@ class Qwen3Attention(nn.Module):
             (past_kv, past_len + q.size(1), z_kv_batch) if use_cache else None
         )
 
+        k = kv[:,:,0,:,:]
+        v = kv[:,:,1,:,:]
+
         if not has_layer_past:
-            is_vlen_input = (q.dim() == 3) and (unpadded_lengths is not None)
+            bsz, seqlen, _, _ = q.size()
+            if not torch.is_tensor(seqlen):
+                seqlen = torch.tensor(seqlen, dtype=torch.int32, device=q.device)
+                
+            cu_seqlens_q = torch.tensor([0, seqlen], dtype=torch.int32, device=q.device)
+            cu_seqlens_k = torch.tensor([0, seqlen], dtype=torch.int32, device=q.device)
+            p_dropout = 0.0
+            head_mask_type = torch.where(
+                z_kv_batch[0, :, 0] == 1,
+                torch.tensor(0, dtype=torch.int, device=z_kv_batch.device),
+                torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
+            )
 
-            if is_vlen_input:
-                k = k.repeat_interleave(self.num_key_value_groups, dim=1)
-                v = v.repeat_interleave(self.num_key_value_groups, dim=1)
-                q, k, v = (
-                    q.transpose(0, 1).contiguous(),
-                    k.transpose(0, 1).contiguous(),
-                    v.transpose(0, 1).contiguous(),
-                )
-            else:
-                k = k.repeat_interleave(self.num_key_value_groups, dim=2)
-                v = v.repeat_interleave(self.num_key_value_groups, dim=2)
-                q, k, v = (
-                    q.transpose(1, 2).contiguous(),
-                    k.transpose(1, 2).contiguous(),
-                    v.transpose(1, 2).contiguous(),
-                )
-
-            stride = self.xattn_params["stride"]
-            threshold = self.xattn_params["threshold"]
-            norm = self.xattn_params["norm"]
-
-            if unpadded_lengths is not None:
-                cu_seqlens, max_seqlen = unpadded_lengths
-                cw_attn_output = Xattention_prefill_dim3(
-                    q,
-                    k,
-                    v,
-                    stride,
-                    cu_seqlens,
-                    norm,
-                    threshold,
-                    use_triton=True,
-                )
-
-            else:
-                bsz, _, seqlen, _ = q.size()
-                if not torch.is_tensor(seqlen):
-                    seqlen = torch.tensor(seqlen, dtype=torch.int32, device=q.device)
-                max_seqlen = torch.max(seqlen).item()
-
-                cu_seqlens = torch.arange(
-                    0,
-                    (bsz + 1) * seqlen,
-                    step=seqlen,
-                    dtype=torch.int32,
-                    device=q.device,
-                )
-                unpadded_lengths = (cu_seqlens, max_seqlen)
-
-                cu_seqlens, max_seqlen = unpadded_lengths
-                if self.retrieval_mode == "full" and self.toggle_type == "xattn":
-                    head_mask_type = (1 - z_kv_batch[0, :, 0]).int()
-                elif self.retrieval_mode == "full" and self.toggle_type == "streaming":
-                    head_mask_type = torch.where(
-                        z_kv_batch[0, :, 0] == 1,
-                        torch.tensor(0, dtype=torch.int, device=z_kv_batch.device),
-                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
-                    )
-                elif self.retrieval_mode == "xattn" and self.toggle_type == "streaming":
-                    head_mask_type = torch.where(
-                        z_kv_batch[0, :, 0] == 1,
-                        torch.tensor(1, dtype=torch.int, device=z_kv_batch.device),
-                        torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
-                    )
-                else:
-                    raise SamplerConditionError(
-                        f"retrieval_mode: {self.retrieval_mode} and toggle_type: {self.toggle_type} is not supported"
-                    )
-
-                attn_output = Xattention_prefill_dim4(
-                    q,
-                    k,
-                    v,
-                    stride,
-                    cu_seqlens,
-                    norm,
-                    threshold,
-                    use_triton=True,
-                    head_mask_type=head_mask_type,
-                    sink_num=self.sink_blocks,
-                    local_num=self.local_blocks,
-                ).transpose(1, 2)  # B, T, H, D
+            streaming_info = torch.tensor([self.sink_blocks, self.local_blocks] * self.num_heads, device=q.device, dtype=torch.int32)
+            attn_output = block_streaming_attn_func(
+                q.squeeze(0).contiguous(),
+                k.squeeze(0).contiguous(),
+                v.squeeze(0).contiguous(),
+                cu_seqlens_q,
+                cu_seqlens_k,
+                head_mask_type,
+                streaming_info,
+                seqlen,
+                seqlen,
+                p_dropout,
+                deterministic=False,
+                softmax_scale=None,
+                is_causal=True,
+                return_attn_probs=False,
+            ).unsqueeze(0).contiguous()
         else:
-            if self.num_key_value_groups > 1:
-                kv = kv.repeat_interleave(self.num_key_value_groups, dim=-2)
-            if unpadded_lengths is not None:
-                # varlen, ignore padding tokens, efficient for large batch with many paddings
-                cu_seqlens, max_seqlen = unpadded_lengths
-
-                attn_output = flash_attn_varlen_kvpacked_func(
-                    q,
-                    kv,
-                    cu_seqlens,
-                    cu_seqlens,
-                    max_seqlen,
-                    max_seqlen,
-                    dropout_p=0.0,
-                    softmax_scale=1.0 / self.norm_factor,
-                    causal=True,
-                    return_attn_probs=False,
-                )
-            else:
-                attn_output = flash_attn_kvpacked_func(
-                    q,
-                    kv,
-                    dropout_p=0.0,
-                    softmax_scale=1.0 / self.norm_factor,
-                    causal=True,
-                    return_attn_probs=False,
-                )
+            # bsz, seqlen, _, _ = k.size()
+            # cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=q.device)
+            # cu_seqlens_k = torch.tensor([0, seqlen], dtype=torch.int32, device=q.device)
+            # max_seqlen_q_ = 1
+            # max_seqlen_k_ = seqlen
+            # p_dropout = 0.0
+            # head_mask_type = torch.where(
+            #     z_kv_batch[0, :, 0] == 1,
+            #     torch.tensor(0, dtype=torch.int, device=z_kv_batch.device),
+            #     torch.tensor(-1, dtype=torch.int, device=z_kv_batch.device),
+            # )
+            # streaming_info = torch.tensor([self.sink_blocks, self.local_blocks] * self.num_heads, device=q.device, dtype=torch.int32)
+            
+            # attn_output = block_streaming_attn_func(
+            #     q.squeeze(0).contiguous(),
+            #     k.squeeze(0).contiguous(),
+            #     v.squeeze(0).contiguous(),
+            #     cu_seqlens_q,
+            #     cu_seqlens_k,
+            #     head_mask_type,
+            #     streaming_info,
+            #     max_seqlen_q_,
+            #     max_seqlen_k_,
+            #     p_dropout,
+            #     deterministic=False,
+            #     softmax_scale=None,
+            #     is_causal=True,
+            #     return_attn_probs=False,
+            # ).unsqueeze(0).contiguous()
+            attn_output = flash_attn_func(
+                q,
+                k,
+                v,
+                dropout_p=0.0,
+                softmax_scale=None,
+                causal=False,
+                window_size=(-1, -1),  # -1 means infinite context window
+                softcap=0.0, # 0.0 means deactivated
+                alibi_slopes=None,
+                deterministic=False,
+                return_attn_probs=False,
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output.to(self.o_proj.weight.dtype))

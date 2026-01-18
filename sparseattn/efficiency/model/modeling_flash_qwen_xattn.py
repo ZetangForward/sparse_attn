@@ -1846,7 +1846,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
-        model_sparsity = (1 - (z_sum / self.total_num_heads)) * spa
+        # seqlen = input_ids.shape[-1]
+        # spa_streaming = max(0, (seqlen - 128 - 1024)) / seqlen 
+        # model_sparsity = (1 - (z_sum / self.total_num_heads)) * spa_streaming + (z_sum / self.total_num_heads) * spa
+        model_sparsity = (1 - (z_sum / self.total_num_heads)) *  spa
 
         if not return_dict:
             # return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, model_sparsity, target_sparsity, z_loss] if v is not None)

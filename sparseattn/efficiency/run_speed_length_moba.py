@@ -53,8 +53,8 @@ def load_model(model_path, is_sparse):
         else:
             is_moba = True
             from sparseattn.training.MoBA.moba import register_moba
-            # from sparseattn.efficiency.model.modeling_qwen3 import Qwen3ForCausalLM
-            from sparseattn.efficiency.model.modeling_llama import LlamaForCausalLM
+            from sparseattn.efficiency.model.modeling_qwen3 import Qwen3ForCausalLM
+            # from sparseattn.efficiency.model.modeling_llama import LlamaForCausalLM
 
             @dataclass
             class MoBAConfig:
@@ -66,7 +66,8 @@ def load_model(model_path, is_sparse):
             moba_topk = 8
             attn = "moba"
             register_moba(MoBAConfig(moba_chunk_size, moba_topk))
-            model_cls = LlamaForCausalLM
+            model_cls = Qwen3ForCausalLM
+            # model_cls = LlamaForCausalLM
     else:
         if "PawLlama" in arch_name:
             from sparseattn.training.eval.modeling_flash_llama import (
@@ -247,29 +248,31 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     FULL_MODEL_CACHE = {
-        8192:   (755.49, 49.41),   
-        16384:  (1621.70, 72.74),
-        32768:  (3720.74, 73.55),
-        65536:  (9969.15, 112.16),
-        131072: (30984.94, 201.58),
-        262144: (107457.45, 398.02),
+        8192:   (853.27 , 62.37),   
+        16384:  (1743.36, 	70.45 ),
+        32768:  (4068.16, 	92.05 ),
+        65536:  (10977.39, 	135.04 ),
+        131072: (34370.44, 	225.32 ),
+        # 262144: (120104.85, 	429.09),
     }
     
     # ================= 配置区域 =================
-    sparse_model_path = "/data2/hf_models/Meta-Llama-3.1-8B-Instruct"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.12steps300_full_streaming_64k_qwen3-8b_end0.7_wfrozen"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.12steps300_full_streaming_64k_llama3-8b_end0.7_wfrozen"
     # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
-    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    sparse_model_path = "/data2/hf_models/Qwen3-8B"
     # sparse_model_path = ""
-    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
+    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.2steps300_full_streaming_64k_qwen3-8b_wfrozen"
+    # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
     # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
 
-    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_multikey_2_262144.jsonl"
+    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/fwe_262144.jsonl"
 
     num_samples = 3  # 每个长度测试的样本数
     gen_len = 1  # 生成长度
 
-    # target_lengths_k = [8, 16, 32, 64, 128]
-    target_lengths_k = [256]
+    target_lengths_k = [8, 16, 32, 64, 128]
+    # target_lengths_k = [256]
     target_lengths = [k * 1024 for k in target_lengths_k]
 
     # 1. 准备数据

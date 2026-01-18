@@ -56,6 +56,7 @@ def load_model(model_path, is_sparse):
             is_NSA = True
             from transformers import AutoConfig
             from sparseattn.efficiency.model.modeling_llama_nsa import LlamaForCausalLM 
+            from sparseattn.efficiency.model.modeling_qwen_nsa import Qwen3ForCausalLM 
             from sparseattn.training.block_sparse_attention_triton.native_sparse_attention.module.llama_nsa import LlamaNSA_prefill
             from sparseattn.training.block_sparse_attention_triton.native_sparse_attention.module.qwen3_nsa import Qwen3NSA_prefill
 
@@ -76,9 +77,9 @@ def load_model(model_path, is_sparse):
             config.window_size = 512
             # 2. 【关键步骤】执行 Monkey Patch 替换
             #    把 modeling_qwen3 模块里的 Qwen3Attention 强行变成你的 Qwen3NSA
-            print("正在使用LlamaNSA_prefill")
+            print("正在使用NSA_prefill")
 
-            model_cls = LlamaForCausalLM
+            model_cls = Qwen3ForCausalLM
             
     else:
         if "PawLlama" in arch_name:
@@ -278,23 +279,25 @@ def run_benchmark_suite(
 # -----------------------------------------------------------------------------
 def main():
     FULL_MODEL_CACHE = {
-        8192:   (755.49, 49.41),   
-        16384:  (1621.70, 72.74),
-        32768:  (3720.74, 73.55),
-        65536:  (9969.15, 112.16),
-        131072: (30984.94, 201.58),
-        262144: (107457.45, 398.02),
+        # 8192:   (853.27 , 62.37),   
+        # 16384:  (1743.36, 	70.45 ),
+        # 32768:  (4068.16, 	92.05 ),
+        # 65536:  (10977.39, 	135.04 ),
+        # 131072: (34370.44, 	225.32 ),
+        # 262144: (120104.85, 	429.09),
     }
     
     # ================= 配置区域 =================
-    sparse_model_path = "/data2/hf_models/Meta-Llama-3.1-8B-Instruct"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.12steps300_full_streaming_64k_qwen3-8b_end0.7_wfrozen"
+    # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.12steps300_full_streaming_64k_llama3-8b_end0.7_wfrozen"
     # sparse_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.5steps300_full_streaming_64k_qwen3-4b_wfrozen"
-    # sparse_model_path = "/data2/hf_models/Qwen3-4B"
+    sparse_model_path = "/data2/hf_models/Qwen3-8B"
     # sparse_model_path = ""
-    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
+    full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.2steps300_full_streaming_64k_qwen3-8b_wfrozen"
+    # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.3steps300_full_streaming_64k_llama3.1-8b_wfrozen"
     # full_model_path = "/data1/lcm_lab/qqt/SparseAttn/sparseattn/checkpoints/1.1router4steps266_full_streaming_64k_qwen3-4b_wfrozen/checkpoint-200"
 
-    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/niah_multikey_2_262144.jsonl"
+    data_path = "/data1/lcm_lab/sora/loomeval/benchmarks/General/RULER/data/fwe_262144.jsonl"
 
     num_samples = 3  # 每个长度测试的样本数
     gen_len = 1  # 生成长度

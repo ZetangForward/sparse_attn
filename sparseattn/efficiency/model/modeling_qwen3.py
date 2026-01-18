@@ -975,6 +975,12 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 vocab_size=self.config.vocab_size,
                 **kwargs,
             )
+        
+        if input_ids.shape[-1] > 1 and use_cache:
+            seqlen = input_ids.shape[-1]
+            spa = max(0, (seqlen - 8 * 1024)) / seqlen 
+            self.prefill_sparsity = spa
+            # breakpoint()
 
         return CausalLMOutputWithPast(
             loss=loss,

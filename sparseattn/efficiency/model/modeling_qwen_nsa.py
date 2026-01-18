@@ -300,7 +300,7 @@ class Qwen3NSA_prefill(nn.Module):
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
         
         #=======================================
-
+        spa = 0.0
         batch_size, seqlen_q, _ = hidden_states.shape
         #好像就是在batch==1的时候attention_mask才为None
         if attention_mask is None:
@@ -398,27 +398,58 @@ class Qwen3NSA_prefill(nn.Module):
             )#[total_len, num_q_heads, head_dim]
             # 1. 获取每个 Batch 中最后一个 Query Token 的索引
             # cu_seqlens_q: [0, s1, s1+s2, ...] -> last_indices: [s1-1, s1+s2-1, ...]
+            # 1. 获取每个 Batch 中最后一个 Query Token 的索引
+            # cu_seqlens_q: [0, s1, s1+s2, ...] -> last_indices: [s1-1, s1+s2-1, ...]
             last_token_indices = cu_seqlens_q[1:] - 1
             
             # 2. 提取这些 Token 对应的检索结果
-            # selected_blocks shape: [num_heads, batch_size, num_blocks]
+            # selected_blocks shape: [batch_size, num_heads, num_blocks]
             selected_blocks = topk_idx[last_token_indices, :, :]
             
-            # 3. 统计有效 Block 数量 (通常无效 Block 会被填充为 -1)
-            # 如果你的实现不使用 -1 padding 而是固定大小，可以直接用 selected_blocks.shape[-1]
-            valid_block_counts = (selected_blocks > -1).sum(dim=-1).float()  # [num_heads, batch_size]
+            # 3. 准备计算所需的长度信息
+            # 获取当前 Batch 中每个序列的真实长度 (K的长度)
+            seq_lens_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).view(-1, 1, 1) # [batch_size, 1, 1]
             
-            # 4. 对所有 Head 取平均，得到平均每个 Head 关注的 Block 数
-            avg_blocks_per_head = valid_block_counts.mean(dim=0)  # [batch_size]
+            # 4. 定义 Sliding Window 的覆盖范围 [win_start, win_end)
+            # 注意处理序列长度小于 window_size 的情况
+            win_start = (seq_lens_k - self.window_size).clamp(min=0)
+            win_end = seq_lens_k
             
-            # 5. 转换为 Token 数 (attend_tokens)
-            attend_tokens = avg_blocks_per_head * self.block_size + self.window_size
+            # 5. 定义 Sparse Blocks 的覆盖范围 [block_start, block_end)
+            # selected_blocks 中可能包含 -1 (padding)，需要 mask 掉
+            valid_mask = (selected_blocks > -1) # [batch, heads, topk]
             
-            # 6. 获取总 Token 数 (all_tokens)，即当前的 K 序列长度
-            all_tokens = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).float().to(attend_tokens.device)
+            # 将 block 索引转换为 token 索引范围
+            # 这里的 clamp 是为了防止 block 索引越界 (虽然理论上不应该)
+            block_start = (selected_blocks * self.block_size).clamp(min=0)
+            block_end = block_start + self.block_size
             
-            # 7. 计算稀疏度: 1 - (attend / all)
-            spa = 1.0 - (attend_tokens / (all_tokens)).float()
+            # 6. 计算 Block 与 Window 的重叠长度
+            # 重叠区间 = [max(b_start, w_start), min(b_end, w_end)]
+            inter_start = torch.max(block_start, win_start)
+            inter_end = torch.min(block_end, win_end)
+            intersection = (inter_end - inter_start).clamp(min=0) # [batch, heads, topk]
+            
+            # 7. 计算每个 Block 在 Window *之外* 贡献的有效 Token 数
+            # 贡献 = (Block大小 - 重叠部分) * 是否有效Block
+            unique_block_tokens = (self.block_size - intersection) * valid_mask.float()
+            
+            # 8. 汇总计算总 Attend Tokens
+            # 逻辑: 基础 Window Token 数 + 所有 Block 额外贡献的 Token 数
+            
+            # 8.1 基础 Window Token 数 (每个序列可能不同，取决于 seq_len 是否够长)
+            actual_window_tokens = torch.min(seq_lens_k.float(), torch.tensor(self.window_size, device=seq_lens_k.device)).squeeze() # [batch]
+
+            # 8.2 Block 额外贡献 (先对 topk 求和，再对 heads 求平均)
+            # unique_block_tokens: [batch, heads, topk] -> sum(dim=2) -> [batch, heads]
+            avg_extra_tokens_per_head = unique_block_tokens.sum(dim=2).mean(dim=1) # [batch]
+            
+            # 8.3 得到最终的 attend_tokens
+            attend_tokens = actual_window_tokens + avg_extra_tokens_per_head
+            
+            # 9. 计算稀疏度
+            all_tokens = seq_lens_k.squeeze().float()
+            spa = 1.0 - (attend_tokens / all_tokens)
             
             
             unpadded_hidden, _, _, _ = unpad_input(hidden_states, attention_mask)
@@ -854,7 +885,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     position_embeddings=position_embeddings,
                     **flash_attn_kwargs,
                 )
-            self.spa += spa
             hidden_states = layer_outputs[0]
 
             if output_attentions:
@@ -872,7 +902,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-            model_sparsity=self.spa/self.config.num_hidden_layers,
+            model_sparsity=spa,
         )
 
     def _update_causal_mask(
@@ -1093,6 +1123,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.prefill_sparsity = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1191,6 +1222,10 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             **kwargs,
         )
+        
+        if input_ids.shape[1] > 1 and use_cache:
+            self.prefill_sparsity = outputs.model_sparsity.item()
+
 
         hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
