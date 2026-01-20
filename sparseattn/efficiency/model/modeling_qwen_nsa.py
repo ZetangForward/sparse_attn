@@ -396,58 +396,22 @@ class Qwen3NSA_prefill(nn.Module):
                 window_size=(self.window_size, -1),
                 softmax_scale=self.scaling
             )#[total_len, num_q_heads, head_dim]
-            # 1. 获取每个 Batch 中最后一个 Query Token 的索引
-            # cu_seqlens_q: [0, s1, s1+s2, ...] -> last_indices: [s1-1, s1+s2-1, ...]
-            # 1. 获取每个 Batch 中最后一个 Query Token 的索引
-            # cu_seqlens_q: [0, s1, s1+s2, ...] -> last_indices: [s1-1, s1+s2-1, ...]
             last_token_indices = cu_seqlens_q[1:] - 1
-            
-            # 2. 提取这些 Token 对应的检索结果
-            # selected_blocks shape: [batch_size, num_heads, num_blocks]
             selected_blocks = topk_idx[last_token_indices, :, :]
-            
-            # 3. 准备计算所需的长度信息
-            # 获取当前 Batch 中每个序列的真实长度 (K的长度)
             seq_lens_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).view(-1, 1, 1) # [batch_size, 1, 1]
-            
-            # 4. 定义 Sliding Window 的覆盖范围 [win_start, win_end)
-            # 注意处理序列长度小于 window_size 的情况
             win_start = (seq_lens_k - self.window_size).clamp(min=0)
             win_end = seq_lens_k
-            
-            # 5. 定义 Sparse Blocks 的覆盖范围 [block_start, block_end)
-            # selected_blocks 中可能包含 -1 (padding)，需要 mask 掉
             valid_mask = (selected_blocks > -1) # [batch, heads, topk]
-            
-            # 将 block 索引转换为 token 索引范围
-            # 这里的 clamp 是为了防止 block 索引越界 (虽然理论上不应该)
             block_start = (selected_blocks * self.block_size).clamp(min=0)
             block_end = block_start + self.block_size
-            
-            # 6. 计算 Block 与 Window 的重叠长度
-            # 重叠区间 = [max(b_start, w_start), min(b_end, w_end)]
             inter_start = torch.max(block_start, win_start)
             inter_end = torch.min(block_end, win_end)
             intersection = (inter_end - inter_start).clamp(min=0) # [batch, heads, topk]
-            
-            # 7. 计算每个 Block 在 Window *之外* 贡献的有效 Token 数
-            # 贡献 = (Block大小 - 重叠部分) * 是否有效Block
             unique_block_tokens = (self.block_size - intersection) * valid_mask.float()
-            
-            # 8. 汇总计算总 Attend Tokens
-            # 逻辑: 基础 Window Token 数 + 所有 Block 额外贡献的 Token 数
-            
-            # 8.1 基础 Window Token 数 (每个序列可能不同，取决于 seq_len 是否够长)
             actual_window_tokens = torch.min(seq_lens_k.float(), torch.tensor(self.window_size, device=seq_lens_k.device)).squeeze() # [batch]
-
-            # 8.2 Block 额外贡献 (先对 topk 求和，再对 heads 求平均)
-            # unique_block_tokens: [batch, heads, topk] -> sum(dim=2) -> [batch, heads]
             avg_extra_tokens_per_head = unique_block_tokens.sum(dim=2).mean(dim=1) # [batch]
-            
-            # 8.3 得到最终的 attend_tokens
             attend_tokens = actual_window_tokens + avg_extra_tokens_per_head
             
-            # 9. 计算稀疏度
             all_tokens = seq_lens_k.squeeze().float()
             spa = 1.0 - (attend_tokens / all_tokens)
             
@@ -1298,7 +1262,7 @@ if __name__ == "__main__":
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    with torch.no_grad():  # 推理时通常不需要梯度
+    with torch.no_grad():  
         outputs = model(**inputs)
     breakpoint()
     

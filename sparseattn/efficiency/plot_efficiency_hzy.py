@@ -16,7 +16,7 @@ plt.rcParams.update({
         'axes.titlesize': 16, # 图表标题
         "xtick.labelsize": 14,
         "ytick.labelsize": 14,
-        'legend.fontsize': 14, # 图例
+        'legend.fontsize': 12, # 图例
 
         # 布局与线条
         'axes.linewidth': 0.8, # 边框线宽
@@ -42,12 +42,12 @@ category_labels = [
 lengths = ['8K', '16K', '32K', '64K', '128K', '256K']
 
 data_speedup = {
-    # 'Xattn + Streaming':        [1.08, 1.22, 1.35, 1.70, 2.29, 3.28],
-    'Full + Streaming':         [1.05, 1.17, 1.34, 1.65, 2.10, 2.54],
-    # 'Full + Xattn':             [1.03, 1.09, 1.07, 1.11, 1.25, 1.51],
-    'PruLong':                  [1.12, 1.17, 1.31, 1.58, 1.96, 2.38],
-    'DuoAttention':             [1.12, 1.17, 1.31, 1.58, 1.96, 2.38],
-    # 'Xattention':               [1.04, 1.10, 1.10, 1.17, 1.39, 1.85],
+    'Xattn + Streaming':        [1.08, 1.22, 1.35, 1.70, 2.29, 3.28],
+    # 'Full + Streaming':         [1.05, 1.17, 1.34, 1.65, 2.10, 2.54],
+    'Full + Xattn':             [1.03, 1.09, 1.07, 1.11, 1.25, 1.51],
+    # 'PruLong':                  [1.12, 1.17, 1.31, 1.58, 1.96, 2.38],
+    # 'DuoAttention':             [1.12, 1.17, 1.31, 1.58, 1.96, 2.38],
+    'Xattention':               [1.04, 1.10, 1.10, 1.17, 1.39, 1.85],
     'MoBA':                     [0.71, 0.73, 0.81, 1.02, 1.24],
     'InfLLM-V2':                [1.00, 0.38, 0.42, 0.54, 0.81],
     'NSA':                      [0.30, 0.27, 0.29, 0.37, 0.56, 0.83],
@@ -55,12 +55,12 @@ data_speedup = {
 }
 
 data_scores = {
-    # 'Xattn + Streaming':        [89.07, 82.99, 77.74, 58.56, 64.48, 47.68],
-    'Full + Streaming':         [90.63, 84.33, 81.39, 61.87, 66.54, 53.39],      # 性能保持较好
-    # 'Full + Xattn':             [92.82, 92, 87.8, 68.23, 78.87, 68.51],
-    'PruLong':                  [83.54, 69.35, 56.83, 30.88, 33.74, 21.64],      # 性能严重下降示例
-    'DuoAttention':                  [87.2, 77.85, 66.99, 40.13, 57.45, 42.94],      # 性能严重下降示例
-    # 'Xattention':               [92.96, 91.23, 89.08, 73.91, 77.69, 35.82],
+    'Xattn + Streaming':        [89.07, 82.99, 77.74, 58.56, 64.48, 47.68],
+    # 'Full + Streaming':         [90.63, 84.33, 81.39, 61.87, 66.54, 53.39],      # 性能保持较好
+    'Full + Xattn':             [92.82, 92, 87.8, 68.23, 78.87, 68.51],
+    # 'PruLong':                  [83.54, 69.35, 56.83, 30.88, 33.74, 21.64],      # 性能严重下降示例
+    # 'DuoAttention':                  [87.2, 77.85, 66.99, 40.13, 57.45, 42.94],      # 性能严重下降示例
+    'Xattention':               [92.96, 91.23, 89.08, 73.91, 77.69, 35.82],
     'MoBA':                     [89.05, 67.14, 30.13, 6.13, 1.15, 0],
     'InfLLM-V2':                [89.3, 80.93, 60.98, 35.9, 32.29, 47.27],      
     'NSA':                      [73.27, 50.68, 21.39, 22.52, 15.3, 11.42],
@@ -68,12 +68,12 @@ data_scores = {
 }
 
 data_sparsity = {
-    # 'Xattn + Streaming':        [0.86, 0.93, 0.96, 0.98, 0.99, 0.995],
-    'Full + Streaming':         [0.64, 0.69, 0.72, 0.74, 0.74, 0.73],      
-    # 'Full + Xattn':             [0.34, 0.38, 0.42, 0.42, 0.55, 0.65],
-    'PruLong':                  [0.60, 0.65, 0.67, 0.69, 0.69, 0.70],      
-    'DuoAttention':                  [0.60, 0.65, 0.67, 0.69, 0.69, 0.70],      
-    # 'Xattention':               [0.44, 0.50, 0.55, 0.54, 0.73, 0.86],
+    'Xattn + Streaming':        [0.86, 0.93, 0.96, 0.98, 0.99, 0.995],
+    # 'Full + Streaming':         [0.64, 0.69, 0.72, 0.74, 0.74, 0.73],      
+    'Full + Xattn':             [0.34, 0.38, 0.42, 0.42, 0.55, 0.65],
+    # 'PruLong':                  [0.60, 0.65, 0.67, 0.69, 0.69, 0.70],      
+    # 'DuoAttention':                  [0.60, 0.65, 0.67, 0.69, 0.69, 0.70],      
+    'Xattention':               [0.44, 0.50, 0.55, 0.54, 0.73, 0.86],
     'MoBA':                     [0.00, 0.50, 0.75, 0.88, 0.94],
     'InfLLM-V2':                [0.00, 0.63, 0.81, 0.91, 0.95],      
     'NSA':                      [0.00, 0.47, 0.74, 0.87, 0.93, 0.97],
@@ -90,8 +90,8 @@ style_map = {
     'PruLong':          {'color': 'dodgerblue',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 7,  'label': 'PruLong'},
     'DuoAttention':     {'color': 'lightskyblue',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 6,  'label': 'DuoAttention'},
     'MoBA':             {'color': 'tab:green', 'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 5,  'label': 'MoBA'},
-    # 'InfLLM-V2':        {'color': 'tab:brown',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 4,  'label': 'InfLLM-V2'},
-    'InfLLM-V2':        {'color': 'tab:purple',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 4,  'label': 'InfLLM-V2'},
+    'InfLLM-V2':        {'color': 'tab:brown',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 4,  'label': 'InfLLM-V2'},
+    # 'InfLLM-V2':        {'color': 'tab:purple',  'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 4,  'label': 'InfLLM-V2'},
     'NSA':              {'color': 'tab:gray', 'marker': 'o', 'linestyle': '--', 'linewidth': 2, 'zorder': 3, 'label': 'NSA'}
 }
 
@@ -567,7 +567,7 @@ def plot_separated(x_cats, data_speed, data_score, data_sparsity, filename_base)
     ax2.grid(axis='y', linestyle='--', alpha=0.3)
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
-    ax2.set_ylim(top=2.5) 
+    ax2.set_ylim(top=3.5) 
     ax2.legend(loc='upper left', frameon=False)
 
     ax2.text(4.5, 1.05, 'Baseline',
@@ -776,5 +776,5 @@ def plot_separated_xs(x_cats, data_speed, data_score, data_sparsity, filename_ba
     print(f"Saved: {save_path3}")
 # 调用
 # base_file = '/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/side_by_side_streaming.pdf'
-base_file = '/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/side_by_side_streaming.pdf'
+base_file = '/data1/lcm_lab/qqt/SparseAttn/sparseattn/efficiency/results/side_by_side_xs.pdf'
 plot_separated(lengths, data_speedup, data_scores, data_sparsity, base_file)
